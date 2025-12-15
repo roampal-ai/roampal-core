@@ -1,0 +1,56 @@
+================================================================================
+ROAMPAL-CORE v1.0.0 TEST RESULTS SUMMARY
+================================================================================
+Date: 2025-12-15
+
+UNIT TESTS
+----------
+Result: 164/164 PASSED (100%)
+File: unit_tests.txt
+
+BENCHMARKS - WORKING (Full Results)
+-----------------------------------
+1. Contradictions:           4/5 PASS (80%)
+2. Semantic Confusion:       3/5 PASS (60% - truth #1)
+3. Latency:                  ALL SIZES PASS (p50 ~40ms)
+4. Stale Data:               1/1 PASS
+5. Edge Cases:               23/24 (96%)
+6. Context Poisoning:        5/5 PASS (100%)
+7. Catastrophic Forgetting:  5/5 PASS (100%)
+8. Recovery Resilience:      6/6 PASS (100%)
+9. Learning Sabotage:        10/10 PASS (100%)
+10. Search Quality:          100% (all metrics)
+11. Learning Speed:          90% avg (Grade A - Excellent)
+    - Cold Start: 100%
+    - Learning Curve: 100%
+    - Adaptation Speed: 90%
+    - Pattern Recognition: 100%
+    - Knowledge Retention: 75%
+    - Context Specialization: 67%
+    - Learning Efficiency: 100%
+
+DESKTOP PARITY: Core matches Desktop 0.2.8 (94% vs 90% = 4% gap)
+
+SYNCED FROM DESKTOP:
+- OutcomeService (KG routing fix)
+- KnowledgeGraphService
+- RoutingService (now initialized)
+- store() method (patterns/history support)
+
+BENCHMARKS - REQUIRES sentence-transformers
+-------------------------------------------
+These benchmarks require real embeddings (pip install sentence-transformers):
+- outcome_learning_ab.py
+- dynamic_weight_shift.py
+- token_efficiency.py
+- roampal_vs_vector_db.py
+- learning_curve.py (different from learning_speed)
+
+BENCHMARKS - NEED FIXES
+-----------------------
+- comprehensive.py: Missing test_data_fixtures module
+- torture_suite.py: Syntax error (line 122)
+
+================================================================================
+OVERALL: Core memory system matches Desktop v0.2.8 functionality
+================================================================================

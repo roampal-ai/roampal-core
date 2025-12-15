@@ -1,0 +1,113 @@
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Number of requested results 3 is greater than number of elements in index 2, updating n_results = 2
+C:\roampal-core\roampal\backend\modules\memory\chromadb_adapter.py:623: RuntimeWarning: coroutine 'ChromaDBAdapter.cleanup' was never awaited
+  pass  # Ignore errors in destructor
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Number of requested results 10 is greater than number of elements in index 6, updating n_results = 6
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Number of requested results 5 is greater than number of elements in index 2, updating n_results = 2
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Number of requested results 5 is greater than number of elements in index 2, updating n_results = 2
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Number of requested results 5 is greater than number of elements in index 2, updating n_results = 2
+
+================================================================================
+MEMORY CONTRADICTION TEST
+================================================================================
+
+This tests whether the system correctly handles conflicting facts
+and prioritizes the most reliable information.
+Each test uses an ISOLATED memory instance.
+
+--------------------------------------------------------------------------------
+TEST 1: Direct Contradiction
+--------------------------------------------------------------------------------
+Scenario: Two memories say different things about same fact
+
+Low quality says: blue (q=0.12)
+High quality says: green (q=0.81)
+
+Top result: User's favorite color is definitely green, they mentioned it...
+Correct answer (green) ranked #1: YES
+
+--------------------------------------------------------------------------------
+TEST 2: Many Wrong vs One Right (5:1 noise)
+--------------------------------------------------------------------------------
+Scenario: 5 low-quality wrong answers, 1 high-quality right answer
+
+5 wrong answers (q=0.09 each): teacher, nurse, lawyer, construction, chef
+1 right answer (q=0.90): software engineer
+
+[DEBUG] Full ranking:
+  1. score=0.526 q=0.90 emb_sim=0.096 | User is a software engineer at a tech startup...
+  2. score=0.113 q=0.09 emb_sim=0.097 | User works in construction....
+  3. score=0.111 q=0.09 emb_sim=0.095 | User's job is being a nurse....
+  4. score=0.107 q=0.09 emb_sim=0.092 | User works as a teacher....
+  5. score=0.099 q=0.09 emb_sim=0.085 | User is a chef by profession....
+  6. score=0.087 q=0.09 emb_sim=0.075 | User is employed as a lawyer....
+
+Correct answer ranked #1: YES
+
+--------------------------------------------------------------------------------
+TEST 3: Temporal Update
+--------------------------------------------------------------------------------
+Scenario: Old fact vs updated fact (user moved)
+
+Old location (q=0.25): Boston
+Current location (q=0.81): Seattle
+
+[DEBUG] Full ranking:
+  1. score=0.364 q=0.81 | User recently relocated to Seattle for a new job o...
+  2. score=0.147 q=0.25 | User lives in Boston....
+
+Current location ranked #1: YES
+
+--------------------------------------------------------------------------------
+TEST 4: Confidence Conflict
+--------------------------------------------------------------------------------
+Scenario: Uncertain guess vs confident statement
+
+Uncertain (q=0.14): might be vegetarian
+Confident (q=0.76): loves steak
+
+[DEBUG] Full ranking:
+  1. score=0.379 q=0.14 | User might be vegetarian, not sure though....
+  2. score=0.320 q=0.76 | User confirmed they eat meat and especially love s...
+
+Confident answer ranked #1: NO
+
+--------------------------------------------------------------------------------
+TEST 5: Partial/Implicit Contradiction
+--------------------------------------------------------------------------------
+Scenario: Statements that indirectly conflict
+
+Contradicts (q=0.16): hates caffeine
+Direct (q=0.81): loves coffee
+
+[DEBUG] Full ranking:
+  1. score=0.550 q=0.81 | User drinks 3 cups of coffee every morning and lov...
+  2. score=0.098 q=0.16 | User hates anything with caffeine....
+
+Coffee-lover answer ranked #1: YES
+
+================================================================================
+FINAL RESULTS
+================================================================================
+  [PASS] Direct contradiction
+  [PASS] 5:1 wrong vs right
+  [PASS] Temporal update
+  [FAIL] Confidence conflict
+  [PASS] Implicit contradiction
+
+Passed: 4/5
+
+================================================================================
+PASS - System correctly prioritizes high-quality information
+       4/5 contradiction scenarios handled correctly
+================================================================================

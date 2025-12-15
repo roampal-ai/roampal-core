@@ -1,0 +1,330 @@
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+Document working_339ecbe9 not found
+C:\roampal-core\roampal\backend\modules\memory\chromadb_adapter.py:623: RuntimeWarning: coroutine 'ChromaDBAdapter.cleanup' was never awaited
+  pass  # Ignore errors in destructor
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_303d165f not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Document working_c37c9962 not found
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Document working_900d818f not found
+Document working_900d818f not found
+Document working_900d818f not found
+Document working_e0c0808d not found
+Document working_e0c0808d not found
+Document working_e0c0808d not found
+Document working_e0c0808d not found
+Document working_e0c0808d not found
+Document working_e0c0808d not found
+Document working_e0c0808d not found
+Document working_e0c0808d not found
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Document working_e96b9243 not found
+Document working_6c72a827 not found
+Document working_e96b9243 not found
+Document working_6c72a827 not found
+Document working_e96b9243 not found
+Document working_6c72a827 not found
+Document working_e96b9243 not found
+Document working_6c72a827 not found
+Document working_e96b9243 not found
+Document working_6c72a827 not found
+Document working_e96b9243 not found
+Document working_6c72a827 not found
+Document working_e96b9243 not found
+Document working_6c72a827 not found
+Document working_e96b9243 not found
+Document working_6c72a827 not found
+Document working_e96b9243 not found
+Error in working memory cleanup: ChromaDB collection not initialized
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Number of requested results 5 is greater than number of elements in index 2, updating n_results = 2
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Document working_66182be8 not found
+Document working_66182be8 not found
+Document working_66182be8 not found
+Document working_66182be8 not found
+Document working_66182be8 not found
+Document working_66182be8 not found
+Document working_66182be8 not found
+Document working_66182be8 not found
+Document working_d4e92e38 not found
+Document working_d4e92e38 not found
+Document working_d4e92e38 not found
+Document working_d4e92e38 not found
+Document working_d4e92e38 not found
+Document working_d4e92e38 not found
+Document working_d4e92e38 not found
+Document working_d4e92e38 not found
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Cannot score memory_bank - persistent user facts (doc_id: memory_bank_5b707c03)
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Document working_f9368eb4 not found
+Document working_f9368eb4 not found
+Document working_f9368eb4 not found
+Document working_f9368eb4 not found
+Document working_f9368eb4 not found
+Document working_f9368eb4 not found
+Document working_f9368eb4 not found
+Document working_f9368eb4 not found
+Error in working memory cleanup: ChromaDB collection not initialized
+Document nonexistent_doc_12345 not found
+Document  not found
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Document book_07808af6_chunk_0 not found
+
+================================================================================
+LLM LEARNING SABOTAGE TEST
+================================================================================
+
+This tests whether the learning system can be manipulated or corrupted.
+Each test uses an ISOLATED memory instance.
+
+--------------------------------------------------------------------------------
+TEST 1: Outcome Flooding Attack
+--------------------------------------------------------------------------------
+Scenario: Attacker spams 1000 'worked' outcomes to inflate a bad memory
+  [SETUP] Created bad advice memory with score=0.3
+  [BEFORE] Score: 0.30
+  [ATTACK] Flooded 50 'worked' outcomes
+  [AFTER] Document was removed/promoted during flood (expected behavior)
+  [CHECK] Score capped at 1.0: YES
+
+Outcome flooding mitigated: YES
+
+--------------------------------------------------------------------------------
+TEST 2: Score Boundary Enforcement
+--------------------------------------------------------------------------------
+Scenario: Try to push scores outside [0.1, 1.0] bounds
+  [UPPER] Document promoted (high score triggered promotion)
+  [UPPER] Score <= 1.0: YES
+  [LOWER] Document deleted (too many failures)
+  [LOWER] Score >= 0.1: YES
+
+Score boundaries enforced: YES
+
+--------------------------------------------------------------------------------
+TEST 3: KG Routing Poisoning
+--------------------------------------------------------------------------------
+Scenario: Try to corrupt KG by associating wrong collections with queries
+  [GOOD] Established: 'python coding' -> patterns (5 worked)
+  [POISON] Attempted: 'python coding' -> history (10 worked spam)
+  [RESULT] Routed to: ['working', 'patterns', 'history', 'books', 'memory_bank']
+  [CHECK] Patterns still routed: YES
+
+KG routing poisoning mitigated: YES
+
+--------------------------------------------------------------------------------
+TEST 4: Feedback Inversion Detection
+--------------------------------------------------------------------------------
+Scenario: Attacker marks failures as 'worked' and successes as 'failed'
+  [SETUP] Created good advice (git commit) and bad advice (force push)
+  [ATTACK] Inverted 10 outcomes each
+  [RESULT] Good advice score: 0.10
+  [RESULT] Bad advice score: 1.00
+
+Feedback inversion handled (scores valid): YES
+  Note: Cannot detect intent - mitigation requires external validation
+
+--------------------------------------------------------------------------------
+TEST 5: Action-Effectiveness KG Manipulation
+--------------------------------------------------------------------------------
+Scenario: Try to poison action success rates by context
+  [GOOD] Established: coding|search_memory|patterns -> 100% (5 worked)
+  [POISON] Injected 20 artificial failures
+  [RESULT] No routing stats found (KG may not track this granularity)
+  [INFO] Routing patterns exist: False
+
+Action-Effectiveness manipulation tracked: YES
+
+--------------------------------------------------------------------------------
+TEST 6: Deduplication Replacement Attack
+--------------------------------------------------------------------------------
+Scenario: Try to replace high-quality memory with low-quality duplicate
+  [GOOD] Stored high-quality fact (q=0.93)
+  [ATTACK] Stored low-quality duplicate (q=0.06)
+
+  [RESULT] Top result: User's password manager is 1Password (verified, critical sec...
+  [CHECK] Original high-quality version ranked #1: YES
+
+Deduplication replacement attack blocked: YES
+
+--------------------------------------------------------------------------------
+TEST 7: Rapid Outcome Rate Limiting
+--------------------------------------------------------------------------------
+Scenario: Rapid-fire outcomes should have less impact than spaced ones
+  [SETUP] Created two memories with score=0.5
+  [RAPID] Score after 10 instant outcomes: 1.00
+  [SPACED] Score after 10 spaced outcomes: 1.00
+
+Rapid outcome handling: YES
+
+--------------------------------------------------------------------------------
+TEST 8: Memory Bank Score Immutability
+--------------------------------------------------------------------------------
+Scenario: record_outcome should NOT change memory_bank scores
+  [BEFORE] Quality: 0.99 (imp=1.0, conf=0.99)
+  [ATTACK] Attempted 20 'failed' outcomes
+  [AFTER] Quality: 0.99 (imp=1.0, conf=0.99)
+
+Memory bank immutable to outcomes: YES
+
+--------------------------------------------------------------------------------
+TEST 9: Cross-Collection Contamination
+--------------------------------------------------------------------------------
+Scenario: Recording outcome for doc A shouldn't affect doc B
+  [SETUP] Created docs in working and history, both score=0.5
+  [ACTION] Recorded 10 'worked' for working doc only
+  [RESULT] Working doc score: 1.00
+  [RESULT] History doc score: 0.50
+
+No cross-collection contamination: YES
+
+--------------------------------------------------------------------------------
+TEST 10: Invalid Outcome Handling
+--------------------------------------------------------------------------------
+Scenario: System handles invalid doc_ids and outcomes gracefully
+  [OK] Non-existent doc_id handled
+  [OK] Empty doc_id handled
+  [OK] Valid outcome recorded
+  [OK] Books outcome skipped gracefully
+
+Invalid outcome handling: 4/4
+
+================================================================================
+FINAL RESULTS
+================================================================================
+  [PASS] Outcome flooding resistance
+  [PASS] Score boundary enforcement
+  [PASS] KG routing poisoning resistance
+  [PASS] Feedback inversion handling
+  [PASS] Action-Effectiveness manipulation
+  [PASS] Deduplication replacement attack
+  [PASS] Rapid outcome rate limiting
+  [PASS] Memory bank score immutability
+  [PASS] Cross-collection contamination
+  [PASS] Invalid outcome handling
+
+Passed: 10/10
+
+================================================================================
+PASS - Learning system is resistant to sabotage
+       10/10 attack vectors mitigated
+================================================================================

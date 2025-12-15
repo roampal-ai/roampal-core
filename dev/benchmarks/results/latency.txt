@@ -1,0 +1,91 @@
+Error in working memory cleanup: ChromaDB collection not initialized
+Error in working memory cleanup: ChromaDB collection not initialized
+================================================================================
+ROAMPAL CORE - LATENCY BENCHMARK
+================================================================================
+
+[1/5] Initializing memory system...
+OK System initialized
+
+[Testing with 10 memories]
+--------------------------------------------------------------------------------
+  Seeding 10 memories... ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+OK (971.0ms)
+  Running 100 search queries... C:\roampal-core\roampal\backend\modules\memory\chromadb_adapter.py:623: RuntimeWarning: coroutine 'ChromaDBAdapter.cleanup' was never awaited
+  pass  # Ignore errors in destructor
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+Error in working memory cleanup: ChromaDB collection not initialized
+OK
+  Results:
+    p50:   39.05ms
+    p95:   41.80ms
+    p99:   54.64ms
+    avg:   39.17ms
+    min:   35.50ms
+    max:   54.64ms
+
+[Testing with 50 memories]
+--------------------------------------------------------------------------------
+  Seeding 50 memories... ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+OK (2254.3ms)
+  Running 100 search queries... Error in working memory cleanup: ChromaDB collection not initialized
+OK
+  Results:
+    p50:   39.76ms
+    p95:   43.74ms
+    p99:   55.02ms
+    avg:   40.09ms
+    min:   36.17ms
+    max:   55.02ms
+
+[Testing with 100 memories]
+--------------------------------------------------------------------------------
+  Seeding 100 memories... ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+OK (4463.7ms)
+  Running 100 search queries... Error in working memory cleanup: ChromaDB collection not initialized
+OK
+  Results:
+    p50:   40.83ms
+    p95:   45.72ms
+    p99:   53.22ms
+    avg:   41.05ms
+    min:   36.63ms
+    max:   53.22ms
+
+[Testing with 500 memories]
+--------------------------------------------------------------------------------
+  Seeding 500 memories... ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+OK (22213.6ms)
+  Running 100 search queries... OK
+  Results:
+    p50:   41.22ms
+    p95:   45.08ms
+    p99:   55.14ms
+    avg:   41.55ms
+    min:   37.17ms
+    max:   55.14ms
+
+================================================================================
+SUMMARY
+================================================================================
+
+Memories     p50 (ms)     p95 (ms)     p99 (ms)     avg (ms)    
+--------------------------------------------------------------------------------
+10           39.05        41.80        54.64        39.17       
+50           39.76        43.74        55.02        40.09       
+100          40.83        45.72        53.22        41.05       
+500          41.22        45.08        55.14        41.55       
+
+================================================================================
+PERFORMANCE ANALYSIS
+================================================================================
+
+At 100 memories:
+  p50: 40.83ms
+  p95: 45.72ms
+  p99: 53.22ms
+
+Note: Performance is hardware-dependent.
+      These results validate search latency is reasonable.
+
+================================================================================

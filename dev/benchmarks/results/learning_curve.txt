@@ -1,0 +1,31 @@
+================================================================================
+LEARNING CURVE BENCHMARK
+================================================================================
+
+HYPOTHESIS: More outcome history = better adversarial resistance
+
+MATURITY LEVELS:
+  cold_start  :  0 uses,  0 worked (0% success)
+  early       :  3 uses,  2 worked (67% success)
+  established :  5 uses,  4 worked (80% success)
+  proven      : 10 uses,  8 worked (80% success)
+  mature      : 20 uses, 18 worked (90% success)
+
+Loading embedding model: all-mpnet-base-v2 (768 dim)...
+Model loaded.
+
+--------------------------------------------------------------------------------
+Running 10 scenarios × 5 maturity levels = 50 tests
+--------------------------------------------------------------------------------
+[  1/50] finance  @ cold_start  Traceback (most recent call last):
+  File "C:\roampal-core\dev\benchmarks\test_learning_curve.py", line 421, in <module>
+    asyncio.run(main())
+  File "C:\Users\logte\AppData\Local\Programs\Python\Python310\lib\asyncio\runners.py", line 44, in run
+    return loop.run_until_complete(main)
+  File "C:\Users\logte\AppData\Local\Programs\Python\Python310\lib\asyncio\base_events.py", line 641, in run_until_complete
+    return future.result()
+  File "C:\roampal-core\dev\benchmarks\test_learning_curve.py", line 324, in main
+    result = await test_at_maturity_level(
+  File "C:\roampal-core\dev\benchmarks\test_learning_curve.py", line 172, in test_at_maturity_level
+    system = UnifiedMemorySystem(
+TypeError: UnifiedMemorySystem.__init__() got an unexpected keyword argument 'llm_service'

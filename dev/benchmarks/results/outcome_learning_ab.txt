@@ -1,0 +1,11 @@
+WARNING: Real embeddings not available. Install sentence-transformers.
+======================================================================
+A/B TEST: Outcome-Based Learning vs Plain Vector Search
+======================================================================
+
+This test proves that outcome scoring improves retrieval quality.
+Both conditions use identical embeddings and storage.
+The ONLY difference: whether search results are ranked by outcome scores.
+
+ERROR: This test requires real embeddings.
+Install: pip install sentence-transformers

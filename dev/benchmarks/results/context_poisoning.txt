@@ -1,0 +1,104 @@
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Number of requested results 5 is greater than number of elements in index 3, updating n_results = 3
+C:\roampal-core\roampal\backend\modules\memory\chromadb_adapter.py:623: RuntimeWarning: coroutine 'ChromaDBAdapter.cleanup' was never awaited
+  pass  # Ignore errors in destructor
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Number of requested results 5 is greater than number of elements in index 4, updating n_results = 4
+
+================================================================================
+CONTEXT POISONING TEST
+================================================================================
+
+This tests whether adversarial/noisy data can corrupt retrieval.
+Each test uses an ISOLATED memory instance.
+
+--------------------------------------------------------------------------------
+TEST 1: Exact Duplicate Poisoning
+--------------------------------------------------------------------------------
+Scenario: Same text stored multiple times with varying quality
+          System should deduplicate and keep highest quality version
+  [POISON] Stored same text 3 times: q=0.09, q=0.90, q=0.36
+  [MULTI] System returned 3 versions
+  [QUALITY] Top version has quality=0.90
+
+High-quality version prioritized: YES
+
+--------------------------------------------------------------------------------
+TEST 2: Near-Duplicate Confusion
+--------------------------------------------------------------------------------
+Scenario: Similar but not identical facts compete for retrieval
+  [POISON] Stored 4 low-quality 'blue' variants + 1 high-quality 'green'
+
+[DEBUG] Top 3 results:
+  1. score=0.646 q=0.90 | User said their favorite color is green (verified ...
+  2. score=0.168 q=0.06 | Users favorite colour is blue...
+  3. score=0.167 q=0.09 | User's favorite color is blue....
+
+High-quality (green) beats low-quality noise (blue): YES
+
+--------------------------------------------------------------------------------
+TEST 3: Entity Confusion Attack
+--------------------------------------------------------------------------------
+Scenario: Facts about similar names should not confuse retrieval
+  [REAL] Stored 3 high-quality facts about user's manager John Smith
+  [NOISE] Stored 5 low-quality facts about OTHER John Smiths
+
+[DEBUG] Top 3 results:
+  1. score=0.582 q=0.81 | John Smith (the user's manager) has 15 years of experie...
+  2. score=0.461 q=0.81 | John Smith manages the engineering team at TechCorp....
+  3. score=0.124 q=0.09 | A John Smith was mentioned in a news article....
+
+Correct John Smith (manager) ranked #1: YES
+
+--------------------------------------------------------------------------------
+TEST 4: Temporal Confusion Attack
+--------------------------------------------------------------------------------
+Scenario: Same event with different dates should not confuse system
+  [WRONG] Stored 4 incorrect wedding dates (q=0.08 each)
+  [CORRECT] Stored 1 verified wedding date (q=0.93)
+
+[DEBUG] Top 3 results:
+  1. score=0.630 q=0.93 | User got married on September 14, 2019 (confirmed from ...
+  2. score=0.141 q=0.07 | User got married sometime in spring 2019....
+  3. score=0.122 q=0.07 | User's wedding was in 2017....
+
+Correct date (Sept 14, 2019) ranked #1: YES
+
+--------------------------------------------------------------------------------
+TEST 5: Negation Poisoning Attack
+--------------------------------------------------------------------------------
+Scenario: 'X is true' vs 'X is NOT true' - system must prioritize quality
+  [DANGER] Stored 3 false 'NOT allergic' facts (q=0.10)
+  [TRUTH] Stored 1 verified 'IS allergic' fact (q=0.99)
+
+[DEBUG] Top 3 results:
+  1. score=1.123 q=0.99 | User IS allergic to shellfish - carries EpiPen (doctor ...
+  2. score=0.157 q=0.10 | User has no shellfish allergy....
+  3. score=0.148 q=0.10 | User is NOT allergic to shellfish....
+
+True allergy fact (critical!) ranked #1: YES
+
+================================================================================
+FINAL RESULTS
+================================================================================
+  [PASS] Exact duplicate handling
+  [PASS] Near-duplicate handling
+  [PASS] Entity confusion resistance
+  [PASS] Temporal confusion resistance
+  [PASS] Negation poisoning resistance
+
+Passed: 5/5
+
+================================================================================
+PASS - System is resistant to context poisoning attacks
+       5/5 poisoning scenarios handled correctly
+================================================================================

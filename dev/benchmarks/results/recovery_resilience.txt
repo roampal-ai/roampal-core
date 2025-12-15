@@ -1,0 +1,110 @@
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Number of requested results 10 is greater than number of elements in index 4, updating n_results = 4
+C:\roampal-core\roampal\backend\modules\memory\chromadb_adapter.py:623: RuntimeWarning: coroutine 'ChromaDBAdapter.cleanup' was never awaited
+  pass  # Ignore errors in destructor
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Number of requested results 10 is greater than number of elements in index 4, updating n_results = 4
+Error searching memory_bank: could not convert string to float: 'high'
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Number of requested results 50 is greater than number of elements in index 25, updating n_results = 25
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Number of requested results 5 is greater than number of elements in index 4, updating n_results = 4
+
+================================================================================
+RECOVERY & CORRUPTION RESILIENCE TEST
+================================================================================
+
+This tests the system's ability to handle failures gracefully.
+Each test uses an ISOLATED memory instance.
+
+--------------------------------------------------------------------------------
+TEST 1: Interrupted Store Recovery
+--------------------------------------------------------------------------------
+Scenario: Store succeeds, then query works, simulating normal operation
+          (True interruption testing requires process-level manipulation)
+  [BASELINE] Stored 3 facts successfully
+  [VERIFY] Baseline data accessible: YES
+  [VERIFY] All data intact after additional stores: YES
+
+Data integrity maintained: YES
+
+--------------------------------------------------------------------------------
+TEST 2: Empty Collection Handling
+--------------------------------------------------------------------------------
+Scenario: Query collections that have no data
+  [EMPTY] Single collection search: OK
+  [EMPTY] Multi-collection search: OK
+
+Empty collection handling: PASS
+
+--------------------------------------------------------------------------------
+TEST 3: Malformed Metadata Resilience
+--------------------------------------------------------------------------------
+Scenario: Documents with unexpected metadata types/values
+  [STORE] 4/4 stores succeeded
+  [SEARCH] Search completed, found 1 results
+
+Malformed metadata handling: PASS
+
+--------------------------------------------------------------------------------
+TEST 4: Concurrent Modification Safety
+--------------------------------------------------------------------------------
+Scenario: Simultaneous reads and writes from multiple 'sessions'
+  [BASELINE] Stored 10 initial facts
+  [CONCURRENT] 6/6 tasks completed successfully
+  [VERIFY] Final document count: 25 (expected >= 20)
+
+Concurrent modification safety: PASS
+
+--------------------------------------------------------------------------------
+TEST 5: Large Batch Atomicity
+--------------------------------------------------------------------------------
+Scenario: Store 100 related facts, verify all or none principle
+  [BATCH] Storing 100 facts...
+    ... 0/100
+    ... 25/100
+    ... 50/100
+    ... 75/100
+  [BATCH] Stored: 100, Failed: 0
+  [VERIFY] Search returned 50 results
+  [VERIFY] Duplicates detected: 0
+
+Large batch atomicity: PASS
+
+--------------------------------------------------------------------------------
+TEST 6: Knowledge Graph Consistency
+--------------------------------------------------------------------------------
+Scenario: KG entities should reflect stored memories accurately
+  [STORE] Stored 4 facts with clear entities
+  [KG] Content KG not directly accessible (OK)
+  [SEARCH] Found John Smith: YES
+
+Knowledge graph consistency: PASS
+
+================================================================================
+FINAL RESULTS
+================================================================================
+  [PASS] Interrupted store recovery
+  [PASS] Empty collection handling
+  [PASS] Malformed metadata resilience
+  [PASS] Concurrent modification safety
+  [PASS] Large batch atomicity
+  [PASS] Knowledge graph consistency
+
+Passed: 6/6
+
+================================================================================
+PASS - System is resilient to failures and edge cases
+       6/6 resilience scenarios passed
+================================================================================

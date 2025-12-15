@@ -1,0 +1,69 @@
+============================= test session starts =============================
+platform win32 -- Python 3.10.0, pytest-9.0.0, pluggy-1.6.0 -- C:\Users\logte\AppData\Local\Programs\Python\Python310\python.exe
+cachedir: .pytest_cache
+benchmark: 5.2.3 (defaults: timer=time.perf_counter disable_gc=False min_rounds=5 min_time=0.000005 max_time=1.0 calibration_precision=10 warmup=False warmup_iterations=100000)
+rootdir: C:\roampal-core\dev\benchmarks
+configfile: pytest.ini
+plugins: anyio-4.11.0, dash-3.2.0, langsmith-0.4.1, asyncio-1.3.0, benchmark-5.2.3, typeguard-4.4.4
+asyncio: mode=auto, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 1 item
+
+dev\benchmarks\test_stale_data.py::test_stale_data PASSED                [100%]
+
+============================== warnings summary ===============================
+..\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:121
+  C:\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:121: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.11/migration/
+    @validator("best_of")
+
+..\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:140
+  C:\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:140: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.11/migration/
+    @validator("repetition_penalty")
+
+..\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:146
+  C:\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:146: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.11/migration/
+    @validator("seed")
+
+..\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:152
+  C:\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:152: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.11/migration/
+    @validator("temperature")
+
+..\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:158
+  C:\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:158: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.11/migration/
+    @validator("top_k")
+
+..\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:164
+  C:\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:164: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.11/migration/
+    @validator("top_p")
+
+..\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:170
+  C:\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:170: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.11/migration/
+    @validator("truncate")
+
+..\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:176
+  C:\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:176: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.11/migration/
+    @validator("typical_p")
+
+..\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:204
+  C:\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:204: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.11/migration/
+    @validator("inputs")
+
+..\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:210
+  C:\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\huggingface_hub\inference\_text_generation.py:210: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.11/migration/
+    @validator("stream")
+
+test_stale_data.py::test_stale_data
+  C:\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\torch\utils\tensorboard\__init__.py:4: DeprecationWarning: distutils Version classes are deprecated. Use packaging.version instead.
+    if not hasattr(tensorboard, "__version__") or LooseVersion(
+
+test_stale_data.py::test_stale_data
+  C:\Users\logte\AppData\Local\Programs\Python\Python310\lib\site-packages\torch\utils\tensorboard\__init__.py:6: DeprecationWarning: distutils Version classes are deprecated. Use packaging.version instead.
+    ) < LooseVersion("1.15"):
+
+test_stale_data.py::test_stale_data
+  C:\roampal-core\roampal\backend\modules\memory\chromadb_adapter.py:623: RuntimeWarning: coroutine 'ChromaDBAdapter.cleanup' was never awaited
+    pass  # Ignore errors in destructor
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 1 passed, 13 warnings in 6.65s ========================

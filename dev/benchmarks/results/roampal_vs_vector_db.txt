@@ -1,0 +1,18 @@
+ERROR: Real embeddings required. Install sentence-transformers.
+================================================================================
+ROAMPAL vs PLAIN VECTOR DATABASE - Statistical Significance Test
+================================================================================
+
+HYPOTHESIS: Outcome-based learning improves retrieval quality
+            over pure semantic similarity search.
+
+TEST DESIGN:
+  - 30 scenarios with misleading queries
+  - Queries semantically match BAD advice better
+  - Success = GOOD advice ranked #1 despite semantic disadvantage
+
+CONTROL:   Plain ChromaDB (pure L2 distance)
+TREATMENT: Roampal (outcome scoring + dynamic weights)
+
+ERROR: This test requires real embeddings.
+Install: pip install sentence-transformers

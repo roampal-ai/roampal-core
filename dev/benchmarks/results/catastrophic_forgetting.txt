@@ -1,0 +1,113 @@
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+C:\roampal-core\roampal\backend\modules\memory\chromadb_adapter.py:623: RuntimeWarning: coroutine 'ChromaDBAdapter.cleanup' was never awaited
+  pass  # Ignore errors in destructor
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+Error in working memory cleanup: ChromaDB collection not initialized
+ChromaDBAdapter auto-initializing collection on demand (explicit .initialize() was not called).
+
+================================================================================
+CATASTROPHIC FORGETTING TEST
+================================================================================
+
+This tests whether learning NEW knowledge destroys OLD knowledge.
+Each test uses an ISOLATED memory instance.
+
+--------------------------------------------------------------------------------
+TEST 1: Unrelated Domain Retention
+--------------------------------------------------------------------------------
+Scenario: Store FAMILY facts, add COOKING facts, query FAMILY
+  [OLD] Stored 3 family facts
+  [NEW] Added 20 cooking facts (interference)
+
+  Mother query BEFORE new facts: FOUND
+  Mother query AFTER new facts: FOUND
+  Brother query AFTER new facts: FOUND
+
+Old family knowledge retained: YES
+
+--------------------------------------------------------------------------------
+TEST 2: Same Domain Retention
+--------------------------------------------------------------------------------
+Scenario: Store WORK facts, add MORE WORK facts, query OLD WORK
+  [OLD] Stored 3 old work facts (high quality)
+  [NEW] Added 30 new work facts (lower quality)
+
+  Jennifer query BEFORE new facts: FOUND
+  Jennifer query AFTER new facts: FOUND
+  Jennifer fact rank: #1
+  Google career start still accessible: YES
+
+Old work knowledge retained: YES
+
+--------------------------------------------------------------------------------
+TEST 3: Bulk Insert Survival
+--------------------------------------------------------------------------------
+Scenario: Store KEY facts, bulk insert 100 random facts, verify KEY accessible
+  [CRITICAL] Stored 3 safety-critical facts
+  [BULK] Inserting 100 random facts...
+    ... 0/100
+    ... 20/100
+    ... 40/100
+    ... 60/100
+    ... 80/100
+  [BULK] Inserted 100 random facts
+
+  Allergy fact found: YES
+  Allergy fact rank: #1
+  Emergency contact found: YES
+
+Critical knowledge survives bulk insert: YES
+
+--------------------------------------------------------------------------------
+TEST 4: Quality Preservation
+--------------------------------------------------------------------------------
+Scenario: Verify high-quality facts maintain ranking advantage over time
+         (with semantically similar competing facts)
+  [HIGH] Stored 1 high-quality MIT education fact (q=0.90)
+  [LOW] Stored 20 low-quality university rumors (q=0.06 each)
+
+[DEBUG] Top 5 results:
+  1. score=0.690 q=0.90 | User attended MIT and graduated summa cum laude with a ...
+  2. score=0.235 q=0.06 | User might have attended MIT, but this is unconfirmed h...
+  3. score=0.142 q=0.06 | User might have attended Harvard, but this is unconfirm...
+  4. score=0.137 q=0.06 | User might have attended Cornell, but this is unconfirm...
+  5. score=0.135 q=0.06 | User might have attended Caltech, but this is unconfirm...
+
+High-quality verified MIT fact ranked #1: YES
+
+--------------------------------------------------------------------------------
+TEST 5: Cross-Domain Isolation
+--------------------------------------------------------------------------------
+Scenario: Different topics don't degrade each other's retrieval
+  [ALL] Stored 10 facts across 5 domains
+  [pets] max: FOUND
+  [health] 5 miles: FOUND
+  [hobbies] guitar: FOUND
+  [travel] kyoto: FOUND
+  [food] thai: FOUND
+
+Cross-domain isolation: 5/5 domains correctly retrieved
+Test PASSED
+
+================================================================================
+FINAL RESULTS
+================================================================================
+  [PASS] Unrelated domain retention
+  [PASS] Same domain retention
+  [PASS] Bulk insert survival
+  [PASS] Quality preservation
+  [PASS] Cross-domain isolation
+
+Passed: 5/5
+
+================================================================================
+PASS - System does NOT exhibit catastrophic forgetting
+       5/5 knowledge retention scenarios passed
+================================================================================

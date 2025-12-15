@@ -1,0 +1,14 @@
+WARNING: Real embeddings not available. Install sentence-transformers.
+================================================================================
+TOKEN EFFICIENCY BENCHMARK: Roampal vs Traditional RAG
+================================================================================
+
+HYPOTHESIS: Roampal uses fewer tokens while maintaining higher accuracy
+
+CONDITIONS:
+  - RAG Top-3:  Return top 3 semantically similar chunks
+  - RAG Top-5:  Return top 5 semantically similar chunks
+  - Roampal:    Return 1 outcome-weighted best result
+
+ERROR: This test requires real embeddings.
+Install: pip install sentence-transformers

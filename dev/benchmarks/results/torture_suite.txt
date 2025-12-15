@@ -1,0 +1,4 @@
+  File "C:\roampal-core\dev\benchmarks\test_torture_suite.py", line 122
+    data_path=str(Path(__file__).parent / "torture_test_data/high_volume",
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: invalid syntax. Perhaps you forgot a comma?

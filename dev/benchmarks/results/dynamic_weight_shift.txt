@@ -1,0 +1,14 @@
+WARNING: Real embeddings not available. Install sentence-transformers.
+======================================================================
+DYNAMIC WEIGHT SHIFT TEST
+Proving: Proven memories rank well despite imperfect query match
+======================================================================
+
+Weight Assignment by Memory Maturity:
+  - New (uses<2):        70% embedding, 30% score
+  - Emerging (uses>=2):  50% embedding, 50% score
+  - Established (>=3, >=0.7): 45% embedding, 55% score
+  - Proven (>=5, >=0.8): 40% embedding, 60% score
+
+ERROR: This test requires real embeddings.
+Install: pip install sentence-transformers
