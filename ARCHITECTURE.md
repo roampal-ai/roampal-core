@@ -345,10 +345,17 @@ Most routine exchanges don't need this - the transcript is enough.
 
 Both hook injection and `search_memory` cache doc_ids by session_id. When `score_response` is called, it:
 1. Scores the most recent unscored exchange (from any session)
-2. Finds cached doc_ids (uses most recent cache if MCP/hook session IDs differ)
-3. Applies outcome to memories based on `related` filter:
-   - If `related` omitted → all cached memories scored
-   - If `related` provided → only those doc_ids scored, others skipped
+2. Uses `related` doc_ids directly if provided (bypasses cache)
+3. Falls back to cached doc_ids if `related` omitted
+4. Applies outcome to memories
+
+**How `related` parameter works:**
+
+| `related` param | What happens |
+|-----------------|--------------|
+| `related=["id1", "id2"]` | Score those specific memories (+ exchange) |
+| `related=[]` | Score NO context memories, just the exchange |
+| `related` omitted | Score ALL cached memories (+ exchange) |
 
 This ensures that:
 - Hook-injected memories get scored (cached under Claude Code's session_id)
@@ -356,6 +363,25 @@ This ensures that:
 - Cold start profile dumps get scored
 - Session ID mismatches are handled gracefully
 - Noise can be filtered out without being penalized
+- **Direct doc_id scoring avoids cache timing issues** (Dec 2025 fix)
+
+#### Cache Timing Fix (Dec 2025)
+
+**Problem:** When the LLM searches for additional context (via `search_memory`) before scoring, the cache gets overwritten with new search results. By the time `score_response` is called with `related=["prev_turn_id"]`, those doc_ids no longer exist in the cache.
+
+**Solution:** When `related` is provided, use those doc_ids directly instead of filtering against the (potentially stale) cache:
+
+```python
+# Before (broken): filter related against stale cache
+if request.related is not None:
+    filtered_doc_ids = [d for d in cached_doc_ids if d in related_set]
+
+# After (fixed): use related directly
+if request.related is not None and len(request.related) > 0:
+    doc_ids_scored.extend(request.related)
+```
+
+This makes selective scoring reliable regardless of what searches happen between context injection and scoring.
 
 ---
 

@@ -639,19 +639,15 @@ def create_app() -> FastAPI:
                 if cached_doc_ids:
                     logger.info(f"Using cache from session {most_recent_key} (MCP used {conversation_id})")
 
-            if cached_doc_ids:
-                # Apply selective scoring filter if provided (backwards compatible)
-                if request.related is not None:
-                    # Only score doc_ids that are in the related list
-                    related_set = set(request.related)
-                    filtered_doc_ids = [d for d in cached_doc_ids if d in related_set]
-                    skipped_count = len(cached_doc_ids) - len(filtered_doc_ids)
-                    if skipped_count > 0:
-                        logger.info(f"Selective scoring: {len(filtered_doc_ids)} related, {skipped_count} skipped")
-                    doc_ids_scored.extend(filtered_doc_ids)
-                else:
-                    # No filter - score all (backwards compatible)
-                    doc_ids_scored.extend(cached_doc_ids)
+            # 2a. If related doc_ids provided, use directly (bypass stale cache)
+            # This fixes the timing issue where cache is overwritten before scoring
+            if request.related is not None and len(request.related) > 0:
+                doc_ids_scored.extend(request.related)
+                logger.info(f"Direct scoring: {len(request.related)} doc_ids from related param")
+            elif cached_doc_ids:
+                # No related filter - score all cached (backwards compatible)
+                doc_ids_scored.extend(cached_doc_ids)
+                logger.info(f"Cache scoring: {len(cached_doc_ids)} doc_ids")
 
             # 3. Apply outcome to filtered documents
             if doc_ids_scored and request.outcome in ["worked", "failed", "partial"]:
