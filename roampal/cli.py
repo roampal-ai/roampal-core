@@ -197,6 +197,34 @@ def configure_claude_code(claude_dir: Path):
     mcp_config_path.write_text(json.dumps(mcp_config, indent=2))
     print(f"  {GREEN}Created MCP config: {mcp_config_path}{RESET}")
 
+    # Also create local .mcp.json in current working directory
+    # Some Claude Code setups look for project-level config
+    local_mcp_path = Path.cwd() / ".mcp.json"
+    local_mcp_config = {
+        "mcpServers": {
+            "roampal-core": {
+                "command": sys.executable,
+                "args": ["-m", "roampal.mcp.server"],
+                "env": {}
+            }
+        }
+    }
+
+    # Merge with existing local config if present
+    if local_mcp_path.exists():
+        try:
+            existing = json.loads(local_mcp_path.read_text())
+            if "mcpServers" in existing:
+                existing["mcpServers"]["roampal-core"] = local_mcp_config["mcpServers"]["roampal-core"]
+            else:
+                existing["mcpServers"] = local_mcp_config["mcpServers"]
+            local_mcp_config = existing
+        except:
+            pass
+
+    local_mcp_path.write_text(json.dumps(local_mcp_config, indent=2))
+    print(f"  {GREEN}Created local MCP config: {local_mcp_path}{RESET}")
+
     print(f"  {GREEN}Claude Code configured!{RESET}\n")
 
 
