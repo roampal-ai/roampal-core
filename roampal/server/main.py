@@ -740,5 +740,11 @@ def start_server(host: str = "127.0.0.1", port: int = 27182):
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Roampal FastAPI Server")
+    parser.add_argument("--host", default="127.0.0.1", help="Server host")
+    parser.add_argument("--port", type=int, default=27182, help="Server port")
+    args = parser.parse_args()
+
     logging.basicConfig(level=logging.INFO)
-    start_server()
+    start_server(host=args.host, port=args.port)

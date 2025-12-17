@@ -23,16 +23,31 @@ BLUE = "\033[94m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
 
+# Port configuration - DEV and PROD use different ports to avoid collision
+PROD_PORT = 27182
+DEV_PORT = 27183
 
-def get_data_dir() -> Path:
-    """Get the prod data directory path (matches Desktop)."""
-    if os.name == 'nt':  # Windows
-        appdata = os.environ.get('APPDATA', str(Path.home()))
-        return Path(appdata) / "Roampal" / "data"
-    elif sys.platform == 'darwin':  # macOS
-        return Path.home() / "Library" / "Application Support" / "Roampal" / "data"
-    else:  # Linux
-        return Path.home() / ".local" / "share" / "roampal" / "data"
+
+def get_data_dir(dev: bool = False) -> Path:
+    """Get the data directory path. DEV uses separate directory to avoid collision with PROD."""
+    if dev:
+        # DEV mode uses separate directory
+        if os.name == 'nt':  # Windows
+            appdata = os.environ.get('APPDATA', str(Path.home()))
+            return Path(appdata) / "Roampal_DEV" / "data"
+        elif sys.platform == 'darwin':  # macOS
+            return Path.home() / "Library" / "Application Support" / "Roampal_DEV" / "data"
+        else:  # Linux
+            return Path.home() / ".local" / "share" / "roampal_dev" / "data"
+    else:
+        # PROD mode
+        if os.name == 'nt':  # Windows
+            appdata = os.environ.get('APPDATA', str(Path.home()))
+            return Path(appdata) / "Roampal" / "data"
+        elif sys.platform == 'darwin':  # macOS
+            return Path.home() / "Library" / "Application Support" / "Roampal" / "data"
+        else:  # Linux
+            return Path.home() / ".local" / "share" / "roampal" / "data"
 
 
 def print_banner():
@@ -267,22 +282,28 @@ def cmd_start(args):
     """Start the Roampal server."""
     print_banner()
 
-    # Handle dev mode - uses Roampal_DEV folder to match Desktop
-    if args.dev:
+    # Determine port based on mode (DEV=27183, PROD=27182)
+    # User can override with --port
+    is_dev = args.dev
+    default_port = DEV_PORT if is_dev else PROD_PORT
+    port = args.port if args.port != PROD_PORT else default_port  # Use default unless explicitly overridden
+
+    # Handle dev mode - uses Roampal_DEV folder
+    if is_dev:
         os.environ["ROAMPAL_DEV"] = "1"
-        # Determine data path for display
-        if os.name == 'nt':
-            appdata = os.environ.get('APPDATA', str(Path.home()))
-            data_path = Path(appdata) / "Roampal_DEV" / "data"
-        else:
-            data_path = Path.home() / ".local" / "share" / "roampal_dev" / "data"
-        print(f"{YELLOW}DEV MODE{RESET} - Using Roampal_DEV data (matches Desktop)")
-        print(f"  Data path: {data_path}\n")
+        data_path = get_data_dir(dev=True)
+        print(f"{YELLOW}DEV MODE{RESET} - Isolated from production")
+        print(f"  Data path: {data_path}")
+        print(f"  Port: {port} (PROD uses {PROD_PORT})\n")
+    else:
+        data_path = get_data_dir(dev=False)
+        print(f"{GREEN}PROD MODE{RESET}")
+        print(f"  Data path: {data_path}")
+        print(f"  Port: {port}\n")
 
     print(f"{BOLD}Starting Roampal server...{RESET}\n")
 
     host = args.host or "127.0.0.1"
-    port = args.port or 27182
 
     print(f"Server: http://{host}:{port}")
     print(f"Hooks endpoint: http://{host}:{port}/api/hooks/get-context")
@@ -301,21 +322,28 @@ def cmd_status(args):
     import httpx
 
     host = args.host or "127.0.0.1"
-    port = args.port or 27182
+    # Use dev port if --dev flag, otherwise prod port (unless explicitly overridden)
+    is_dev = getattr(args, 'dev', False)
+    default_port = DEV_PORT if is_dev else PROD_PORT
+    port = args.port if args.port and args.port != PROD_PORT else default_port
+
+    mode_str = f"{YELLOW}DEV{RESET}" if is_dev else f"{GREEN}PROD{RESET}"
     url = f"http://{host}:{port}/api/health"
 
     try:
         response = httpx.get(url, timeout=2.0)
         if response.status_code == 200:
             data = response.json()
-            print(f"{GREEN}Server Status: RUNNING{RESET}")
+            print(f"Server Status ({mode_str}): {GREEN}RUNNING{RESET}")
+            print(f"  Port: {port}")
             print(f"  Memory initialized: {data.get('memory_initialized', False)}")
             print(f"  Timestamp: {data.get('timestamp', 'N/A')}")
         else:
             print(f"{RED}Server returned error: {response.status_code}{RESET}")
     except httpx.ConnectError:
-        print(f"{YELLOW}Server Status: NOT RUNNING{RESET}")
-        print(f"\nStart with: roampal start")
+        print(f"Server Status ({mode_str}): {YELLOW}NOT RUNNING{RESET}")
+        start_cmd = "roampal start --dev" if is_dev else "roampal start"
+        print(f"\nStart with: {start_cmd}")
     except Exception as e:
         print(f"{RED}Error checking status: {e}{RESET}")
 
@@ -327,15 +355,21 @@ def cmd_stats(args):
     import httpx
 
     host = args.host or "127.0.0.1"
-    port = args.port or 27182
+    # Use dev port if --dev flag
+    is_dev = getattr(args, 'dev', False)
+    default_port = DEV_PORT if is_dev else PROD_PORT
+    port = args.port if args.port and args.port != PROD_PORT else default_port
+
+    mode_str = f"{YELLOW}DEV{RESET}" if is_dev else f"{GREEN}PROD{RESET}"
     url = f"http://{host}:{port}/api/stats"
 
     try:
         response = httpx.get(url, timeout=5.0)
         if response.status_code == 200:
             data = response.json()
-            print(f"{BOLD}Memory Statistics:{RESET}\n")
+            print(f"{BOLD}Memory Statistics ({mode_str}):{RESET}\n")
             print(f"Data path: {data.get('data_path', 'N/A')}")
+            print(f"Port: {port}")
             print(f"\nCollections:")
             for name, info in data.get("collections", {}).items():
                 count = info.get("count", 0)
@@ -343,7 +377,8 @@ def cmd_stats(args):
         else:
             print(f"{RED}Error getting stats: {response.status_code}{RESET}")
     except httpx.ConnectError:
-        print(f"{YELLOW}Server not running. Start with: roampal start{RESET}")
+        start_cmd = "roampal start --dev" if is_dev else "roampal start"
+        print(f"{YELLOW}Server not running. Start with: {start_cmd}{RESET}")
     except Exception as e:
         print(f"{RED}Error: {e}{RESET}")
 
@@ -399,17 +434,17 @@ def cmd_ingest(args):
 
         print(f"  Content length: {len(content):,} characters")
 
-        # Handle dev mode
+        # Handle dev mode - use correct port and data path
+        is_dev = args.dev
         data_path = None
-        if args.dev:
-            dev_data_dir = Path.home() / ".roampal" / "dev-data"
-            dev_data_dir.mkdir(parents=True, exist_ok=True)
-            data_path = str(dev_data_dir)
-            print(f"  {YELLOW}DEV MODE{RESET} - Using: {dev_data_dir}")
+        if is_dev:
+            data_path = str(get_data_dir(dev=True))
+            print(f"  {YELLOW}DEV MODE{RESET} - Using: {data_path}")
 
         # Try to use running server first (data immediately searchable)
+        # Use dev port if --dev flag
         host = "127.0.0.1"
-        port = 27182
+        port = DEV_PORT if is_dev else PROD_PORT
         server_url = f"http://{host}:{port}/api/ingest"
 
         try:
@@ -422,7 +457,7 @@ def cmd_ingest(args):
                     "chunk_size": args.chunk_size,
                     "chunk_overlap": args.chunk_overlap
                 },
-                timeout=60.0  # Long timeout for large files
+                timeout=300.0  # 5 min timeout for very large files
             )
 
             if response.status_code == 200:
@@ -592,12 +627,14 @@ def main():
     # status command
     status_parser = subparsers.add_parser("status", help="Check server status")
     status_parser.add_argument("--host", default="127.0.0.1", help="Server host")
-    status_parser.add_argument("--port", type=int, default=27182, help="Server port")
+    status_parser.add_argument("--port", type=int, default=None, help="Server port (default: 27182 prod, 27183 dev)")
+    status_parser.add_argument("--dev", action="store_true", help="Check dev server status")
 
     # stats command
     stats_parser = subparsers.add_parser("stats", help="Show memory statistics")
     stats_parser.add_argument("--host", default="127.0.0.1", help="Server host")
-    stats_parser.add_argument("--port", type=int, default=27182, help="Server port")
+    stats_parser.add_argument("--port", type=int, default=None, help="Server port (default: 27182 prod, 27183 dev)")
+    stats_parser.add_argument("--dev", action="store_true", help="Show dev server stats")
 
     # ingest command
     ingest_parser = subparsers.add_parser("ingest", help="Ingest a document into the books collection")
