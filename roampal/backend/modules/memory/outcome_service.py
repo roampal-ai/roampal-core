@@ -24,6 +24,7 @@ class OutcomeService:
     - Outcome history tracking
     - KG routing updates
     - Problem-solution pattern tracking
+    - Batch cleanup of old working memory (every 50 scores)
     """
 
     def __init__(
@@ -46,6 +47,10 @@ class OutcomeService:
         self.kg_service = kg_service
         self.promotion_service = promotion_service
         self.config = config or MemoryConfig()
+
+        # Counter for batch cleanup trigger
+        self._score_count = 0
+        self._cleanup_interval = 50  # Trigger cleanup every N scores
 
     async def record_outcome(
         self,
@@ -153,7 +158,7 @@ class OutcomeService:
         self.collections[collection_name].update_fragment_metadata(doc_id, metadata)
 
         logger.info(
-            f"Score update [{collection_name}]: {current_score:.2f} → {new_score:.2f} "
+            f"Score update [{collection_name}]: {current_score:.2f} -> {new_score:.2f} "
             f"(outcome={outcome}, delta={score_delta:+.2f}, time_weight={time_weight:.2f}, uses={uses})"
         )
 
@@ -176,6 +181,13 @@ class OutcomeService:
                 metadata=metadata,
                 collection_size=collection_size
             )
+
+        # Batch cleanup: trigger every N scores to clean old working memory
+        self._score_count += 1
+        if self._score_count % self._cleanup_interval == 0 and self.promotion_service:
+            cleaned = await self.promotion_service.cleanup_old_working_memory(max_age_hours=24.0)
+            if cleaned > 0:
+                logger.info(f"Batch cleanup triggered: removed {cleaned} old working memories")
 
         logger.info(f"Outcome recorded: {doc_id} -> {outcome} (score: {new_score:.2f})")
         return metadata
@@ -296,7 +308,7 @@ class OutcomeService:
         metadata: Dict[str, Any],
         context: Optional[Dict[str, Any]]
     ):
-        """Track successful problem→solution patterns for future reuse."""
+        """Track successful problem->solution patterns for future reuse."""
         if not self.kg_service:
             return
 
@@ -331,10 +343,10 @@ class OutcomeService:
                 outcome="worked"
             )
 
-            logger.info(f"Tracked problem→solution: {problem_signature[:30]}... -> {doc_id}")
+            logger.info(f"Tracked problem->solution: {problem_signature[:30]}... -> {doc_id}")
 
         except Exception as e:
-            logger.error(f"Error tracking problem→solution: {e}")
+            logger.error(f"Error tracking problem->solution: {e}")
 
     def count_successes_from_history(self, outcome_history_json: str) -> float:
         """

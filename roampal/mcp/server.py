@@ -41,6 +41,8 @@ import json
 import asyncio
 import threading
 import socket
+import os
+import sys
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
@@ -52,6 +54,10 @@ from roampal.backend.modules.memory import UnifiedMemorySystem
 
 logger = logging.getLogger(__name__)
 
+# Port configuration - DEV and PROD use different ports
+PROD_PORT = 27182
+DEV_PORT = 27183
+
 # Global memory system
 _memory: Optional[UnifiedMemorySystem] = None
 
@@ -60,6 +66,9 @@ _mcp_search_cache: Dict[str, Dict[str, Any]] = {}
 
 # Flag to track if FastAPI server is running
 _fastapi_started = False
+
+# Dev mode flag (set via command line or env)
+_dev_mode = False
 
 
 def _is_port_in_use(port: int) -> bool:
@@ -87,29 +96,41 @@ def _start_fastapi_server():
     if _fastapi_started:
         return
 
+    # Use correct port based on dev mode
+    port = DEV_PORT if _dev_mode else PROD_PORT
+
     # Check if port is already in use (server already running externally)
-    if _is_port_in_use(27182):
-        logger.info("FastAPI hook server already running on port 27182")
+    if _is_port_in_use(port):
+        logger.info(f"FastAPI hook server already running on port {port}")
         _fastapi_started = True
         return
 
     import subprocess
-    import sys
 
     try:
-        # Start FastAPI server as a subprocess
+        # Build environment - pass through dev mode
+        env = os.environ.copy()
+        if _dev_mode:
+            env["ROAMPAL_DEV"] = "1"
+
+        # Start FastAPI server as a subprocess with correct port
         # Use the same Python that's running this MCP server
+        cmd = [sys.executable, "-m", "roampal.server.main", "--port", str(port)]
+
         subprocess.Popen(
-            [sys.executable, "-m", "roampal.server.main"],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             # Don't inherit stdin (MCP uses it)
             stdin=subprocess.DEVNULL,
+            # Pass environment with dev flag
+            env=env,
             # Detach from parent process group on Windows
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         _fastapi_started = True
-        logger.info("Started FastAPI hook server on port 27182 (subprocess)")
+        mode = "DEV" if _dev_mode else "PROD"
+        logger.info(f"Started FastAPI hook server on port {port} ({mode} mode)")
     except Exception as e:
         logger.error(f"Failed to start FastAPI hook server: {e}")
 
@@ -130,8 +151,19 @@ async def _initialize_memory():
         logger.info("MCP: Memory system initialized")
 
 
-def run_mcp_server():
-    """Run the MCP server (auto-starts FastAPI hook server)."""
+def run_mcp_server(dev: bool = False):
+    """Run the MCP server (auto-starts FastAPI hook server).
+
+    Args:
+        dev: If True, run in dev mode with separate port/data directory.
+    """
+    global _dev_mode
+    _dev_mode = dev
+
+    if dev:
+        os.environ["ROAMPAL_DEV"] = "1"
+        logger.info("MCP Server running in DEV mode")
+
     # Start FastAPI hook server in background thread
     _start_fastapi_server()
 
@@ -458,6 +490,8 @@ Don't wait to be asked - good assistants remember what matters.""",
                 related = arguments.get("related")  # Optional list of doc_ids to score
 
                 # Score via FastAPI endpoint (has access to hook-injected doc_ids cache)
+                # Use correct port based on dev mode
+                port = DEV_PORT if _dev_mode else PROD_PORT
                 scored_count = 0
                 try:
                     import httpx
@@ -471,7 +505,7 @@ Don't wait to be asked - good assistants remember what matters.""",
 
                     async with httpx.AsyncClient() as client:
                         response = await client.post(
-                            "http://127.0.0.1:27182/api/record-outcome",
+                            f"http://127.0.0.1:{port}/api/record-outcome",
                             json=payload,
                             timeout=5.0
                         )
@@ -607,5 +641,10 @@ Don't wait to be asked - good assistants remember what matters.""",
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Roampal MCP Server")
+    parser.add_argument("--dev", action="store_true", help="Run in dev mode (port 27183, separate data)")
+    args = parser.parse_args()
+
     logging.basicConfig(level=logging.INFO)
-    run_mcp_server()
+    run_mcp_server(dev=args.dev)
