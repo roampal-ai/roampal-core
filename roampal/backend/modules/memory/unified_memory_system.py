@@ -506,7 +506,7 @@ class UnifiedMemorySystem:
 
         return await self._memory_bank_service.update(old_content, new_content)
 
-    async def archive_memory_bank(self, content: str) -> bool:
+    async def delete_memory_bank(self, content: str) -> bool:
         """
         Archive a memory_bank entry.
 

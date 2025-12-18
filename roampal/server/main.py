@@ -604,7 +604,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/memory-bank/archive")
-    async def archive_memory_bank(request: Dict[str, str]):
+    async def delete_memory_bank(request: Dict[str, str]):
         """Archive a memory bank entry."""
         if not _memory:
             raise HTTPException(status_code=503, detail="Memory system not ready")
@@ -614,7 +614,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Content required")
 
         try:
-            success = await _memory.archive_memory_bank(content)
+            success = await _memory.delete_memory_bank(content)
             return {"success": success}
 
         except Exception as e:

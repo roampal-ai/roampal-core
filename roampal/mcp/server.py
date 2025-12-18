@@ -18,7 +18,7 @@ MCP TOOLS (available after setup):
 - search_memory: Search across memory collections (for detailed lookups)
 - add_to_memory_bank: Store permanent user facts
 - update_memory: Update existing memories
-- archive_memory: Archive outdated memories
+- delete_memory: Delete outdated memories
 - record_response: Complete the interaction (key_takeaway + outcome scoring)
 
 WORKFLOW:
@@ -311,12 +311,12 @@ Note: memory_bank is NOT outcome-scored. Facts persist until archived.""",
                 }
             ),
             types.Tool(
-                name="archive_memory",
-                description="Archive outdated/irrelevant memories from memory_bank.",
+                name="delete_memory",
+                description="Delete outdated/irrelevant memories from memory_bank.",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "content": {"type": "string", "description": "Memory to archive (semantic match)"}
+                        "content": {"type": "string", "description": "Memory to delete (semantic match)"}
                     },
                     "required": ["content"]
                 }
@@ -520,20 +520,20 @@ Don't wait to be asked - good assistants remember what matters.""",
                         text="Memory not found for update"
                     )]
 
-            elif name == "archive_memory":
+            elif name == "delete_memory":
                 content = arguments.get("content", "")
 
-                success = await _memory.archive_memory_bank(content)
+                success = await _memory.delete_memory_bank(content)
 
                 if success:
                     return [types.TextContent(
                         type="text",
-                        text="Memory archived successfully"
+                        text="Memory deleted successfully"
                     )]
                 else:
                     return [types.TextContent(
                         type="text",
-                        text="Memory not found for archiving"
+                        text="Memory not found for deletion"
                     )]
 
             elif name == "score_response":
