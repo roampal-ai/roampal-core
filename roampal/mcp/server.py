@@ -514,8 +514,9 @@ Don't wait to be asked - good assistants remember what matters.""",
                             scored_count = result.get("documents_scored", 0)
                 except Exception as e:
                     logger.warning(f"Failed to call FastAPI record-outcome: {e}")
-                    # Fall back to MCP cache scoring
-                    if session_id in _mcp_search_cache:
+
+                # Fall back to MCP cache if FastAPI returned 0 or failed
+                if scored_count == 0 and session_id in _mcp_search_cache:
                         cached = _mcp_search_cache[session_id]
                         doc_ids = cached.get("doc_ids", [])
                         # Apply related filter if provided

@@ -44,6 +44,10 @@ _session_manager: Optional[SessionManager] = None
 # Search result cache for outcome scoring (session_id -> doc_ids)
 _search_cache: Dict[str, Dict[str, Any]] = {}
 
+# Port constants for dev/prod isolation
+PROD_PORT = 27182
+DEV_PORT = 27183
+
 
 async def _build_cold_start_profile() -> Optional[str]:
     """
@@ -590,6 +594,42 @@ def create_app() -> FastAPI:
             logger.error(f"Error archiving: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
+
+    @app.get("/api/books")
+    async def list_books():
+        """List all ingested books."""
+        if not _memory:
+            raise HTTPException(status_code=503, detail="Memory system not ready")
+
+        try:
+            books = await _memory.list_books()
+            return {"success": True, "books": books}
+        except Exception as e:
+            logger.error(f"Error listing books: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/remove-book")
+    async def remove_book(request: Dict[str, Any]):
+        """Remove a book by title."""
+        if not _memory:
+            raise HTTPException(status_code=503, detail="Memory system not ready")
+
+        title = request.get("title", "")
+        if not title:
+            raise HTTPException(status_code=400, detail="Title required")
+
+        try:
+            result = await _memory.remove_book(title)
+            return {
+                "success": result.get("removed", 0) > 0,
+                "removed": result.get("removed", 0),
+                "title": title,
+                "message": result.get("message", "")
+            }
+        except Exception as e:
+            logger.error(f"Error removing book: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.post("/api/record-outcome")
     async def record_outcome(request: RecordOutcomeRequest):
         """
@@ -733,8 +773,38 @@ def create_app() -> FastAPI:
     return app
 
 
-def start_server(host: str = "127.0.0.1", port: int = 27182):
-    """Start the Roampal server."""
+def start_server(host: str = "127.0.0.1", port: int = None, dev: bool = False):
+    """
+    Start the Roampal server with dev/prod isolation.
+    
+    Args:
+        host: Server host
+        port: Server port (auto-determined from dev mode if not specified)
+        dev: Run in dev mode (port 27183, Roampal_DEV data)
+    """
+    # Determine mode and port
+    dev_mode = dev or os.environ.get('ROAMPAL_DEV', '').lower() in ('1', 'true', 'yes')
+    
+    if port is None:
+        port = DEV_PORT if dev_mode else PROD_PORT
+    
+    # Validate port matches mode
+    if dev_mode and port != DEV_PORT:
+        raise ValueError(f"DEV mode requires port {DEV_PORT}, got {port}")
+    if not dev_mode and port != PROD_PORT:
+        raise ValueError(f"PROD mode requires port {PROD_PORT}, got {port}")
+    
+    # Startup banner (ASCII-safe for Windows cp1252)
+    mode_str = "DEV" if dev_mode else "PROD"
+    data_hint = "Roampal_DEV" if dev_mode else "Roampal"
+    print(f"""
+===================================================
+  ROAMPAL SERVER - {mode_str} MODE
+  Port: {port}
+  Data: %APPDATA%/{data_hint}/data
+===================================================
+""")
+    
     app = create_app()
     uvicorn.run(app, host=host, port=port)
 
@@ -743,8 +813,9 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Roampal FastAPI Server")
     parser.add_argument("--host", default="127.0.0.1", help="Server host")
-    parser.add_argument("--port", type=int, default=27182, help="Server port")
+    parser.add_argument("--port", type=int, default=None, help="Server port (default: 27182 prod, 27183 dev)")
+    parser.add_argument("--dev", action="store_true", help="Run in dev mode (port 27183, Roampal_DEV data)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
-    start_server(host=args.host, port=args.port)
+    start_server(host=args.host, port=args.port, dev=args.dev)

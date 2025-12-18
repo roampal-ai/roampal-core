@@ -1,6 +1,6 @@
 # roampal-core v0.1.5 Release Notes
 
-**Release Date:** December 2024
+**Release Date:** December 2025
 
 ## Summary
 

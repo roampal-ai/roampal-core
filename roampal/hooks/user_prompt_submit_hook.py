@@ -16,7 +16,8 @@ Usage (in .claude/settings.json):
 }
 
 Environment variables:
-- ROAMPAL_SERVER_URL: URL of Roampal server (default: http://127.0.0.1:27182)
+- ROAMPAL_DEV: Set to "1" to use dev port 27183 (default: prod port 27182)
+- ROAMPAL_SERVER_URL: Override server URL (takes precedence over ROAMPAL_DEV)
 
 Reads from stdin:
 - JSON with user_message
@@ -60,7 +61,10 @@ def main():
     conversation_id = input_data.get("session_id", "default")
 
     # Call Roampal server for context
-    server_url = os.environ.get("ROAMPAL_SERVER_URL", "http://127.0.0.1:27182")
+    # Respect ROAMPAL_DEV env var for port selection
+    dev_mode = os.environ.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")
+    default_port = 27183 if dev_mode else 27182
+    server_url = os.environ.get("ROAMPAL_SERVER_URL", f"http://127.0.0.1:{default_port}")
 
     try:
         request_data = json.dumps({
