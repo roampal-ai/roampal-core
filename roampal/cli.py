@@ -60,9 +60,50 @@ def print_banner():
 """)
 
 
+def check_for_updates() -> tuple:
+    """Check if a newer version is available on PyPI.
+
+    Returns:
+        tuple: (update_available: bool, current_version: str, latest_version: str)
+    """
+    try:
+        import urllib.request
+        from roampal import __version__
+
+        url = "https://pypi.org/pypi/roampal/json"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+
+        with urllib.request.urlopen(req, timeout=2) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            latest = data.get("info", {}).get("version", __version__)
+
+            # Compare versions (simple tuple comparison works for semver)
+            current_parts = [int(x) for x in __version__.split(".")]
+            latest_parts = [int(x) for x in latest.split(".")]
+            update_available = latest_parts > current_parts
+
+            return (update_available, __version__, latest)
+    except Exception:
+        # Fail silently - don't block CLI on network issues
+        try:
+            from roampal import __version__
+            return (False, __version__, __version__)
+        except Exception:
+            return (False, "unknown", "unknown")
+
+
+def print_update_notice():
+    """Print update notice if newer version available. Non-blocking."""
+    update_available, current, latest = check_for_updates()
+    if update_available:
+        print(f"{YELLOW}⚠️  Update available: {latest} (you have {current}){RESET}")
+        print(f"    Run: pip install --upgrade roampal\n")
+
+
 def cmd_init(args):
     """Initialize Roampal for the current environment."""
     print_banner()
+    print_update_notice()
     print(f"{BOLD}Initializing Roampal...{RESET}\n")
 
     # Detect environment
@@ -318,6 +359,7 @@ def cmd_start(args):
 def cmd_status(args):
     """Check Roampal server status."""
     print_banner()
+    print_update_notice()
 
     import httpx
 
@@ -351,6 +393,7 @@ def cmd_status(args):
 def cmd_stats(args):
     """Show memory statistics."""
     print_banner()
+    print_update_notice()
 
     import httpx
 

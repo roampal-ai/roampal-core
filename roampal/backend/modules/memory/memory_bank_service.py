@@ -181,21 +181,50 @@ class MemoryBankService:
 
     async def archive(
         self,
-        doc_id: str,
+        content: str,
         reason: str = "llm_decision"
     ) -> bool:
         """
-        Archive memory (soft delete).
+        Archive memory by content (semantic match).
 
         Args:
-            doc_id: Memory to archive
+            content: Content to find and archive (semantic match)
             reason: Why archiving
 
         Returns:
             Success status
         """
+        # Search for the memory by content to find its doc_id
+        if self.search_fn:
+            results = await self.search_fn(
+                query=content,
+                collections=["memory_bank"],
+                limit=5
+            )
+
+            # Find best match - look for exact or close content match
+            doc_id = None
+            for r in results:
+                r_content = r.get("content") or r.get("metadata", {}).get("content", "")
+                # Check if content matches (exact or substring)
+                if content in r_content or r_content in content:
+                    doc_id = r.get("id")
+                    break
+
+            if not doc_id and results:
+                # Fall back to top result if no exact match
+                doc_id = results[0].get("id")
+        else:
+            # No search function - try content as doc_id (backwards compat)
+            doc_id = content
+
+        if not doc_id:
+            logger.warning(f"Could not find memory to archive: {content[:50]}...")
+            return False
+
         doc = self.collection.get_fragment(doc_id)
         if not doc:
+            logger.warning(f"Memory {doc_id} not found in collection")
             return False
 
         metadata = doc.get("metadata", {})
