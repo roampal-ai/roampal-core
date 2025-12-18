@@ -210,7 +210,7 @@ def configure_claude_code(claude_dir: Path):
         "mcp__roampal-core__search_memory",
         "mcp__roampal-core__add_to_memory_bank",
         "mcp__roampal-core__update_memory",
-        "mcp__roampal-core__archive_memory",
+        "mcp__roampal-core__delete_memory",
         "mcp__roampal-core__get_context_insights",
         "mcp__roampal-core__record_response",
         "mcp__roampal-core__score_response"

@@ -260,9 +260,9 @@ class TestMemoryBankAPI:
         mock_ums._memory_bank_service.update.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_archive_memory_bank(self, mock_ums):
+    async def test_delete_memory_bank(self, mock_ums):
         """Should delegate archive."""
-        result = await mock_ums.archive_memory_bank("some content to archive")
+        result = await mock_ums.delete_memory_bank("some content to archive")
         assert result is True
 
 

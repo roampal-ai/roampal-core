@@ -274,7 +274,7 @@ The MCP server provides 7 tools for deep memory access:
 | `search_memory` | Search across memory collections (for detailed lookups) |
 | `add_to_memory_bank` | Store permanent user facts |
 | `update_memory` | Update existing memories |
-| `archive_memory` | Archive outdated memories |
+| `delete_memory` | Delete outdated memories |
 | `score_response` | **SOFT ENFORCED** - Score the previous exchange (worked/failed/partial/unknown) |
 | `record_response` | **OPTIONAL** - Store key takeaways when transcript won't capture learning |
 
@@ -563,7 +563,7 @@ You can also set `ROAMPAL_DATA_PATH` environment variable for custom paths.
       "mcp__roampal-core__search_memory",
       "mcp__roampal-core__add_to_memory_bank",
       "mcp__roampal-core__update_memory",
-      "mcp__roampal-core__archive_memory",
+      "mcp__roampal-core__delete_memory",
       "mcp__roampal-core__get_context_insights",
       "mcp__roampal-core__record_response",
       "mcp__roampal-core__score_response"

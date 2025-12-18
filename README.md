@@ -76,7 +76,7 @@ The AI has these tools for memory access:
 | `search_memory` | Search across collections |
 | `add_to_memory_bank` | Store permanent facts |
 | `update_memory` | Update existing memories |
-| `archive_memory` | Archive outdated info |
+| `delete_memory` | Delete outdated info |
 | `score_response` | Score previous exchange (prompted by hook) |
 | `record_response` | Store key takeaways (optional) |
 
