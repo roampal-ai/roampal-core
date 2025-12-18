@@ -755,7 +755,12 @@ class UnifiedMemorySystem:
             await self.initialize()
 
         books_collection = self.collections.get("books")
-        if not books_collection or books_collection.collection is None:
+        if not books_collection:
+            return {"removed": 0, "error": "Books collection not found"}
+
+        # Ensure lazy initialization completes
+        await books_collection._ensure_initialized()
+        if books_collection.collection is None:
             return {"removed": 0, "error": "Books collection not initialized"}
 
         # Find all chunks with this title
@@ -836,7 +841,12 @@ class UnifiedMemorySystem:
             await self.initialize()
 
         books_collection = self.collections.get("books")
-        if not books_collection or books_collection.collection is None:
+        if not books_collection:
+            return []
+
+        # Ensure lazy initialization completes
+        await books_collection._ensure_initialized()
+        if books_collection.collection is None:
             return []
 
         try:

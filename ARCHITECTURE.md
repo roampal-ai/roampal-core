@@ -525,9 +525,13 @@ still use `roampal start` or `roampal start --dev`.
 
 ### Dev Mode
 
-Set `ROAMPAL_DEV=1` environment variable in your MCP config to use separate data directory:
-- Production: `%APPDATA%/Roampal/data` (Windows)
-- Dev mode: `%APPDATA%/Roampal_DEV/data` (matches Desktop dev builds)
+Set `ROAMPAL_DEV=1` environment variable to isolate dev from production:
+- **Port:** Production uses 27182, dev uses 27183
+- **Data:** Production: `%APPDATA%/Roampal/data`, Dev: `%APPDATA%/Roampal_DEV/data`
+
+**Important:** Both MCP server AND hooks need `ROAMPAL_DEV=1`:
+- MCP server gets it from `.mcp.json` env config
+- Hooks automatically detect `ROAMPAL_DEV` from environment and use the correct port
 
 You can also set `ROAMPAL_DATA_PATH` environment variable for custom paths.
 
