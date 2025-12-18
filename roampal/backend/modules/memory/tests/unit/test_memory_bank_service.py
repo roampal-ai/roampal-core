@@ -192,17 +192,25 @@ class TestArchive:
         return coll
 
     @pytest.fixture
-    def service(self, mock_collection):
+    def mock_search_fn(self):
+        """Mock search function that returns matching results."""
+        async def search_fn(query, collections, limit=5):
+            return [{"id": "memory_bank_test123", "content": query}]
+        return search_fn
+
+    @pytest.fixture
+    def service(self, mock_collection, mock_search_fn):
         return MemoryBankService(
             collection=mock_collection,
-            embed_fn=AsyncMock()
+            embed_fn=AsyncMock(),
+            search_fn=mock_search_fn
         )
 
     @pytest.mark.asyncio
     async def test_archive_success(self, service, mock_collection):
         """Should archive memory successfully."""
         result = await service.archive(
-            doc_id="memory_bank_test123",
+            content="test content to archive",
             reason="outdated"
         )
 
@@ -215,9 +223,16 @@ class TestArchive:
         assert metadata["archive_reason"] == "outdated"
 
     @pytest.mark.asyncio
-    async def test_archive_not_found(self, service, mock_collection):
+    async def test_archive_not_found(self, mock_collection):
         """Should return False if not found."""
-        mock_collection.get_fragment = MagicMock(return_value=None)
+        # Service with search that returns no results
+        async def empty_search(query, collections, limit=5):
+            return []
+        service = MemoryBankService(
+            collection=mock_collection,
+            embed_fn=AsyncMock(),
+            search_fn=empty_search
+        )
 
         result = await service.archive("nonexistent")
         assert result is False

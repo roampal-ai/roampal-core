@@ -70,6 +70,57 @@ _fastapi_started = False
 # Dev mode flag (set via command line or env)
 _dev_mode = False
 
+# Cache for update check (only check once per session)
+_update_check_cache: Optional[tuple] = None
+
+
+def _check_for_updates() -> tuple:
+    """Check if a newer version is available on PyPI.
+
+    Returns:
+        tuple: (update_available: bool, current_version: str, latest_version: str)
+    """
+    global _update_check_cache
+
+    # Return cached result if available (only check once per session)
+    if _update_check_cache is not None:
+        return _update_check_cache
+
+    try:
+        import urllib.request
+        from roampal import __version__
+
+        url = "https://pypi.org/pypi/roampal/json"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+
+        with urllib.request.urlopen(req, timeout=2) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            latest = data.get("info", {}).get("version", __version__)
+
+            # Compare versions (simple tuple comparison works for semver)
+            current_parts = [int(x) for x in __version__.split(".")]
+            latest_parts = [int(x) for x in latest.split(".")]
+            update_available = latest_parts > current_parts
+
+            _update_check_cache = (update_available, __version__, latest)
+            return _update_check_cache
+    except Exception:
+        # Fail silently - don't block on network issues
+        try:
+            from roampal import __version__
+            _update_check_cache = (False, __version__, __version__)
+        except Exception:
+            _update_check_cache = (False, "unknown", "unknown")
+        return _update_check_cache
+
+
+def _get_update_notice() -> str:
+    """Get update notice string if newer version available, else empty string."""
+    update_available, current, latest = _check_for_updates()
+    if update_available:
+        return f"\n⚠️ **Update available:** roampal {latest} (you have {current})\n   Run: `pip install --upgrade roampal`\n"
+    return ""
+
 
 def _is_port_in_use(port: int) -> bool:
     """Check if a port is already in use."""
@@ -617,6 +668,9 @@ Don't wait to be asked - good assistants remember what matters.""",
                     text += "No relevant context found. This may be a new topic or first interaction.\n"
 
                 text += f"\n_Cached {len(cached_doc_ids)} doc_ids for outcome scoring._"
+
+                # Add update notice if available (checked once per session)
+                text += _get_update_notice()
 
                 return [types.TextContent(type="text", text=text)]
 

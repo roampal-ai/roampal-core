@@ -246,7 +246,8 @@ class UnifiedMemorySystem:
         self._memory_bank_service = MemoryBankService(
             collection=self.collections["memory_bank"],
             embed_fn=self._embedding_service.embed_text,
-            config=self.config
+            config=self.config,
+            search_fn=self.search
         )
 
         self._context_service = ContextService(
@@ -273,10 +274,14 @@ class UnifiedMemorySystem:
 
         for coll_name in collections_to_clean:
             adapter = self.collections.get(coll_name)
-            if not adapter or not adapter.collection:
+            if not adapter:
                 continue
 
             try:
+                # Ensure collection is initialized before cleanup
+                await adapter._ensure_initialized()
+                if not adapter.collection:
+                    continue
                 # Get all documents in collection
                 results = adapter.collection.get(include=["metadatas"])
                 ids = results.get("ids", [])

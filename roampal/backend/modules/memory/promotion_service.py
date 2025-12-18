@@ -300,7 +300,7 @@ class PromotionService:
         """Internal batch promotion logic."""
         try:
             working_adapter = self.collections.get("working")
-            if not working_adapter:
+            if not working_adapter or not working_adapter.collection:
                 return 0
 
             promoted_count = 0
@@ -321,7 +321,7 @@ class PromotionService:
                 text = metadata.get("text", "")
                 score = metadata.get("score", 0.5)
                 uses = metadata.get("uses", 0)
-                timestamp_str = metadata.get("timestamp", "")
+                timestamp_str = metadata.get("timestamp") or metadata.get("created_at", "")
 
                 # Calculate age
                 age_hours = self._calculate_age_hours(timestamp_str)
@@ -443,7 +443,7 @@ class PromotionService:
         """
         try:
             working_adapter = self.collections.get("working")
-            if not working_adapter:
+            if not working_adapter or not working_adapter.collection:
                 return 0
 
             cleaned_count = 0
@@ -455,7 +455,7 @@ class PromotionService:
                     continue
 
                 metadata = doc.get("metadata", {})
-                timestamp_str = metadata.get("timestamp", "")
+                timestamp_str = metadata.get("timestamp") or metadata.get("created_at", "")
                 age_hours = self._calculate_age_hours(timestamp_str)
 
                 if age_hours > max_age_hours:
