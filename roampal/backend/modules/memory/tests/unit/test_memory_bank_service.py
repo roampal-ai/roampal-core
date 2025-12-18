@@ -188,7 +188,7 @@ class TestArchive:
             "content": "test",
             "metadata": {"status": "active"}
         })
-        coll.update_fragment_metadata = MagicMock()
+        coll.delete_vectors = MagicMock()
         return coll
 
     @pytest.fixture
@@ -208,19 +208,14 @@ class TestArchive:
 
     @pytest.mark.asyncio
     async def test_archive_success(self, service, mock_collection):
-        """Should archive memory successfully."""
+        """Should delete memory successfully (archive = hard delete)."""
         result = await service.archive(
             content="test content to archive",
             reason="outdated"
         )
 
         assert result is True
-        mock_collection.update_fragment_metadata.assert_called_once()
-
-        call_args = mock_collection.update_fragment_metadata.call_args
-        metadata = call_args[0][1]
-        assert metadata["status"] == "archived"
-        assert metadata["archive_reason"] == "outdated"
+        mock_collection.delete_vectors.assert_called_once_with(["memory_bank_test123"])
 
     @pytest.mark.asyncio
     async def test_archive_not_found(self, mock_collection):

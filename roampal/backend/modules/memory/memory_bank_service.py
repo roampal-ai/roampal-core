@@ -222,19 +222,8 @@ class MemoryBankService:
             logger.warning(f"Could not find memory to archive: {content[:50]}...")
             return False
 
-        doc = self.collection.get_fragment(doc_id)
-        if not doc:
-            logger.warning(f"Memory {doc_id} not found in collection")
-            return False
-
-        metadata = doc.get("metadata", {})
-        metadata["status"] = "archived"
-        metadata["archive_reason"] = reason
-        metadata["archived_at"] = datetime.now().isoformat()
-
-        self.collection.update_fragment_metadata(doc_id, metadata)
-        logger.info(f"Archived memory_bank item {doc_id}: {reason}")
-        return True
+        # Actually delete the memory (not soft archive)
+        return await self.delete(doc_id)
 
     async def search(
         self,
