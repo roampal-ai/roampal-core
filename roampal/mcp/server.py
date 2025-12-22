@@ -54,6 +54,50 @@ from roampal.backend.modules.memory import UnifiedMemorySystem
 
 logger = logging.getLogger(__name__)
 
+def _humanize_age(iso_timestamp: str) -> str:
+    """Convert ISO timestamp to human-readable age like '2d'."""
+    if not iso_timestamp:
+        return ''
+    try:
+        dt = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
+        delta = datetime.now() - dt.replace(tzinfo=None)
+        if delta.days > 30:
+            return f'{delta.days // 30}mo'
+        elif delta.days > 0:
+            return f'{delta.days}d'
+        elif delta.seconds > 3600:
+            return f'{delta.seconds // 3600}h'
+        elif delta.seconds > 60:
+            return f'{delta.seconds // 60}m'
+        else:
+            return 'now'
+    except Exception:
+        return ''
+
+
+def _format_outcomes(outcome_history_json: str) -> str:
+    """Format last 3 outcomes as [YYN]."""
+    if not outcome_history_json:
+        return ''
+    try:
+        history = json.loads(outcome_history_json)
+        if not history:
+            return ''
+        symbols = []
+        for entry in history[-3:]:
+            outcome = entry.get('outcome', '')
+            if outcome == 'worked':
+                symbols.append('Y')
+            elif outcome == 'failed':
+                symbols.append('N')
+            elif outcome == 'partial':
+                symbols.append('~')
+        return '[' + ''.join(symbols) + ']' if symbols else ''
+    except Exception:
+        return ''
+
+
+
 # Port configuration - DEV and PROD use different ports
 PROD_PORT = 27182
 DEV_PORT = 27183
@@ -237,7 +281,7 @@ WHEN NOT TO SEARCH:
 • General knowledge questions (use your training)
 • get_context_insights already gave you the answer
 
-Collections: memory_bank (user facts), books (docs), patterns (proven solutions), history (past), working (recent)
+Collections: working (24h then auto-promotes), history (30d scored), patterns (permanent scored), memory_bank (permanent), books (permanent docs)
 Omit 'collections' parameter for auto-routing (recommended).""",
                 inputSchema={
                     "type": "object",
@@ -410,7 +454,7 @@ WORKFLOW (follow these steps):
 5. record_response() to complete
 
 Returns: Known facts, past solutions, recommended collections, tool stats.
-Fast lookup (5-10ms) - no embedding search, just pattern matching.
+Uses semantic search across your memory collections.
 
 PROACTIVE MEMORY: If you learn something NEW about the user during the conversation
 (name, preference, goal, project context), use add_to_memory_bank() to store it.
@@ -470,15 +514,30 @@ Don't wait to be asked - good assistants remember what matters.""",
                     text = f"Found {len(results)} result(s) for '{query}':\n\n"
                     for i, r in enumerate(results[:limit], 1):
                         metadata = r.get("metadata", {})
+                        doc_id = r.get("id", "")
                         # Content can be in multiple places
                         content = r.get("content") or metadata.get("content") or metadata.get("text") or r.get("text", "")
                         collection = r.get("collection", "unknown")
-                        score = metadata.get("score", 0.5)
-                        uses = metadata.get("uses", 0)
-                        last_outcome = metadata.get("last_outcome", "unknown")
 
-                        meta_line = f" (score:{score:.2f}, uses:{uses}, last:{last_outcome})" if collection in ["patterns", "history", "working"] else ""
-                        text += f"{i}. [{collection}]{meta_line} {content}\n\n"
+                        # Build metadata parts
+                        meta_parts = []
+
+                        # Age from created_at
+                        age = _humanize_age(metadata.get("created_at", ""))
+                        if age:
+                            meta_parts.append(age)
+
+                        # Outcome history for scored collections
+                        if collection in ["patterns", "history", "working"]:
+                            score = metadata.get("score", 0.5)
+                            outcomes = _format_outcomes(metadata.get("outcome_history", ""))
+                            meta_parts.append(f"s:{score:.1f}")
+                            if outcomes:
+                                meta_parts.append(outcomes)
+
+                        meta_str = f" ({', '.join(meta_parts)})" if meta_parts else ""
+                        id_str = f" [id:{doc_id[:8]}]" if doc_id else ""
+                        text += f"{i}. [{collection}]{meta_str}{id_str} {content}\n\n"
 
                 return [types.TextContent(type="text", text=text)]
 

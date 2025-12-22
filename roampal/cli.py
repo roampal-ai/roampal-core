@@ -96,7 +96,7 @@ def print_update_notice():
     """Print update notice if newer version available. Non-blocking."""
     update_available, current, latest = check_for_updates()
     if update_available:
-        print(f"{YELLOW}⚠️  Update available: {latest} (you have {current}){RESET}")
+        print(f"{YELLOW}[!] Update available: {latest} (you have {current}){RESET}")
         print(f"    Run: pip install --upgrade roampal\n")
 
 

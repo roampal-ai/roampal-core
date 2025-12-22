@@ -205,10 +205,12 @@ class UnifiedMemorySystem:
             "memory_bank": "roampal_memory_bank"
         }
         for short_name, chroma_name in collection_mapping.items():
-            self.collections[short_name] = ChromaDBAdapter(
+            adapter = ChromaDBAdapter(
                 collection_name=chroma_name,
                 persist_directory=str(self.data_path / "chromadb")
             )
+            await adapter.initialize()
+            self.collections[short_name] = adapter
             logger.info(f"Initialized collection: {short_name} -> {chroma_name}")
 
         # Initialize services with dependencies
