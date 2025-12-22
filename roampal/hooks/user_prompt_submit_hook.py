@@ -36,6 +36,44 @@ import os
 import urllib.request
 import urllib.error
 
+# Update check cache to avoid hitting PyPI on every message
+_update_check_cache = {"checked": False, "available": False, "current": "", "latest": ""}
+
+
+def check_for_updates_cached() -> tuple:
+    """Check if newer version available (cached to avoid repeated PyPI calls)."""
+    global _update_check_cache
+
+    if _update_check_cache["checked"]:
+        return (_update_check_cache["available"],
+                _update_check_cache["current"],
+                _update_check_cache["latest"])
+
+    try:
+        from roampal import __version__
+
+        url = "https://pypi.org/pypi/roampal/json"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+
+        with urllib.request.urlopen(req, timeout=2) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            latest = data.get("info", {}).get("version", __version__)
+
+            current_parts = [int(x) for x in __version__.split(".")]
+            latest_parts = [int(x) for x in latest.split(".")]
+            update_available = latest_parts > current_parts
+
+            _update_check_cache["checked"] = True
+            _update_check_cache["available"] = update_available
+            _update_check_cache["current"] = __version__
+            _update_check_cache["latest"] = latest
+
+            return (update_available, __version__, latest)
+    except Exception:
+        _update_check_cache["checked"] = True
+        return (False, "", "")
+
+
 # Fix Windows encoding issues with unicode characters
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding='utf-8')
@@ -88,6 +126,11 @@ def main():
         if formatted_injection:
             # Print context to stdout - Claude Code adds this to conversation
             print(formatted_injection)
+
+        # Check for updates (cached - only hits PyPI once per session)
+        update_available, current, latest = check_for_updates_cached()
+        if update_available:
+            print(f"\n<roampal-update-available>Roampal update: {current} -> {latest}. Run: pip install --upgrade roampal</roampal-update-available>")
 
         # Exit 0 = success, stdout added as context
 
