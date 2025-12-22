@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roampal"
-version = "0.1.8"
+version = "0.1.9"
 description = "Persistent memory for AI coding tools (Claude Code, Cursor, etc.)"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 authors = [
     {name = "Roampal", email = "hello@roampal.ai"}
 ]
@@ -15,7 +15,7 @@ keywords = ["ai", "memory", "claude", "cursor", "mcp", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",

@@ -142,10 +142,13 @@ class ChromaDBAdapter:
             shard_id = fragment_id or "roampal"
             collection_name = get_user_chromadb_collection(user_id, shard_id)
             logger.info(f"Using user-isolated collection: {collection_name}")
-        
-        # Store collection name for reference
-        self.collection_name = collection_name
-        
+
+        # Use constructor's collection_name if set and parameter is default
+        if self.collection_name and collection_name == DEFAULT_COLLECTION_NAME:
+            collection_name = self.collection_name
+        else:
+            self.collection_name = collection_name
+
         # Use get_or_create to reuse existing collection
         # Don't use ChromaDB's default embedding function - Roampal provides embeddings manually
         # This prevents dimension mismatch (ChromaDB default is 384d, Roampal uses 768d)
