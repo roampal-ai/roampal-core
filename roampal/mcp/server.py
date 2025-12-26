@@ -97,6 +97,34 @@ def _format_outcomes(outcome_history_json: str) -> str:
         return ''
 
 
+# v0.2.0: Temporal query detection for auto-recency sort
+TEMPORAL_KEYWORDS = ['last', 'recent', 'previous', 'yesterday', 'today', 'earlier', 'before', 'latest', 'ago', 'just now']
+
+def _is_temporal_query(query: str) -> bool:
+    """Detect if query is asking for recent/temporal results."""
+    query_lower = query.lower()
+    return any(kw in query_lower for kw in TEMPORAL_KEYWORDS)
+
+
+def _sort_results(results: list, sort_by: str) -> list:
+    """Sort results by specified criteria."""
+    if sort_by == "recency":
+        # Sort by timestamp descending (most recent first)
+        return sorted(
+            results,
+            key=lambda r: r.get('metadata', {}).get('timestamp', ''),
+            reverse=True
+        )
+    elif sort_by == "score":
+        # Sort by outcome score descending
+        return sorted(
+            results,
+            key=lambda r: r.get('metadata', {}).get('score', 0.5),
+            reverse=True
+        )
+    # Default: keep semantic relevance order
+    return results
+
 
 # Port configuration - DEV and PROD use different ports
 PROD_PORT = 27182
@@ -230,6 +258,58 @@ def _start_fastapi_server():
         logger.error(f"Failed to start FastAPI hook server: {e}")
 
 
+def _ensure_server_running(timeout: float = 5.0) -> bool:
+    """
+    v0.2.0: Check if FastAPI hook server is up, restart it if not.
+
+    This prevents silent failures when the server crashes during a session.
+    Called before operations that depend on the hook server.
+
+    Args:
+        timeout: How long to wait for server to start
+
+    Returns:
+        True if server is running, False if it couldn't be started
+    """
+    global _fastapi_started
+    import time
+    import urllib.request
+    import urllib.error
+
+    port = DEV_PORT if _dev_mode else PROD_PORT
+    health_url = f"http://127.0.0.1:{port}/api/health"
+
+    # Try health check first
+    try:
+        req = urllib.request.Request(health_url, method='GET')
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            if resp.status == 200:
+                return True
+    except (urllib.error.URLError, OSError, TimeoutError):
+        pass
+
+    # Server not responding - try to restart it
+    logger.warning(f"FastAPI hook server not responding on port {port}, attempting restart...")
+    _fastapi_started = False
+    _start_fastapi_server()
+
+    # Wait for startup
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            req = urllib.request.Request(health_url, method='GET')
+            with urllib.request.urlopen(req, timeout=1.0) as resp:
+                if resp.status == 200:
+                    logger.info("FastAPI hook server restarted successfully")
+                    return True
+        except (urllib.error.URLError, OSError, TimeoutError):
+            pass
+        time.sleep(0.5)
+
+    logger.error("Failed to restart FastAPI hook server")
+    return False
+
+
 def _detect_mcp_client() -> str:
     """Detect MCP client for session tracking."""
     # Use "default" to match the hook's fallback conversation_id
@@ -307,6 +387,12 @@ Omit 'collections' parameter for auto-routing (recommended).""",
                             "type": "object",
                             "description": "Optional filters. Use sparingly. Examples: timestamp='2025-11-12', last_outcome='worked', has_code=true",
                             "additionalProperties": True
+                        },
+                        "sort_by": {
+                            "type": "string",
+                            "enum": ["relevance", "recency", "score"],
+                            "description": "Sort order. 'recency' for temporal queries like 'last thing we did'. Auto-detected if omitted.",
+                            "default": None
                         }
                     },
                     "required": ["query"]
@@ -484,6 +570,11 @@ Don't wait to be asked - good assistants remember what matters.""",
                 collections = arguments.get("collections")
                 limit = arguments.get("limit", 5)
                 metadata = arguments.get("metadata")
+                sort_by = arguments.get("sort_by")
+
+                # v0.2.0: Auto-detect temporal queries for recency sort
+                if sort_by is None and _is_temporal_query(query):
+                    sort_by = "recency"
 
                 try:
                     results = await _memory.search(
@@ -492,6 +583,11 @@ Don't wait to be asked - good assistants remember what matters.""",
                         limit=limit,
                         metadata_filters=metadata
                     )
+
+                    # v0.2.0: Apply sorting if requested
+                    if sort_by:
+                        results = _sort_results(results, sort_by)
+
                 except Exception as search_err:
                     return [types.TextContent(
                         type="text",
@@ -534,6 +630,12 @@ Don't wait to be asked - good assistants remember what matters.""",
                             meta_parts.append(f"s:{score:.1f}")
                             if outcomes:
                                 meta_parts.append(outcomes)
+
+                        # v0.2.0: Show book title for books collection
+                        if collection == "books":
+                            book_title = metadata.get("title", "")
+                            if book_title and book_title != "Untitled":
+                                meta_parts.append(f"📖 {book_title}")
 
                         meta_str = f" ({', '.join(meta_parts)})" if meta_parts else ""
                         id_str = f" [id:{doc_id[:8]}]" if doc_id else ""
@@ -598,6 +700,10 @@ Don't wait to be asked - good assistants remember what matters.""",
             elif name == "score_response":
                 outcome = arguments.get("outcome", "unknown")
                 related = arguments.get("related")  # Optional list of doc_ids to score
+
+                # v0.2.0: Ensure FastAPI server is running before calling it
+                if not _ensure_server_running(timeout=3.0):
+                    logger.warning("FastAPI server not available, falling back to MCP cache")
 
                 # Score via FastAPI endpoint (has access to hook-injected doc_ids cache)
                 # Use correct port based on dev mode
@@ -760,5 +866,8 @@ if __name__ == "__main__":
     parser.add_argument("--dev", action="store_true", help="Run in dev mode (port 27183, separate data)")
     args = parser.parse_args()
 
+    # Check BOTH --dev flag AND ROAMPAL_DEV env var
+    is_dev = args.dev or os.environ.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")
+
     logging.basicConfig(level=logging.INFO)
-    run_mcp_server(dev=args.dev)
+    run_mcp_server(dev=is_dev)

@@ -75,6 +75,95 @@ class SearchService:
         self._cached_doc_ids: Dict[str, List[str]] = {}
 
     # =========================================================================
+    # Date Filter Helpers (v0.2.0)
+    # =========================================================================
+
+    # Date fields that ChromaDB can't filter with $gte/$lte (stored as ISO strings)
+    DATE_FIELDS = ('timestamp', 'last_used', 'created_at', 'first_seen', 'last_seen')
+
+    def _extract_date_filters(
+        self,
+        filters: Optional[Dict[str, Any]]
+    ) -> tuple[Optional[Dict], Optional[Dict]]:
+        """
+        Separate date filters (for post-query) from other filters (for ChromaDB).
+
+        v0.2.0: ChromaDB $gte/$lte only work on numbers, not ISO strings.
+        We extract date filters and apply them in Python after fetching results.
+
+        Returns:
+            (chromadb_filters, date_filters)
+        """
+        if not filters:
+            return None, None
+
+        chromadb_filters = {}
+        date_filters = {}
+
+        for key, value in filters.items():
+            if key in self.DATE_FIELDS:
+                date_filters[key] = value
+            else:
+                chromadb_filters[key] = value
+
+        return chromadb_filters or None, date_filters or None
+
+    def _apply_date_filters(
+        self,
+        results: List[Dict],
+        date_filters: Dict[str, Any]
+    ) -> List[Dict]:
+        """
+        Apply date filtering in Python (ISO strings sort alphabetically).
+
+        Supports:
+        - Exact date match: {"timestamp": "2025-12-20"} matches "2025-12-20T..."
+        - Range operators: {"timestamp": {"$gte": "2025-12-15", "$lte": "2025-12-20"}}
+        """
+        filtered = results
+
+        for field, condition in date_filters.items():
+            if isinstance(condition, str):
+                # Exact date match: "2025-12-18" matches "2025-12-18T..."
+                if len(condition) == 10:  # YYYY-MM-DD format
+                    filtered = [
+                        r for r in filtered
+                        if r.get('metadata', {}).get(field, '').startswith(condition)
+                    ]
+                else:
+                    # Full timestamp match
+                    filtered = [
+                        r for r in filtered
+                        if r.get('metadata', {}).get(field) == condition
+                    ]
+
+            elif isinstance(condition, dict):
+                # Range operators
+                for op, val in condition.items():
+                    if op == '$gte':
+                        filtered = [
+                            r for r in filtered
+                            if r.get('metadata', {}).get(field, '') >= val
+                        ]
+                    elif op == '$gt':
+                        filtered = [
+                            r for r in filtered
+                            if r.get('metadata', {}).get(field, '') > val
+                        ]
+                    elif op == '$lte':
+                        filtered = [
+                            r for r in filtered
+                            if r.get('metadata', {}).get(field, '') <= val
+                        ]
+                    elif op == '$lt':
+                        filtered = [
+                            r for r in filtered
+                            if r.get('metadata', {}).get(field, '') < val
+                        ]
+
+        return filtered
+
+    # =========================================================================
     # Main Search
     # =========================================================================
 
@@ -140,10 +229,21 @@ class SearchService:
                 status="executing"
             )
 
+        # v0.2.0: Separate date filters from ChromaDB filters
+        # ChromaDB can't do $gte/$lte on ISO string timestamps
+        chromadb_filters, date_filters = self._extract_date_filters(metadata_filters)
+
+        # Fetch more results if we'll be post-filtering by date
+        fetch_limit = limit * 3 if date_filters else limit
+
         # Search specified collections
         all_results = await self._search_collections(
-            query_embedding, processed_query, collections, limit, metadata_filters
+            query_embedding, processed_query, collections, fetch_limit, chromadb_filters
         )
+
+        # v0.2.0: Apply date filters in Python (ISO strings sort alphabetically)
+        if date_filters:
+            all_results = self._apply_date_filters(all_results, date_filters)
 
         # Add known solutions to the beginning (they're already boosted)
         if known_solutions:

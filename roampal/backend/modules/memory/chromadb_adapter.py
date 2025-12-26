@@ -224,6 +224,7 @@ class ChromaDBAdapter:
             if self.client and self.collection_name:
                 self.collection = self.client.get_or_create_collection(
                     name=self.collection_name,
+                    embedding_function=None,  # Must match initialize() - prevents 384d/768d mismatch
                     metadata={"hnsw:space": "l2"}
                 )
 

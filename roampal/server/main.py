@@ -127,9 +127,9 @@ async def _build_cold_start_profile() -> Optional[str]:
     try:
         # Get memory_bank facts - use a broad query to find user-related facts
         # Empty query returns random results, so we search for user-specific content
-        # Include "Logan name who is" to find identity facts
+        # Search for user identity and preference facts
         all_facts = await _memory.search(
-            query="Logan name who is identity preference goal project communication style",
+            query="user name identity who is preference goal project communication style background",
             collections=["memory_bank"],
             limit=50  # Get up to 50 facts for cold start
         )

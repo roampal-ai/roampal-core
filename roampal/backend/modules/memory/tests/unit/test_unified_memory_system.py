@@ -414,5 +414,97 @@ class TestTierRecommendations:
         assert "confidence_level" in recs
 
 
+class TestStoreBook:
+    """Test book storage and chunking - v0.1.11 fixes."""
+
+    @pytest.fixture
+    def mock_ums(self, tmp_path):
+        """Create UMS with mocked embedding and books collection."""
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        ums.initialized = True
+
+        # Mock collections
+        books = MagicMock()
+        books.upsert_vectors = AsyncMock()
+        # v0.2.0: Mock async _ensure_initialized and collection.get for duplicate detection
+        books._ensure_initialized = AsyncMock()
+        books.collection = MagicMock()
+        books.collection.get = MagicMock(return_value={"ids": []})  # No existing books
+        ums.collections = {"books": books}
+
+        # Mock embedding - v0.2.0: Use embed_texts for batch embedding
+        ums._embedding_service = MagicMock()
+        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 384)
+        ums._embedding_service.embed_texts = AsyncMock(side_effect=lambda texts: [[0.1] * 384 for _ in texts])
+
+        return ums
+
+    @pytest.mark.asyncio
+    async def test_small_file_single_chunk(self, mock_ums):
+        """Small files (<= chunk_size) should become single chunk."""
+        # Content smaller than default 1000 chunk_size
+        content = "This is a short document."
+        doc_ids = await mock_ums.store_book(content, title="test")
+
+        # Should create exactly 1 chunk
+        assert len(doc_ids) == 1
+        mock_ums.collections["books"].upsert_vectors.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_large_file_multiple_chunks(self, mock_ums):
+        """Large files should be split into multiple chunks."""
+        # Content larger than chunk_size
+        content = "x" * 2500  # 2500 chars with default 1000 chunk_size
+        doc_ids = await mock_ums.store_book(content, title="test")
+
+        # Should create multiple chunks (v0.2.0: batch upsert means 1 call with all chunks)
+        assert len(doc_ids) >= 2
+        mock_ums.collections["books"].upsert_vectors.assert_called_once()
+        # Check that multiple doc_ids were passed in the single call
+        call_args = mock_ums.collections["books"].upsert_vectors.call_args
+        assert len(call_args.kwargs.get("ids", [])) >= 2
+
+    @pytest.mark.asyncio
+    async def test_overlap_equals_chunk_size_no_infinite_loop(self, mock_ums):
+        """Overlap >= chunk_size should not cause infinite loop (v0.1.11 fix)."""
+        import asyncio
+
+        content = "x" * 500  # Some content
+
+        # This would hang forever before the fix
+        # Use timeout to catch infinite loop
+        try:
+            await asyncio.wait_for(
+                mock_ums.store_book(content, title="test", chunk_size=100, chunk_overlap=100),
+                timeout=5.0
+            )
+        except asyncio.TimeoutError:
+            pytest.fail("store_book infinite looped with overlap >= chunk_size")
+
+    @pytest.mark.asyncio
+    async def test_overlap_greater_than_chunk_size_no_infinite_loop(self, mock_ums):
+        """Overlap > chunk_size should not cause infinite loop (v0.1.11 fix)."""
+        import asyncio
+
+        content = "x" * 500
+
+        # This would definitely hang before the fix
+        try:
+            await asyncio.wait_for(
+                mock_ums.store_book(content, title="test", chunk_size=100, chunk_overlap=150),
+                timeout=5.0
+            )
+        except asyncio.TimeoutError:
+            pytest.fail("store_book infinite looped with overlap > chunk_size")
+
+    @pytest.mark.asyncio
+    async def test_empty_content_handled(self, mock_ums):
+        """Empty content should not crash."""
+        doc_ids = await mock_ums.store_book("", title="empty")
+
+        # Should create 1 chunk with empty content
+        assert len(doc_ids) == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

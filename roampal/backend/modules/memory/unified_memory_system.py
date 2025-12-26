@@ -33,6 +33,9 @@ CollectionName = Literal["books", "working", "history", "patterns", "memory_bank
 # ContextType is any string - LLM discovers topics organically (coding, fitness, finance, etc.)
 ContextType = str
 
+# v0.2.0: Maximum content size for book ingestion (10MB)
+MAX_BOOK_SIZE = 10 * 1024 * 1024  # 10MB in bytes
+
 
 @dataclass
 class ActionOutcome:
@@ -682,6 +685,126 @@ class UnifiedMemorySystem:
 
     # ==================== Book/Document Operations ====================
 
+    def _chunk_by_sentences(
+        self,
+        content: str,
+        chunk_size: int = 1000,
+        chunk_overlap: int = 200
+    ) -> List[str]:
+        """
+        v0.2.0: Chunk content by sentence boundaries.
+
+        Avoids cutting mid-sentence which degrades semantic quality.
+        Falls back to character-based chunking for edge cases.
+
+        Args:
+            content: Full text to chunk
+            chunk_size: Target size per chunk (chars)
+            chunk_overlap: Overlap between chunks (chars)
+
+        Returns:
+            List of text chunks
+        """
+        import re
+
+        # Guard: Small content gets single chunk
+        if len(content) <= chunk_size:
+            return [content]
+
+        # Split by sentence boundaries (. ! ? followed by space/newline)
+        # Keep the punctuation with the sentence
+        sentence_pattern = r'(?<=[.!?])\s+'
+        sentences = re.split(sentence_pattern, content)
+
+        # Guard: If no sentences found (no punctuation), fall back to character chunking
+        if len(sentences) <= 1:
+            return self._chunk_by_chars(content, chunk_size, chunk_overlap)
+
+        chunks = []
+        current_chunk = []
+        current_length = 0
+
+        for sentence in sentences:
+            sentence_len = len(sentence)
+
+            # If adding this sentence exceeds chunk size, finalize current chunk
+            if current_length + sentence_len > chunk_size and current_chunk:
+                chunks.append(' '.join(current_chunk))
+
+                # Calculate overlap: keep sentences from end that fit in overlap
+                overlap_chunk = []
+                overlap_len = 0
+                for s in reversed(current_chunk):
+                    if overlap_len + len(s) <= chunk_overlap:
+                        overlap_chunk.insert(0, s)
+                        overlap_len += len(s) + 1  # +1 for space
+                    else:
+                        break
+
+                current_chunk = overlap_chunk
+                current_length = overlap_len
+
+            current_chunk.append(sentence)
+            current_length += sentence_len + 1  # +1 for space
+
+        # Don't forget the last chunk
+        if current_chunk:
+            chunks.append(' '.join(current_chunk))
+
+        return chunks if chunks else [content]
+
+    def _chunk_by_chars(
+        self,
+        content: str,
+        chunk_size: int,
+        chunk_overlap: int
+    ) -> List[str]:
+        """
+        Fallback: Character-based chunking for content without sentence boundaries.
+        """
+        effective_overlap = min(chunk_overlap, chunk_size - 1)
+        chunks = []
+        start = 0
+
+        while start < len(content):
+            end = start + chunk_size
+            chunks.append(content[start:end])
+            start = end - effective_overlap
+
+        return chunks
+
+    async def _check_book_exists(self, title: str) -> Optional[List[str]]:
+        """
+        v0.2.0: Check if a book with this title already exists.
+
+        Args:
+            title: Book title to check
+
+        Returns:
+            List of existing doc_ids if found, None otherwise
+        """
+        books_collection = self.collections.get("books")
+        if not books_collection:
+            return None
+
+        await books_collection._ensure_initialized()
+        if books_collection.collection is None:
+            return None
+
+        try:
+            # Query for chunks with this title
+            results = books_collection.collection.get(
+                where={"title": title},
+                include=["metadatas"]
+            )
+
+            if results and results.get("ids"):
+                return results["ids"]
+        except Exception as e:
+            logger.warning(f"Error checking for existing book: {e}")
+
+        return None
+
     async def store_book(
         self,
         content: str,
@@ -708,42 +831,65 @@ class UnifiedMemorySystem:
         if not self.initialized:
             await self.initialize()
 
-        # Simple chunking by character count with overlap
-        chunks = []
-        start = 0
-        while start < len(content):
-            end = start + chunk_size
-            chunk = content[start:end]
-            chunks.append(chunk)
-            start = end - chunk_overlap
-            if start < 0:
-                start = 0
+        # v0.2.0: File size limit check
+        content_size = len(content.encode('utf-8'))
+        if content_size > MAX_BOOK_SIZE:
+            size_mb = content_size / (1024 * 1024)
+            raise ValueError(f"Content too large ({size_mb:.1f}MB > 10MB limit). Split into smaller files.")
 
-        doc_ids = []
+        # v0.2.0: Duplicate detection - check if book with same title exists
+        if title:
+            existing = await self._check_book_exists(title)
+            if existing:
+                logger.info(f"Book '{title}' already exists ({len(existing)} chunks), skipping")
+                return existing
+
+        # v0.2.0: Sentence-based chunking (preserves semantic boundaries)
+        chunks = self._chunk_by_sentences(content, chunk_size, chunk_overlap)
+
         base_id = f"book_{uuid.uuid4().hex[:8]}"
+
+        # v0.2.0: Batch embed all chunks at once (much faster for large books)
+        embeddings = await self._embedding_service.embed_texts(chunks)
+
+        # Build all document IDs and metadata
+        doc_ids = []
+        metadatas = []
+        created_at = datetime.now().isoformat()
 
         for i, chunk in enumerate(chunks):
             doc_id = f"{base_id}_chunk_{i}"
-            embedding = await self._embedding_service.embed_text(chunk)
+            doc_ids.append(doc_id)
 
-            meta = {
+            metadatas.append({
                 "content": chunk,
                 "text": chunk,
                 "title": title or "Untitled",
                 "source": source or "unknown",
                 "chunk_index": i,
                 "total_chunks": len(chunks),
-                "created_at": datetime.now().isoformat()
-            }
+                "created_at": created_at
+            })
 
+        # v0.2.0: Batch upsert with rollback on failure
+        try:
             await self.collections["books"].upsert_vectors(
-                ids=[doc_id],
-                vectors=[embedding],
-                metadatas=[meta]
+                ids=doc_ids,
+                vectors=embeddings,
+                metadatas=metadatas
             )
-            doc_ids.append(doc_id)
+        except Exception as e:
+            # Rollback: delete any chunks that may have been inserted
+            logger.error(f"Failed to store book '{title}': {e}, rolling back...")
+            try:
+                books = self.collections.get("books")
+                if books and books.collection:
+                    books.collection.delete(ids=doc_ids)
+            except Exception as rollback_err:
+                logger.warning(f"Rollback failed: {rollback_err}")
+            raise
 
-        logger.info(f"Stored book '{title}' in {len(chunks)} chunks")
+        logger.info(f"Stored book '{title}' in {len(chunks)} chunks (batch embedded)")
         return doc_ids
 
     async def remove_book(self, title: str) -> Dict[str, Any]:
@@ -879,10 +1025,20 @@ class UnifiedMemorySystem:
         return list(books_by_title.values())
 
     def _save_kg(self):
-        """Save knowledge graph to disk."""
+        """Save knowledge graph to disk and sync to _kg_service.
+
+        v0.2.0 FIX: After saving, reload _kg_service so SearchService sees updates.
+        This fixes the "Reading Your Own Writes" bug where UMS writes to self.knowledge_graph
+        but SearchService reads from _kg_service.knowledge_graph (which was stale).
+        """
         try:
             with open(self.kg_path, 'w') as f:
                 json.dump(self.knowledge_graph, f, indent=2)
+
+            # v0.2.0: Sync to _kg_service so SearchService sees the update
+            if hasattr(self, '_kg_service') and self._kg_service is not None:
+                self._kg_service.reload_kg()
+
         except Exception as e:
             logger.error(f"Failed to save knowledge graph: {e}")
 
