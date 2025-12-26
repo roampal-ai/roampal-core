@@ -529,11 +529,59 @@ Set `ROAMPAL_DEV=1` environment variable to isolate dev from production:
 - **Port:** Production uses 27182, dev uses 27183
 - **Data:** Production: `%APPDATA%/Roampal/data`, Dev: `%APPDATA%/Roampal_DEV/data`
 
-**Important:** Both MCP server AND hooks need `ROAMPAL_DEV=1`:
-- MCP server gets it from `.mcp.json` env config
-- Hooks automatically detect `ROAMPAL_DEV` from environment and use the correct port
+**Important:** Both MCP server AND hooks need `ROAMPAL_DEV=1` configured SEPARATELY:
+- MCP server gets it from `~/.claude/mcp.json` env config
+- Hooks get it from `~/.claude/settings.json` env config (NOT automatic!)
+
+**CRITICAL:** Hooks run as subprocesses spawned by Claude Code. They do NOT inherit your terminal's env vars. You MUST add `"env": {"ROAMPAL_DEV": "1"}` to settings.json for hooks to connect to DEV server.
+
+Example `~/.claude/settings.json`:
+```json
+{
+  "env": {
+    "ROAMPAL_DEV": "1"
+  },
+  "hooks": { ... }
+}
+```
+
+Bug (2025-12-26): Missing env section in settings.json caused hooks to silently connect to PROD (27182) while MCP connected to DEV (27183). This went unnoticed for 15 days because MCP still worked.
 
 You can also set `ROAMPAL_DATA_PATH` environment variable for custom paths.
+
+### Dev Mode Implementation (v0.2.0)
+
+**SINGLE SOURCE OF TRUTH:** All code that determines DEV vs PROD mode MUST use the `is_dev_mode()` helper function. Never check `args.dev` directly.
+
+**The Pattern (cli.py):**
+```python
+def is_dev_mode(args=None) -> bool:
+    """
+    SINGLE SOURCE OF TRUTH for DEV mode detection.
+
+    Checks (in order):
+    1. args.dev flag (if args provided)
+    2. ROAMPAL_DEV environment variable
+
+    ALL commands MUST use this. Never check args.dev directly.
+    """
+    if args is not None and getattr(args, 'dev', False):
+        return True
+    return os.environ.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")
+
+
+def get_port(args=None) -> int:
+    """Get port based on DEV/PROD mode."""
+    return DEV_PORT if is_dev_mode(args) else PROD_PORT
+```
+
+**Bug History (2025-12-26):** Multiple CLI commands only checked `args.dev`, ignoring the `ROAMPAL_DEV` environment variable. This caused MCP (using env var from `.mcp.json`) to connect to DEV while CLI commands connected to PROD - data ended up in wrong database. Fixed by centralizing all DEV mode checks through `is_dev_mode()`.
+
+**Why This Matters:**
+- MCP server gets `ROAMPAL_DEV=1` from `.mcp.json` env config
+- Hooks detect `ROAMPAL_DEV` from environment
+- CLI commands must also check the env var, not just `--dev` flag
+- Single helper prevents this class of bug from recurring
 
 ### What `roampal init` Does
 

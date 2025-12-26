@@ -28,6 +28,27 @@ PROD_PORT = 27182
 DEV_PORT = 27183
 
 
+def is_dev_mode(args=None) -> bool:
+    """
+    SINGLE SOURCE OF TRUTH for DEV mode detection.
+
+    Checks (in order):
+    1. args.dev flag (if args provided)
+    2. ROAMPAL_DEV environment variable
+
+    ALL commands MUST use this. Never check args.dev directly.
+    See ARCHITECTURE.md 'Dev Mode Implementation' for details.
+    """
+    if args is not None and getattr(args, 'dev', False):
+        return True
+    return os.environ.get('ROAMPAL_DEV', '').lower() in ('1', 'true', 'yes')
+
+
+def get_port(args=None) -> int:
+    """Get port based on DEV/PROD mode. Uses is_dev_mode() for consistency."""
+    return DEV_PORT if is_dev_mode(args) else PROD_PORT
+
+
 def get_data_dir(dev: bool = False) -> Path:
     """Get the data directory path. DEV uses separate directory to avoid collision with PROD."""
     if dev:
@@ -128,9 +149,10 @@ def cmd_init(args):
     print(f"{GREEN}Detected: {', '.join(detected)}{RESET}\n")
 
     # Configure each detected tool
+    is_dev = is_dev_mode(args)
     for tool in detected:
         if tool == "claude-code":
-            configure_claude_code(claude_code_dir)
+            configure_claude_code(claude_code_dir, is_dev=is_dev)
         elif tool == "cursor":
             configure_cursor(cursor_dir)
 
@@ -158,8 +180,13 @@ def cmd_init(args):
 """)
 
 
-def configure_claude_code(claude_dir: Path):
-    """Configure Claude Code hooks, MCP, and permissions."""
+def configure_claude_code(claude_dir: Path, is_dev: bool = False):
+    """Configure Claude Code hooks, MCP, and permissions.
+
+    Args:
+        claude_dir: Path to ~/.claude directory
+        is_dev: If True, adds ROAMPAL_DEV=1 to env sections
+    """
     print(f"{BOLD}Configuring Claude Code...{RESET}")
 
     # Create settings.json with hooks and permissions
@@ -167,11 +194,20 @@ def configure_claude_code(claude_dir: Path):
 
     # Load existing settings or create new
     settings = {}
+    existing_env = None
     if settings_path.exists():
         try:
             settings = json.loads(settings_path.read_text())
+            # PRESERVE existing env section (critical for DEV/PROD isolation)
+            existing_env = settings.get("env")
         except:
             pass
+
+    # Handle env section: preserve existing OR add if --dev
+    if existing_env:
+        settings["env"] = existing_env  # Keep what user had
+    elif is_dev:
+        settings["env"] = {"ROAMPAL_DEV": "1"}  # Add for --dev
 
     # Configure hooks - Claude Code expects nested format with type/command
     python_exe = sys.executable.replace("\\", "\\\\")  # Escape backslashes for JSON
@@ -233,7 +269,7 @@ def configure_claude_code(claude_dir: Path):
             "roampal-core": {
                 "command": sys.executable,
                 "args": ["-m", "roampal.mcp.server"],
-                "env": {}
+                "env": {"ROAMPAL_DEV": "1"} if is_dev else {}
             }
         }
     }
@@ -261,7 +297,7 @@ def configure_claude_code(claude_dir: Path):
             "roampal-core": {
                 "command": sys.executable,
                 "args": ["-m", "roampal.mcp.server"],
-                "env": {}
+                "env": {"ROAMPAL_DEV": "1"} if is_dev else {}
             }
         }
     }
@@ -325,7 +361,7 @@ def cmd_start(args):
 
     # Determine port based on mode (DEV=27183, PROD=27182)
     # User can override with --port
-    is_dev = args.dev
+    is_dev = is_dev_mode(args)
     default_port = DEV_PORT if is_dev else PROD_PORT
     port = args.port if args.port != PROD_PORT else default_port  # Use default unless explicitly overridden
 
@@ -365,7 +401,7 @@ def cmd_status(args):
 
     host = args.host or "127.0.0.1"
     # Use dev port if --dev flag, otherwise prod port (unless explicitly overridden)
-    is_dev = getattr(args, 'dev', False)
+    is_dev = is_dev_mode(args)
     default_port = DEV_PORT if is_dev else PROD_PORT
     port = args.port if args.port and args.port != PROD_PORT else default_port
 
@@ -399,7 +435,7 @@ def cmd_stats(args):
 
     host = args.host or "127.0.0.1"
     # Use dev port if --dev flag
-    is_dev = getattr(args, 'dev', False)
+    is_dev = is_dev_mode(args)
     default_port = DEV_PORT if is_dev else PROD_PORT
     port = args.port if args.port and args.port != PROD_PORT else default_port
 
@@ -477,8 +513,7 @@ def cmd_ingest(args):
 
         print(f"  Content length: {len(content):,} characters")
 
-        # Handle dev mode - use correct port and data path
-        is_dev = args.dev
+        is_dev = is_dev_mode(args)
         data_path = None
         if is_dev:
             data_path = str(get_data_dir(dev=True))
@@ -557,9 +592,14 @@ def cmd_remove(args):
     title = args.title
     print(f"{BOLD}Removing book:{RESET} {title}\n")
 
+    # v0.2.0: Handle --dev flag by setting env var
+    if getattr(args, 'dev', False):
+        os.environ["ROAMPAL_DEV"] = "1"
+        print(f"  {YELLOW}DEV mode{RESET}")
+
     # Try running server first
     host = "127.0.0.1"
-    port = 27182
+    port = get_port(args)
     server_url = f"http://{host}:{port}/api/remove-book"
 
     try:
@@ -612,7 +652,7 @@ def cmd_books(args):
 
     # Try running server first
     host = "127.0.0.1"
-    port = 27182
+    port = get_port()
     server_url = f"http://{host}:{port}/api/books"
 
     books = None
@@ -660,6 +700,7 @@ def main():
 
     # init command
     init_parser = subparsers.add_parser("init", help="Initialize Roampal for Claude Code / Cursor")
+    init_parser.add_argument("--dev", action="store_true", help="Initialize for DEV mode (separate data directory)")
 
     # start command
     start_parser = subparsers.add_parser("start", help="Start the memory server")
@@ -690,6 +731,7 @@ def main():
     # remove command
     remove_parser = subparsers.add_parser("remove", help="Remove a book from the books collection")
     remove_parser.add_argument("title", help="Title of the book to remove")
+    remove_parser.add_argument("--dev", action="store_true", help="Use dev server")
 
     # books command
     books_parser = subparsers.add_parser("books", help="List all books in memory")
