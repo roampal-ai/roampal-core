@@ -58,7 +58,7 @@ You never have to ask "remember when..." - it's automatic.
 ## Commands
 
 ```bash
-roampal init      # Configure Claude Code / Cursor (one-time)
+roampal init      # Configure Claude Code (one-time)
 roampal ingest    # Add documents (.txt, .md, .pdf) to books collection
 roampal books     # List all ingested books
 roampal remove    # Remove a book by title

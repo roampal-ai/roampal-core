@@ -344,6 +344,16 @@ def run_mcp_server(dev: bool = False):
 
     server = Server("roampal")
 
+    @server.list_prompts()
+    async def list_prompts() -> list[types.Prompt]:
+        """List available prompts (none currently)."""
+        return []
+
+    @server.list_resources()
+    async def list_resources() -> list[types.Resource]:
+        """List available resources (none currently)."""
+        return []
+
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
         """List available MCP tools."""

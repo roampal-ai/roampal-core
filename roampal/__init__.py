@@ -15,7 +15,7 @@ How it works:
     4. You see your original message; the AI sees your message + context
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 from roampal.backend.modules.memory import (
     UnifiedMemorySystem,
