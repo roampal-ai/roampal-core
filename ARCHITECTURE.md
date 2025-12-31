@@ -585,14 +585,25 @@ def get_port(args=None) -> int:
 
 ### What `roampal init` Does
 
+Automatically detects and configures Claude Code and/or Cursor:
+
+**Claude Code** (`~/.claude/` detected):
+
 1. Creates `~/.claude/settings.json` with:
    - UserPromptSubmit hook → `python -m roampal.hooks.user_prompt_submit_hook`
    - Stop hook → `python -m roampal.hooks.stop_hook`
    - Auto-allow permissions for all roampal MCP tools
 
-2. Creates `~/.claude/mcp_servers.json` with roampal MCP server
+2. Creates `~/.claude/.mcp.json` with roampal-core MCP server
 
-3. Creates data directory at `%APPDATA%/Roampal/data`
+**Cursor** (`~/.cursor/` detected):
+1. Creates `~/.cursor/mcp.json` with roampal-core MCP server
+2. Note: Cursor doesn't support hooks, but MCP tools provide full memory access
+
+**Both:**
+
+- Creates data directory at `%APPDATA%/Roampal/data` (Windows) or platform equivalent
+- Supports `--dev` flag for isolated development environment
 
 ---
 
@@ -697,7 +708,7 @@ dependencies = [
 
 ## Future Considerations
 
-1. **Cursor Support**: Hooks work, but Cursor hook format may differ
+1. **Cursor Support**: ✅ MCP support added in v0.2.2 (hooks not supported by Cursor)
 2. **Dashboard**: Web UI for memory management
 3. **Multi-User**: Currently single-user design
 4. **Encryption**: Data at rest is not encrypted

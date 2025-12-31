@@ -167,6 +167,11 @@ class UnifiedMemorySystem:
         self.kg_path = self.data_path / "knowledge_graph.json"
         self.knowledge_graph = self._load_kg()
 
+        # Ghost Registry - tracks deleted book IDs without modifying ChromaDB
+        # v0.2.2: Non-destructive delete to avoid HNSW index corruption
+        self.ghost_registry_path = self.data_path / "ghost_ids.json"
+        self.ghost_ids: set = self._load_ghost_registry()
+
     def _load_kg(self) -> Dict[str, Any]:
         """Load knowledge graph from disk, or return default structure."""
         if self.kg_path.exists():
@@ -187,12 +192,101 @@ class UnifiedMemorySystem:
             "context_action_effectiveness": {}
         }
 
+    def _load_ghost_registry(self) -> set:
+        """
+        Load ghost registry from disk.
+
+        v0.2.2: Ghost IDs are book chunk IDs that have been "deleted" but remain
+        in ChromaDB to avoid HNSW index corruption. These get filtered from search.
+        """
+        if self.ghost_registry_path.exists():
+            try:
+                with open(self.ghost_registry_path, 'r') as f:
+                    data = json.load(f)
+                    return set(data.get("ghost_ids", []))
+            except Exception as e:
+                logger.warning(f"Failed to load ghost registry: {e}")
+        return set()
+
+    def _save_ghost_registry(self):
+        """Save ghost registry to disk."""
+        try:
+            with open(self.ghost_registry_path, 'w') as f:
+                json.dump({"ghost_ids": list(self.ghost_ids)}, f, indent=2)
+            logger.debug(f"Saved ghost registry with {len(self.ghost_ids)} IDs")
+        except Exception as e:
+            logger.error(f"Failed to save ghost registry: {e}")
+
+    def _migrate_chromadb_schema(self):
+        """
+        Migrate ChromaDB schema for compatibility across versions.
+
+        v0.2.2: ChromaDB 1.x added 'topic' column to collections and segments tables.
+        Users upgrading from ChromaDB 0.4.x/0.5.x will have old schema.
+        This safely adds missing columns without affecting existing data.
+        """
+        import sqlite3
+
+        chromadb_path = self.data_path / "chromadb"
+        sqlite_path = chromadb_path / "chroma.sqlite3"
+
+        if not sqlite_path.exists():
+            logger.debug("No existing ChromaDB - skipping migration")
+            return
+
+        try:
+            conn = sqlite3.connect(str(sqlite_path))
+            cursor = conn.cursor()
+
+            # Columns added in ChromaDB 1.x that may be missing
+            migrations_needed = []
+
+            # Check collections table
+            cursor.execute("PRAGMA table_info(collections)")
+            collections_columns = {col[1] for col in cursor.fetchall()}
+            if 'topic' not in collections_columns:
+                migrations_needed.append(('collections', 'topic', 'TEXT'))
+
+            # Check segments table (also needs 'topic' in ChromaDB 1.x)
+            cursor.execute("PRAGMA table_info(segments)")
+            segments_columns = {col[1] for col in cursor.fetchall()}
+            if 'topic' not in segments_columns:
+                migrations_needed.append(('segments', 'topic', 'TEXT'))
+
+            # Apply migrations
+            for table, column, col_type in migrations_needed:
+                try:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+                    logger.info(f"ChromaDB migration: Added {column} to {table}")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" in str(e).lower():
+                        pass  # Column already exists, safe to ignore
+                    else:
+                        raise
+
+            conn.commit()
+            conn.close()
+
+            if migrations_needed:
+                logger.info(f"ChromaDB schema migration complete: {len(migrations_needed)} columns added")
+            else:
+                logger.debug("ChromaDB schema up to date")
+
+        except Exception as e:
+            logger.warning(f"ChromaDB schema migration failed (non-fatal): {e}")
+            # Don't raise - let ChromaDB try to initialize anyway
+            # Worst case: original error surfaces with better context
+
     async def initialize(self):
         """Initialize collections and services."""
         if self.initialized:
             return
 
         logger.info("Initializing UnifiedMemorySystem...")
+
+        # v0.2.2: Migrate ChromaDB schema before initialization
+        # Handles upgrades from ChromaDB 0.4.x to 1.x
+        self._migrate_chromadb_schema()
 
         # Initialize embedding service
         self._embedding_service = EmbeddingService()
@@ -356,6 +450,11 @@ class UnifiedMemorySystem:
                 )
 
                 for r in results:
+                    # v0.2.2: Filter out ghost IDs (deleted books)
+                    doc_id = r.get("id", "")
+                    if doc_id in self.ghost_ids:
+                        continue
+
                     # Add collection info
                     r["collection"] = coll_name
 
@@ -467,7 +566,8 @@ class UnifiedMemorySystem:
         text: str,
         tags: List[str] = None,
         importance: float = 0.7,
-        confidence: float = 0.7
+        confidence: float = 0.7,
+        always_inject: bool = False
     ) -> str:
         """
         Store a fact in memory_bank.
@@ -477,6 +577,7 @@ class UnifiedMemorySystem:
             tags: Categories (identity, preference, goal, project)
             importance: How critical (0.0-1.0)
             confidence: How certain (0.0-1.0)
+            always_inject: If True, appears in every context
 
         Returns:
             Document ID
@@ -488,7 +589,8 @@ class UnifiedMemorySystem:
             text=text,
             tags=tags or [],
             importance=importance,
-            confidence=confidence
+            confidence=confidence,
+            always_inject=always_inject
         )
 
     async def update_memory_bank(
@@ -610,9 +712,19 @@ class UnifiedMemorySystem:
 
         result = {
             "memories": [],
+            "user_facts": [],
             "formatted_injection": "",
             "doc_ids": []
         }
+
+        # 0. Fetch always_inject memories (core identity - always included)
+        always_inject_memories = self._memory_bank_service.get_always_inject()
+        if always_inject_memories:
+            result["user_facts"] = always_inject_memories
+            # Add their doc_ids for scoring
+            for mem in always_inject_memories:
+                if mem.get("id"):
+                    result["doc_ids"].append(mem["id"])
 
         # 1. Extract concepts for KG routing insight
         concepts = self._extract_concepts(query)
@@ -894,9 +1006,11 @@ class UnifiedMemorySystem:
 
     async def remove_book(self, title: str) -> Dict[str, Any]:
         """
-        Remove a book by title.
+        Remove a book by title using ghost registry.
 
-        Deletes all chunks from ChromaDB and cleans Action KG references.
+        v0.2.2: Non-destructive approach - adds chunk IDs to ghost registry
+        instead of deleting from ChromaDB. This avoids HNSW index corruption.
+        Ghost IDs are filtered from search results, making them invisible.
 
         Args:
             title: The book title to remove
@@ -929,13 +1043,11 @@ class UnifiedMemorySystem:
         if not doc_ids:
             return {"removed": 0, "message": f"No book found with title '{title}'"}
 
-        # Delete from ChromaDB
-        try:
-            books_collection.delete_vectors(doc_ids)
-            logger.info(f"Removed {len(doc_ids)} chunks for book '{title}'")
-        except Exception as e:
-            logger.error(f"Failed to delete book chunks from ChromaDB: {e}")
-            return {"removed": 0, "error": f"ChromaDB delete failed: {str(e)}"}
+        # v0.2.2: Add to ghost registry instead of deleting from ChromaDB
+        # This avoids HNSW index corruption while making chunks invisible
+        self.ghost_ids.update(doc_ids)
+        self._save_ghost_registry()
+        logger.info(f"Ghosted {len(doc_ids)} chunks for book '{title}' (non-destructive)")
 
         # Clean Action KG references
         cleaned_refs = await self.cleanup_action_kg_for_doc_ids(doc_ids)
@@ -943,7 +1055,8 @@ class UnifiedMemorySystem:
         return {
             "removed": len(doc_ids),
             "title": title,
-            "cleaned_kg_refs": cleaned_refs
+            "cleaned_kg_refs": cleaned_refs,
+            "method": "ghost_registry"
         }
 
     async def cleanup_action_kg_for_doc_ids(self, doc_ids: List[str]) -> int:
@@ -1007,9 +1120,13 @@ class UnifiedMemorySystem:
         except Exception:
             return []
 
-        # Group by title
+        # Group by title, filtering out ghosted chunks
         books_by_title = {}
         for i, doc_id in enumerate(results.get("ids", [])):
+            # v0.2.2: Skip ghosted chunks
+            if doc_id in self.ghost_ids:
+                continue
+
             metadata = results.get("metadatas", [])[i] if i < len(results.get("metadatas", [])) else {}
             title = metadata.get("title", "Untitled")
 

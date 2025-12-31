@@ -464,8 +464,13 @@ class ChromaDBAdapter:
     def list_all_ids(self) -> List[str]:
         if self.collection is None:
             raise RuntimeError("ChromaDB collection not initialized")
-        result = self.collection.get(include=[])
-        return result.get('ids', [])
+        try:
+            result = self.collection.get(include=[])
+            return result.get('ids', [])
+        except Exception as e:
+            # ChromaDB can throw "Error finding id" for ghost entries (IDs in index but no document)
+            logger.warning(f"ChromaDB error listing all IDs: {e}")
+            return []
 
     def delete_vectors(self, ids: List[str]):
         if self.collection is None:
@@ -497,7 +502,13 @@ class ChromaDBAdapter:
     def get_fragment(self, fragment_id: str) -> Optional[Dict[str, Any]]:
         if self.collection is None:
             raise RuntimeError("ChromaDB collection not initialized. Cannot get fragment.")
-        result = self.collection.get(ids=[fragment_id], include=["embeddings", "metadatas", "documents"])
+        try:
+            result = self.collection.get(ids=[fragment_id], include=["embeddings", "metadatas", "documents"])
+        except Exception as e:
+            # ChromaDB can throw "Error finding id" for ghost entries (IDs in index but no document)
+            # This happens when documents are deleted but index isn't fully cleaned
+            logger.warning(f"ChromaDB error getting fragment {fragment_id}: {e}")
+            return None
         if not result or not result.get("ids"):
             return None
         embeddings = result.get("embeddings", [])
