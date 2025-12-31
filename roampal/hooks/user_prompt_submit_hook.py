@@ -2,16 +2,24 @@
 """
 Roampal UserPromptSubmit Hook
 
-Called by Claude Code BEFORE the LLM sees the user's message.
+Called by Claude Code / Cursor BEFORE the LLM sees the user's message.
 This hook:
 1. Checks if previous exchange needs scoring
 2. Injects scoring prompt if needed
 3. Injects relevant memories as context
 
-Usage (in .claude/settings.json):
+Usage (Claude Code - .claude/settings.json):
 {
   "hooks": {
     "UserPromptSubmit": ["python", "-m", "roampal.hooks.user_prompt_submit_hook"]
+  }
+}
+
+Usage (Cursor 1.7+ - .cursor/hooks.json):
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [{"command": "python -m roampal.hooks.user_prompt_submit_hook"}]
   }
 }
 
@@ -94,9 +102,9 @@ def main():
     if not user_message:
         sys.exit(0)
 
-    # Get session_id from Claude Code input - this matches what Stop hook uses
+    # Get conversation_id - support both Claude Code (session_id) and Cursor (conversation_id)
     # This ensures completion state is tracked consistently across hooks
-    conversation_id = input_data.get("session_id", "default")
+    conversation_id = input_data.get("conversation_id") or input_data.get("session_id", "default")
 
     # Call Roampal server for context
     # Respect ROAMPAL_DEV env var for port selection

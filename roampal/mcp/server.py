@@ -433,7 +433,8 @@ Note: memory_bank is NOT outcome-scored. Facts persist until archived.""",
                         "content": {"type": "string", "description": "The fact to remember"},
                         "tags": {"type": "array", "items": {"type": "string"}, "description": "Categories: identity, preference, goal, project, system_mastery, agent_growth"},
                         "importance": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.7, "description": "How critical (0.0-1.0)"},
-                        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.7, "description": "How certain (0.0-1.0)"}
+                        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.7, "description": "How certain (0.0-1.0)"},
+                        "always_inject": {"type": "boolean", "default": False, "description": "If true, this memory appears in EVERY context (use for core identity only)"}
                     },
                     "required": ["content"]
                 }
@@ -658,12 +659,14 @@ Don't wait to be asked - good assistants remember what matters.""",
                 tags = arguments.get("tags", [])
                 importance = arguments.get("importance", 0.7)
                 confidence = arguments.get("confidence", 0.7)
+                always_inject = arguments.get("always_inject", False)
 
                 doc_id = await _memory.store_memory_bank(
                     text=content,
                     tags=tags,
                     importance=importance,
-                    confidence=confidence
+                    confidence=confidence,
+                    always_inject=always_inject
                 )
 
                 return [types.TextContent(

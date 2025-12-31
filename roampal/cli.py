@@ -4,6 +4,7 @@ Roampal CLI - One command install for AI coding tools
 Usage:
     pip install roampal
     roampal init          # Configure Claude Code / Cursor
+    roampal doctor        # Diagnose installation issues
     roampal start         # Start the memory server
     roampal status        # Check server status
 """
@@ -132,21 +133,45 @@ def cmd_init(args):
     claude_code_dir = home / ".claude"
     cursor_dir = home / ".cursor"
 
-    detected = []
-    if claude_code_dir.exists():
-        detected.append("claude-code")
-    if cursor_dir.exists():
-        detected.append("cursor")
+    # Check for explicit flags (--claude-code, --cursor)
+    explicit_claude = getattr(args, 'claude_code', False)
+    explicit_cursor = getattr(args, 'cursor', False)
+
+    if explicit_claude or explicit_cursor:
+        # User specified explicit tools - use those
+        detected = []
+        if explicit_claude:
+            if claude_code_dir.exists():
+                detected.append("claude-code")
+            else:
+                # Create the directory if it doesn't exist
+                claude_code_dir.mkdir(parents=True, exist_ok=True)
+                detected.append("claude-code")
+                print(f"{YELLOW}Created ~/.claude directory{RESET}")
+        if explicit_cursor:
+            if cursor_dir.exists():
+                detected.append("cursor")
+            else:
+                cursor_dir.mkdir(parents=True, exist_ok=True)
+                detected.append("cursor")
+                print(f"{YELLOW}Created ~/.cursor directory{RESET}")
+    else:
+        # Auto-detect installed tools
+        detected = []
+        if claude_code_dir.exists():
+            detected.append("claude-code")
+        if cursor_dir.exists():
+            detected.append("cursor")
 
     if not detected:
         print(f"{YELLOW}No AI coding tools detected.{RESET}")
         print("Roampal works with:")
         print("  - Claude Code (https://claude.com/claude-code)")
         print("  - Cursor (https://cursor.sh)")
-        print("\nInstall one of these tools first, then run 'roampal init' again.")
+        print("\nInstall one of these tools first, or use --claude-code / --cursor to force setup.")
         return
 
-    print(f"{GREEN}Detected: {', '.join(detected)}{RESET}\n")
+    print(f"{GREEN}Configuring: {', '.join(detected)}{RESET}\n")
 
     # Configure each detected tool
     is_dev = is_dev_mode(args)
@@ -154,7 +179,7 @@ def cmd_init(args):
         if tool == "claude-code":
             configure_claude_code(claude_code_dir, is_dev=is_dev)
         elif tool == "cursor":
-            configure_cursor(cursor_dir)
+            configure_cursor(cursor_dir, is_dev=is_dev)
 
     # Create data directory
     data_dir = get_data_dir()
@@ -320,17 +345,23 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False):
     print(f"  {GREEN}Claude Code configured!{RESET}\n")
 
 
-def configure_cursor(cursor_dir: Path):
-    """Configure Cursor MCP."""
+def configure_cursor(cursor_dir: Path, is_dev: bool = False):
+    """Configure Cursor MCP and hooks.
+
+    Args:
+        cursor_dir: Path to ~/.cursor directory
+        is_dev: If True, adds ROAMPAL_DEV=1 to env section
+    """
     print(f"{BOLD}Configuring Cursor...{RESET}")
 
-    # Cursor uses a different MCP config location
+    # Cursor uses ~/.cursor/mcp.json
     mcp_config_path = cursor_dir / "mcp.json"
     mcp_config = {
         "mcpServers": {
-            "roampal": {
-                "command": "python",
-                "args": ["-m", "roampal.mcp.server"]
+            "roampal-core": {
+                "command": sys.executable,
+                "args": ["-m", "roampal.mcp.server"],
+                "env": {"ROAMPAL_DEV": "1"} if is_dev else {}
             }
         }
     }
@@ -340,9 +371,9 @@ def configure_cursor(cursor_dir: Path):
         try:
             existing = json.loads(mcp_config_path.read_text())
             if "mcpServers" in existing:
-                existing["mcpServers"]["roampal"] = mcp_config["mcpServers"]["roampal"]
+                existing["mcpServers"]["roampal-core"] = mcp_config["mcpServers"]["roampal-core"]
             else:
-                existing.update(mcp_config)
+                existing["mcpServers"] = mcp_config["mcpServers"]
             mcp_config = existing
         except:
             pass
@@ -350,9 +381,56 @@ def configure_cursor(cursor_dir: Path):
     mcp_config_path.write_text(json.dumps(mcp_config, indent=2))
     print(f"  {GREEN}Created MCP config: {mcp_config_path}{RESET}")
 
+    # Cursor 1.7+ supports hooks - create ~/.cursor/hooks.json
+    hooks_config_path = cursor_dir / "hooks.json"
+    python_exe = sys.executable
+
+    # Build hook commands - need to set ROAMPAL_DEV env var if in dev mode
+    if is_dev:
+        # On Windows, use cmd /c to set env var before running
+        if sys.platform == "win32":
+            submit_cmd = f'cmd /c "set ROAMPAL_DEV=1 && {python_exe} -m roampal.hooks.user_prompt_submit_hook"'
+            stop_cmd = f'cmd /c "set ROAMPAL_DEV=1 && {python_exe} -m roampal.hooks.stop_hook"'
+        else:
+            submit_cmd = f'ROAMPAL_DEV=1 {python_exe} -m roampal.hooks.user_prompt_submit_hook'
+            stop_cmd = f'ROAMPAL_DEV=1 {python_exe} -m roampal.hooks.stop_hook'
+    else:
+        submit_cmd = f'{python_exe} -m roampal.hooks.user_prompt_submit_hook'
+        stop_cmd = f'{python_exe} -m roampal.hooks.stop_hook'
+
+    hooks_config = {
+        "version": 1,
+        "hooks": {
+            "beforeSubmitPrompt": [
+                {"command": submit_cmd}
+            ],
+            "stop": [
+                {"command": stop_cmd}
+            ]
+        }
+    }
+
+    # Merge with existing hooks if present
+    if hooks_config_path.exists():
+        try:
+            existing = json.loads(hooks_config_path.read_text())
+            if "hooks" in existing:
+                existing["hooks"]["beforeSubmitPrompt"] = hooks_config["hooks"]["beforeSubmitPrompt"]
+                existing["hooks"]["stop"] = hooks_config["hooks"]["stop"]
+            else:
+                existing["hooks"] = hooks_config["hooks"]
+            if "version" not in existing:
+                existing["version"] = 1
+            hooks_config = existing
+        except:
+            pass
+
+    hooks_config_path.write_text(json.dumps(hooks_config, indent=2))
+    print(f"  {GREEN}Created hooks config: {hooks_config_path}{RESET}")
+    print(f"  {GREEN}  - beforeSubmitPrompt hook (injects scoring + memories){RESET}")
+    print(f"  {GREEN}  - stop hook (enforces record_response){RESET}")
+
     print(f"  {GREEN}Cursor configured!{RESET}\n")
-    print(f"  {YELLOW}Note: Cursor hooks coming in future version.{RESET}")
-    print(f"  {YELLOW}For now, MCP tools provide memory access.{RESET}\n")
 
 
 def cmd_start(args):
@@ -642,6 +720,217 @@ def cmd_remove(args):
         print(f"{YELLOW}No book found with title '{title}'{RESET}")
 
 
+def cmd_doctor(args):
+    """Diagnose Roampal installation and configuration."""
+    import asyncio
+
+    print_banner()
+    print(f"{BOLD}Roampal Doctor - Diagnostics{RESET}\n")
+
+    is_dev = is_dev_mode(args)
+    mode_str = f"{YELLOW}DEV{RESET}" if is_dev else f"{GREEN}PROD{RESET}"
+    print(f"Mode: {mode_str}\n")
+
+    checks_passed = 0
+    checks_failed = 0
+    checks_warned = 0
+
+    def check_pass(msg):
+        nonlocal checks_passed
+        checks_passed += 1
+        print(f"  {GREEN}[OK]{RESET} {msg}")
+
+    def check_fail(msg):
+        nonlocal checks_failed
+        checks_failed += 1
+        print(f"  {RED}[FAIL]{RESET} {msg}")
+
+    def check_warn(msg):
+        nonlocal checks_warned
+        checks_warned += 1
+        print(f"  {YELLOW}[WARN]{RESET} {msg}")
+
+    # 1. Check Python version
+    print(f"{BOLD}Python Environment:{RESET}")
+    py_version = sys.version_info
+    if py_version >= (3, 10):
+        check_pass(f"Python {py_version.major}.{py_version.minor}.{py_version.micro}")
+    else:
+        check_fail(f"Python {py_version.major}.{py_version.minor} (need 3.10+)")
+
+    check_pass(f"Executable: {sys.executable}")
+
+    # 2. Check roampal version
+    print(f"\n{BOLD}Roampal Version:{RESET}")
+    try:
+        from roampal import __version__
+        check_pass(f"roampal v{__version__}")
+    except ImportError as e:
+        check_fail(f"Cannot import roampal: {e}")
+
+    # 3. Check config files
+    print(f"\n{BOLD}Configuration Files:{RESET}")
+    home = Path.home()
+
+    # Claude Code configs
+    claude_dir = home / ".claude"
+    if claude_dir.exists():
+        check_pass(f"~/.claude exists")
+
+        settings_path = claude_dir / "settings.json"
+        if settings_path.exists():
+            try:
+                settings = json.loads(settings_path.read_text())
+                if "hooks" in settings:
+                    check_pass("settings.json has hooks configured")
+                else:
+                    check_warn("settings.json missing hooks (run 'roampal init')")
+            except json.JSONDecodeError as e:
+                check_fail(f"settings.json invalid JSON: {e}")
+        else:
+            check_warn("settings.json not found (run 'roampal init')")
+
+        mcp_path = claude_dir / ".mcp.json"
+        if mcp_path.exists():
+            try:
+                mcp = json.loads(mcp_path.read_text())
+                if "mcpServers" in mcp and "roampal-core" in mcp["mcpServers"]:
+                    check_pass(".mcp.json has roampal-core server")
+                else:
+                    check_warn(".mcp.json missing roampal-core (run 'roampal init')")
+            except json.JSONDecodeError as e:
+                check_fail(f".mcp.json invalid JSON: {e}")
+        else:
+            check_warn(".mcp.json not found (run 'roampal init')")
+    else:
+        check_warn("~/.claude not found (Claude Code not installed?)")
+
+    # Cursor configs
+    cursor_dir = home / ".cursor"
+    if cursor_dir.exists():
+        check_pass("~/.cursor exists")
+
+        mcp_path = cursor_dir / "mcp.json"
+        if mcp_path.exists():
+            try:
+                mcp = json.loads(mcp_path.read_text())
+                if "mcpServers" in mcp and "roampal-core" in mcp["mcpServers"]:
+                    check_pass("mcp.json has roampal-core server")
+                else:
+                    check_warn("mcp.json missing roampal-core (run 'roampal init --cursor')")
+            except json.JSONDecodeError as e:
+                check_fail(f"mcp.json invalid JSON: {e}")
+        else:
+            check_warn("mcp.json not found (run 'roampal init --cursor')")
+
+        # Cursor hooks (1.7+)
+        hooks_path = cursor_dir / "hooks.json"
+        if hooks_path.exists():
+            try:
+                hooks = json.loads(hooks_path.read_text())
+                if "hooks" in hooks and "beforeSubmitPrompt" in hooks["hooks"]:
+                    check_pass("hooks.json has beforeSubmitPrompt configured")
+                else:
+                    check_warn("hooks.json missing beforeSubmitPrompt (run 'roampal init --cursor')")
+                if "hooks" in hooks and "stop" in hooks["hooks"]:
+                    check_pass("hooks.json has stop hook configured")
+                else:
+                    check_warn("hooks.json missing stop hook (run 'roampal init --cursor')")
+            except json.JSONDecodeError as e:
+                check_fail(f"hooks.json invalid JSON: {e}")
+        else:
+            check_warn("hooks.json not found (run 'roampal init --cursor' for Cursor 1.7+)")
+
+    # 4. Check data directory
+    print(f"\n{BOLD}Data Directory:{RESET}")
+    data_dir = get_data_dir(dev=is_dev)
+    if data_dir.exists():
+        check_pass(f"Data directory exists: {data_dir}")
+        chromadb_path = data_dir / "chromadb"
+        if chromadb_path.exists():
+            check_pass("ChromaDB directory exists")
+        else:
+            check_warn("ChromaDB not initialized yet (first use will create it)")
+    else:
+        check_warn(f"Data directory not created: {data_dir}")
+
+    # 5. Check MCP server can start and list tools
+    print(f"\n{BOLD}MCP Server:{RESET}")
+    try:
+        # Import the server module - this validates the code compiles
+        import roampal.mcp.server as mcp_module
+        check_pass("MCP server module loads")
+
+        # Check that tools are defined (this catches syntax errors like false/False)
+        # The actual list_tools is a decorated async function, so we check the TOOLS dict
+        if hasattr(mcp_module, 'TOOLS'):
+            tool_count = len(mcp_module.TOOLS)
+            check_pass(f"Tools defined: {tool_count}")
+        else:
+            # Try to find tools another way - check if the server starts
+            check_pass("Server module valid (tools loaded at runtime)")
+
+    except SyntaxError as e:
+        check_fail(f"MCP server syntax error: {e}")
+    except NameError as e:
+        check_fail(f"MCP server name error: {e}")
+    except Exception as e:
+        check_fail(f"MCP server import failed: {e}")
+
+    # 6. Check memory system initialization
+    print(f"\n{BOLD}Memory System:{RESET}")
+    try:
+        async def test_memory():
+            from roampal.backend.modules.memory import UnifiedMemorySystem
+
+            data_path = str(get_data_dir(dev=is_dev)) if is_dev else None
+            mem = UnifiedMemorySystem(data_path=data_path)
+            await mem.initialize()
+            return mem
+
+        mem = asyncio.run(test_memory())
+        check_pass("Memory system initializes")
+
+        # Check collections
+        if hasattr(mem, 'collections') and mem.collections:
+            collection_names = list(mem.collections.keys())
+            check_pass(f"Collections: {', '.join(collection_names)}")
+        else:
+            check_warn("No collections found")
+
+    except Exception as e:
+        check_fail(f"Memory system failed: {e}")
+
+    # 7. Check dependencies
+    print(f"\n{BOLD}Dependencies:{RESET}")
+    deps = [
+        ("chromadb", "chromadb"),
+        ("sentence_transformers", "sentence-transformers"),
+        ("mcp", "mcp"),
+        ("httpx", "httpx"),
+        ("fastapi", "fastapi"),
+    ]
+
+    for import_name, display_name in deps:
+        try:
+            module = __import__(import_name)
+            version = getattr(module, "__version__", "?")
+            check_pass(f"{display_name} v{version}")
+        except ImportError:
+            check_fail(f"{display_name} not installed")
+
+    # Summary
+    print(f"\n{BOLD}{'='*50}{RESET}")
+    total = checks_passed + checks_failed + checks_warned
+    if checks_failed == 0:
+        print(f"{GREEN}All checks passed!{RESET} ({checks_passed}/{total})")
+        if checks_warned > 0:
+            print(f"{YELLOW}{checks_warned} warnings{RESET}")
+    else:
+        print(f"{RED}{checks_failed} checks failed{RESET}, {checks_passed} passed, {checks_warned} warnings")
+        print(f"\nRun {BLUE}roampal init{RESET} to fix configuration issues.")
+
+
 def cmd_books(args):
     """List all books in the books collection."""
     import asyncio
@@ -701,6 +990,8 @@ def main():
     # init command
     init_parser = subparsers.add_parser("init", help="Initialize Roampal for Claude Code / Cursor")
     init_parser.add_argument("--dev", action="store_true", help="Initialize for DEV mode (separate data directory)")
+    init_parser.add_argument("--claude-code", action="store_true", help="Configure Claude Code only (skip auto-detect)")
+    init_parser.add_argument("--cursor", action="store_true", help="Configure Cursor only (skip auto-detect)")
 
     # start command
     start_parser = subparsers.add_parser("start", help="Start the memory server")
@@ -736,6 +1027,10 @@ def main():
     # books command
     books_parser = subparsers.add_parser("books", help="List all books in memory")
 
+    # doctor command
+    doctor_parser = subparsers.add_parser("doctor", help="Diagnose installation and configuration")
+    doctor_parser.add_argument("--dev", action="store_true", help="Check dev mode configuration")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -752,6 +1047,8 @@ def main():
         cmd_remove(args)
     elif args.command == "books":
         cmd_books(args)
+    elif args.command == "doctor":
+        cmd_doctor(args)
     else:
         parser.print_help()
 

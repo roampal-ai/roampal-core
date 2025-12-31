@@ -2,16 +2,24 @@
 """
 Roampal Stop Hook
 
-Called by Claude Code AFTER the LLM responds.
+Called by Claude Code / Cursor AFTER the LLM responds.
 This hook:
 1. Stores the exchange for later scoring
 2. Checks if record_response() was called
 3. BLOCKS (exit 2) if scoring was required but not done
 
-Usage (in .claude/settings.json):
+Usage (Claude Code - .claude/settings.json):
 {
   "hooks": {
     "Stop": [{"type": "command", "command": "python -m roampal.hooks.stop_hook"}]
+  }
+}
+
+Usage (Cursor 1.7+ - .cursor/hooks.json):
+{
+  "version": 1,
+  "hooks": {
+    "stop": [{"command": "python -m roampal.hooks.stop_hook"}]
   }
 }
 
@@ -111,8 +119,8 @@ def main():
     if input_data.get("stop_hook_active", False):
         sys.exit(0)
 
-    # Extract conversation data - Claude Code sends transcript_path, not raw content
-    conversation_id = input_data.get("session_id", os.environ.get("ROAMPAL_CONVERSATION_ID", "default"))
+    # Extract conversation data - support both Claude Code (session_id) and Cursor (conversation_id)
+    conversation_id = input_data.get("conversation_id") or input_data.get("session_id", os.environ.get("ROAMPAL_CONVERSATION_ID", "default"))
     transcript_path = input_data.get("transcript_path", "")
 
     # Read the transcript file to get actual messages

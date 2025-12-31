@@ -61,7 +61,8 @@ class MemoryBankService:
         text: str,
         tags: List[str],
         importance: float = 0.7,
-        confidence: float = 0.7
+        confidence: float = 0.7,
+        always_inject: bool = False
     ) -> str:
         """
         Store user memory in memory_bank collection.
@@ -71,6 +72,7 @@ class MemoryBankService:
             tags: List of tags (identity, preference, project, context, goal)
             importance: 0.0-1.0 (how critical is this memory)
             confidence: 0.0-1.0 (how sure are we about this)
+            always_inject: If True, this memory appears in EVERY context
 
         Returns:
             Document ID
@@ -106,7 +108,8 @@ class MemoryBankService:
             "status": "active",
             "created_at": datetime.now().isoformat(),
             "mentioned_count": 1,
-            "last_mentioned": datetime.now().isoformat()
+            "last_mentioned": datetime.now().isoformat(),
+            "always_inject": always_inject
         }
 
         # Store in collection
@@ -432,6 +435,22 @@ class MemoryBankService:
         except Exception as e:
             logger.warning(f"Could not get memory_bank count: {e}")
             return 0
+
+    def get_always_inject(self) -> List[Dict[str, Any]]:
+        """
+        Get all memories marked with always_inject: true.
+
+        These are core identity facts that should appear in EVERY context
+        regardless of semantic relevance to the query.
+
+        Returns:
+            List of always_inject memories
+        """
+        all_items = self.list_all(include_archived=False)
+        return [
+            item for item in all_items
+            if item.get("metadata", {}).get("always_inject", False)
+        ]
 
     async def _get_all_items(self, limit: int) -> List[Dict[str, Any]]:
         """Get all items (fallback when no search query)."""
