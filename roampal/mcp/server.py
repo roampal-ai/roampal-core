@@ -736,7 +736,7 @@ Don't wait to be asked - good assistants remember what matters.""",
                         response = await client.post(
                             f"http://127.0.0.1:{port}/api/record-outcome",
                             json=payload,
-                            timeout=5.0
+                            timeout=15.0  # v0.2.3: increased from 5s for safety margin
                         )
                         if response.status_code == 200:
                             result = response.json()

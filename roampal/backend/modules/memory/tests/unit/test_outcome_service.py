@@ -6,6 +6,7 @@ Tests the extracted outcome recording logic.
 
 import sys
 import os
+import asyncio
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', '..')))
 
 import json
@@ -411,6 +412,7 @@ class TestKGIntegration:
     async def test_builds_relationships_on_success(self, service, mock_kg_service):
         """Should build concept relationships on worked outcome."""
         await service.record_outcome("working_test123", "worked")
+        await asyncio.sleep(0.1)  # v0.2.3: Let deferred learning task run
 
         mock_kg_service.build_concept_relationships.assert_called()
         mock_kg_service.add_problem_category.assert_called()
@@ -423,6 +425,7 @@ class TestKGIntegration:
             "failed",
             failure_reason="Test failure"
         )
+        await asyncio.sleep(0.1)  # v0.2.3: Let deferred learning task run
 
         mock_kg_service.add_failure_pattern.assert_called()
 
@@ -430,6 +433,7 @@ class TestKGIntegration:
     async def test_saves_kg_after_update(self, service, mock_kg_service):
         """Should save KG after updates."""
         await service.record_outcome("working_test123", "worked")
+        await asyncio.sleep(0.1)  # v0.2.3: Let deferred learning task run
 
         mock_kg_service.debounced_save_kg.assert_called()
 
@@ -466,6 +470,7 @@ class TestPromotionIntegration:
     async def test_calls_promotion_handler(self, service, mock_promotion_service):
         """Should call promotion handler after outcome."""
         await service.record_outcome("working_test123", "worked")
+        await asyncio.sleep(0.1)  # v0.2.3: Let deferred learning task run
 
         mock_promotion_service.handle_promotion.assert_called_once()
 
@@ -473,6 +478,7 @@ class TestPromotionIntegration:
     async def test_passes_correct_params_to_promotion(self, service, mock_promotion_service):
         """Should pass correct parameters to promotion handler."""
         await service.record_outcome("working_test123", "worked")
+        await asyncio.sleep(0.1)  # v0.2.3: Let deferred learning task run
 
         call_args = mock_promotion_service.handle_promotion.call_args
         assert call_args[1]["doc_id"] == "working_test123"
