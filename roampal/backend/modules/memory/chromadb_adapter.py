@@ -476,6 +476,9 @@ class ChromaDBAdapter:
         if self.collection is None:
             raise RuntimeError("ChromaDB collection not initialized")
         self.collection.delete(ids=ids)
+        # Explicitly persist after delete - ChromaDB 0.4.x may not auto-persist deletes
+        if hasattr(self.client, 'persist'):
+            self.client.persist()
 
     def get_all_vectors(self) -> List[Dict[str, Any]]:
         if self.collection is None:

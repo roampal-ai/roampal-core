@@ -2,8 +2,11 @@
 OutcomeService - Extracted from UnifiedMemorySystem
 
 Handles outcome recording, score updates, and learning from feedback.
+
+v0.2.3: Performance fix - defer heavy KG learning to background tasks.
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -162,35 +165,78 @@ class OutcomeService:
             f"(outcome={outcome}, delta={score_delta:+.2f}, time_weight={time_weight:.2f}, uses={uses})"
         )
 
-        # Update KG routing if service available
-        if self.kg_service:
-            problem_text = metadata.get("query", "")
-            await self._update_kg_with_outcome(
-                doc_id, outcome, problem_text, doc.get("content", ""),
-                new_score, metadata, failure_reason, context
-            )
+        # ========== FAST PATH COMPLETE (v0.2.3) ==========
+        # Score updated, metadata persisted. Return immediately.
+        # Heavy KG learning runs in background (fire-and-forget).
 
-        # Handle promotion/demotion if service available
-        if self.promotion_service:
-            collection_size = self.collections[collection_name].collection.count()
-            await self.promotion_service.handle_promotion(
-                doc_id=doc_id,
-                collection=collection_name,
-                score=new_score,
-                uses=uses,
-                metadata=metadata,
-                collection_size=collection_size
+        if self.kg_service or self.promotion_service:
+            asyncio.create_task(
+                self._deferred_learning(
+                    doc_id=doc_id,
+                    outcome=outcome,
+                    collection_name=collection_name,
+                    doc=doc,
+                    new_score=new_score,
+                    uses=uses,
+                    metadata=metadata,
+                    failure_reason=failure_reason,
+                    context=context
+                )
             )
-
-        # Batch cleanup: trigger every N scores to clean old working memory
-        self._score_count += 1
-        if self._score_count % self._cleanup_interval == 0 and self.promotion_service:
-            cleaned = await self.promotion_service.cleanup_old_working_memory(max_age_hours=24.0)
-            if cleaned > 0:
-                logger.info(f"Batch cleanup triggered: removed {cleaned} old working memories")
 
         logger.info(f"Outcome recorded: {doc_id} -> {outcome} (score: {new_score:.2f})")
         return metadata
+
+    async def _deferred_learning(
+        self,
+        doc_id: str,
+        outcome: str,
+        collection_name: str,
+        doc: Dict[str, Any],
+        new_score: float,
+        uses: int,
+        metadata: Dict[str, Any],
+        failure_reason: Optional[str],
+        context: Optional[Dict[str, Any]]
+    ):
+        """
+        Background task for heavy KG learning operations.
+
+        Runs after score update returns. Fire-and-forget pattern.
+        v0.2.3: Extracted from record_outcome for performance.
+        """
+        try:
+            # Update KG with outcome (skip duplicate routing - already done above)
+            if self.kg_service:
+                problem_text = metadata.get("query", "")
+                await self._update_kg_with_outcome(
+                    doc_id, outcome, problem_text, doc.get("content", ""),
+                    new_score, metadata, failure_reason, context
+                )
+
+            # Handle promotion/demotion
+            if self.promotion_service:
+                collection_size = self.collections[collection_name].collection.count()
+                await self.promotion_service.handle_promotion(
+                    doc_id=doc_id,
+                    collection=collection_name,
+                    score=new_score,
+                    uses=uses,
+                    metadata=metadata,
+                    collection_size=collection_size
+                )
+
+            # Batch cleanup: trigger every N scores
+            self._score_count += 1
+            if self._score_count % self._cleanup_interval == 0 and self.promotion_service:
+                cleaned = await self.promotion_service.cleanup_old_working_memory(max_age_hours=24.0)
+                if cleaned > 0:
+                    logger.info(f"Batch cleanup triggered: removed {cleaned} old working memories")
+
+            logger.info(f"[Background] Deferred learning completed for {doc_id}")
+
+        except Exception as e:
+            logger.error(f"[Background] Deferred learning error for {doc_id}: {e}")
 
     def _calculate_time_weight(self, last_used: Optional[str]) -> float:
         """Calculate time weight for score updates."""
@@ -245,22 +291,7 @@ class OutcomeService:
         if not self.kg_service:
             return
 
-        # Update routing patterns
-        # Extract collection name from doc_id (handles memory_bank correctly)
-        # doc_id format: collection_uuid or collection_name_uuid
-        if doc_id.startswith("memory_bank_"):
-            collection_name = "memory_bank"
-        elif doc_id.startswith("books_"):
-            collection_name = "books"
-        elif doc_id.startswith("working_"):
-            collection_name = "working"
-        elif doc_id.startswith("history_"):
-            collection_name = "history"
-        elif doc_id.startswith("patterns_"):
-            collection_name = "patterns"
-        else:
-            collection_name = doc_id.split("_")[0] if "_" in doc_id else "unknown"
-        await self.kg_service.update_kg_routing(problem_text, collection_name, outcome)
+        # v0.2.3: Removed duplicate update_kg_routing call - already done in record_outcome
 
         if outcome == "worked" and problem_text and solution_text:
             # Extract concepts

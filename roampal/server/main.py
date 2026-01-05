@@ -705,6 +705,53 @@ def create_app() -> FastAPI:
             logger.error(f"Error removing book: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
+    # v0.2.3: Deferred background task for Action KG updates
+    async def _deferred_action_kg_updates(
+        doc_ids: List[str],
+        outcome: str,
+        cached_query: str
+    ):
+        """
+        Background task for heavy Action KG and routing updates.
+
+        v0.2.3: Extracted from record_outcome endpoint for performance.
+        """
+        try:
+            # Detect context type
+            context_type = await _memory.detect_context_type() or "general"
+            collections_updated = set()
+
+            for doc_id in doc_ids:
+                # Extract collection from doc_id prefix
+                collection = None
+                for coll_name in ["memory_bank", "books", "working", "history", "patterns"]:
+                    if doc_id.startswith(coll_name):
+                        collection = coll_name
+                        break
+
+                # Track in Action KG
+                action = ActionOutcome(
+                    action_type="score_response",
+                    context_type=context_type,
+                    outcome=outcome,
+                    doc_id=doc_id,
+                    collection=collection
+                )
+                await _memory.record_action_outcome(action)
+
+                if collection:
+                    collections_updated.add(collection)
+
+            # Update Routing KG
+            if cached_query:
+                for collection in collections_updated:
+                    await _memory._update_kg_routing(cached_query, collection, outcome)
+
+            logger.info(f"[Background] Action KG updates completed for {len(doc_ids)} docs")
+
+        except Exception as e:
+            logger.error(f"[Background] Action KG update error: {e}")
+
     @app.post("/api/record-outcome")
     async def record_outcome(request: RecordOutcomeRequest):
         """
@@ -725,19 +772,12 @@ def create_app() -> FastAPI:
             # Track that score_response was called this turn (for Stop hook blocking)
             _session_manager.set_scored_this_turn(conversation_id, True)
 
-            # 1. Find the most recent unscored exchange across ALL sessions
-            # This handles the MCP/hook session ID mismatch
-            previous = await _session_manager.get_most_recent_unscored_exchange()
-            if previous and previous.get("doc_id"):
-                await _session_manager.mark_scored(
-                    conversation_id=previous.get("conversation_id", conversation_id),
-                    doc_id=previous["doc_id"],
-                    outcome=request.outcome
-                )
-                doc_ids_scored.append(previous["doc_id"])
-                logger.info(f"Scored exchange from session {previous.get('conversation_id')}")
+            # v0.2.3: Skip session file scan - trust the search cache
+            # The slow get_most_recent_unscored_exchange() scanned ALL session files (O(n×m) I/O)
+            # but doc_ids are already available in _search_cache or request.related
+            # See: https://github.com/roampal/roampal-core/issues/XXX (performance fix)
 
-            # 2. Score cached search results
+            # Score cached search results
             # First try exact conversation_id match
             cached = _search_cache.get(conversation_id, {})
             cached_doc_ids = cached.get("doc_ids", [])
@@ -772,41 +812,16 @@ def create_app() -> FastAPI:
                 )
                 logger.info(f"Scored {len(doc_ids_scored)} documents with outcome '{request.outcome}'")
 
-                # 4. Track in Action KG (works for ALL collections including memory_bank/books)
-                # Detect context type from recent activity
-                context_type = await _memory.detect_context_type() or "general"
-
-                # Get cached query for routing updates
+                # ========== FAST PATH COMPLETE (v0.2.3) ==========
+                # Score recorded. Defer heavy Action KG and routing updates to background.
                 cached_query = cached.get("query", "")
-                collections_updated = set()
-
-                for doc_id in doc_ids_scored:
-                    # Extract collection from doc_id prefix
-                    collection = None
-                    for coll_name in ["memory_bank", "books", "working", "history", "patterns"]:
-                        if doc_id.startswith(coll_name):
-                            collection = coll_name
-                            break
-
-                    # Track in Action KG
-                    action = ActionOutcome(
-                        action_type="score_response",
-                        context_type=context_type,
+                asyncio.create_task(
+                    _deferred_action_kg_updates(
+                        doc_ids=doc_ids_scored,
                         outcome=request.outcome,
-                        doc_id=doc_id,
-                        collection=collection
+                        cached_query=cached_query
                     )
-                    await _memory.record_action_outcome(action)
-
-                    # Track collection for routing update (once per collection)
-                    if collection:
-                        collections_updated.add(collection)
-
-                # 5. Update Routing KG (learns which collections work for which queries)
-                # This benefits ALL collections including memory_bank/books
-                if cached_query:
-                    for collection in collections_updated:
-                        await _memory._update_kg_routing(cached_query, collection, request.outcome)
+                )
             else:
                 result = {"outcome": request.outcome, "documents_updated": 0}
 
