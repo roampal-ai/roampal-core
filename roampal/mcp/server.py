@@ -649,7 +649,7 @@ Don't wait to be asked - good assistants remember what matters.""",
                                 meta_parts.append(f"📖 {book_title}")
 
                         meta_str = f" ({', '.join(meta_parts)})" if meta_parts else ""
-                        id_str = f" [id:{doc_id[:8]}]" if doc_id else ""
+                        id_str = f" [id:{doc_id}]" if doc_id else ""  # v0.2.4: Full ID for related param
                         text += f"{i}. [{collection}]{meta_str}{id_str} {content}\n\n"
 
                 return [types.TextContent(type="text", text=text)]
@@ -745,15 +745,21 @@ Don't wait to be asked - good assistants remember what matters.""",
                     logger.warning(f"Failed to call FastAPI record-outcome: {e}")
 
                 # Fall back to MCP cache if FastAPI returned 0 or failed
-                if scored_count == 0 and session_id in _mcp_search_cache:
+                if scored_count == 0:
+                    # If related provided, use directly (don't filter cache)
+                    if related is not None and len(related) > 0:
+                        doc_ids = related
+                    elif session_id in _mcp_search_cache:
                         cached = _mcp_search_cache[session_id]
                         doc_ids = cached.get("doc_ids", [])
-                        # Apply related filter if provided
-                        if related is not None:
-                            doc_ids = [d for d in doc_ids if d in related]
-                        if doc_ids:
-                            result = await _memory.record_outcome(doc_ids, outcome)
-                            scored_count = result.get("documents_updated", 0)
+                    else:
+                        doc_ids = []
+
+                    if doc_ids:
+                        result = await _memory.record_outcome(doc_ids, outcome)
+                        scored_count = result.get("documents_updated", 0)
+
+                    if session_id in _mcp_search_cache:
                         del _mcp_search_cache[session_id]
 
                 logger.info(f"Scored response: outcome={outcome}, related={related}, scored={scored_count}")
