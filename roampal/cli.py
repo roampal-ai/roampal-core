@@ -175,11 +175,12 @@ def cmd_init(args):
 
     # Configure each detected tool
     is_dev = is_dev_mode(args)
+    force = getattr(args, 'force', False)
     for tool in detected:
         if tool == "claude-code":
-            configure_claude_code(claude_code_dir, is_dev=is_dev)
+            configure_claude_code(claude_code_dir, is_dev=is_dev, force=force)
         elif tool == "cursor":
-            configure_cursor(cursor_dir, is_dev=is_dev)
+            configure_cursor(cursor_dir, is_dev=is_dev, force=force)
 
     # Create data directory
     data_dir = get_data_dir()
@@ -205,12 +206,26 @@ def cmd_init(args):
 """)
 
 
-def configure_claude_code(claude_dir: Path, is_dev: bool = False):
+def validate_roampal_importable(python_exe: str) -> bool:
+    """Validate that roampal can be imported from the given python executable."""
+    try:
+        result = subprocess.run(
+            [python_exe, "-c", "import roampal"],
+            capture_output=True,
+            timeout=10
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = False):
     """Configure Claude Code hooks, MCP, and permissions.
 
     Args:
         claude_dir: Path to ~/.claude directory
         is_dev: If True, adds ROAMPAL_DEV=1 to env sections
+        force: If True, overwrite existing config even if different
     """
     print(f"{BOLD}Configuring Claude Code...{RESET}")
 
@@ -287,35 +302,121 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False):
     print(f"  {GREEN}  - Stop hook (enforces record_response){RESET}")
     print(f"  {GREEN}  - Auto-allowed MCP permissions{RESET}")
 
-    # Create MCP configuration (server name matches permission prefix)
-    mcp_config_path = claude_dir / ".mcp.json"
-    mcp_config = {
-        "mcpServers": {
-            "roampal-core": {
-                "command": sys.executable,
-                "args": ["-m", "roampal.mcp.server"],
-                "env": {"ROAMPAL_DEV": "1"} if is_dev else {}
-            }
-        }
+    # =========================================================================
+    # MCP Configuration - Write to ~/.claude.json (USER SCOPE - GLOBAL)
+    # =========================================================================
+    # Claude Code reads MCP servers from:
+    #   - ~/.claude.json (root-level mcpServers = user scope, global)
+    #   - ~/.claude.json (projects.{path}.mcpServers = local scope, per-project)
+    #   - .mcp.json in project root (project scope, shared)
+    #
+    # Previously we wrote to ~/.claude/.mcp.json which is NOT a valid location.
+    # Fixed in v0.2.5 to write to ~/.claude.json root-level mcpServers.
+    # =========================================================================
+
+    claude_json_path = Path.home() / ".claude.json"
+    roampal_server_config = {
+        "type": "stdio",
+        "command": sys.executable,
+        "args": ["-m", "roampal.mcp.server"],
+        "env": {"ROAMPAL_DEV": "1"} if is_dev else {}
     }
 
-    # Merge with existing if present
-    if mcp_config_path.exists():
+    # Load existing ~/.claude.json or create minimal structure
+    claude_json = {}
+    if claude_json_path.exists():
         try:
-            existing = json.loads(mcp_config_path.read_text())
-            if "mcpServers" in existing:
-                existing["mcpServers"]["roampal-core"] = mcp_config["mcpServers"]["roampal-core"]
+            claude_json = json.loads(claude_json_path.read_text(encoding='utf-8'))
+        except Exception as e:
+            print(f"  {YELLOW}Warning: Could not read {claude_json_path}: {e}{RESET}")
+            print(f"  {YELLOW}Creating new config...{RESET}")
+
+    # =========================================================================
+    # IDEMPOTENCY CHECK: Skip if already correctly configured
+    # =========================================================================
+    existing_config = claude_json.get("mcpServers", {}).get("roampal-core", {})
+    if existing_config:
+        # Check if args match (the key identifier)
+        if existing_config.get("args") == ["-m", "roampal.mcp.server"]:
+            # Check if env matches too
+            existing_env = existing_config.get("env", {})
+            expected_env = {"ROAMPAL_DEV": "1"} if is_dev else {}
+            if existing_env == expected_env:
+                print(f"  {GREEN}[OK] roampal-core already configured correctly in {claude_json_path}{RESET}")
+                # Skip to migration check, don't write
             else:
-                existing["mcpServers"] = mcp_config["mcpServers"]
-            mcp_config = existing
-        except:
-            pass
+                # Env differs (e.g., dev vs prod)
+                if not force:
+                    print(f"  {YELLOW}roampal-core config differs (env mismatch):{RESET}")
+                    print(f"    Current env: {existing_env}")
+                    print(f"    New env:     {expected_env}")
+                    print(f"  {YELLOW}Use --force to overwrite{RESET}")
+                else:
+                    # Force overwrite
+                    claude_json["mcpServers"]["roampal-core"] = roampal_server_config
+                    claude_json_path.write_text(json.dumps(claude_json, indent=2), encoding='utf-8')
+                    print(f"  {GREEN}Updated MCP server in: {claude_json_path} (forced){RESET}")
+        else:
+            # Different args - this is weird, warn and require force
+            if not force:
+                print(f"  {YELLOW}roampal-core config differs:{RESET}")
+                print(f"    Current args: {existing_config.get('args')}")
+                print(f"    New args:     {roampal_server_config['args']}")
+                print(f"  {YELLOW}Use --force to overwrite{RESET}")
+            else:
+                claude_json["mcpServers"]["roampal-core"] = roampal_server_config
+                claude_json_path.write_text(json.dumps(claude_json, indent=2), encoding='utf-8')
+                print(f"  {GREEN}Updated MCP server in: {claude_json_path} (forced){RESET}")
+    else:
+        # No existing config - validate and write
+        # =========================================================================
+        # VALIDATION: Ensure roampal is importable before writing config
+        # =========================================================================
+        if not validate_roampal_importable(sys.executable):
+            print(f"  {RED}Error: roampal not importable from {sys.executable}{RESET}")
+            print(f"  {YELLOW}Make sure you're running from the correct virtual environment{RESET}")
+            print(f"  {YELLOW}Try: pip install roampal{RESET}")
+            return
 
-    mcp_config_path.write_text(json.dumps(mcp_config, indent=2))
-    print(f"  {GREEN}Created MCP config: {mcp_config_path}{RESET}")
+        # Add roampal-core to root-level mcpServers (user scope = global)
+        if "mcpServers" not in claude_json:
+            claude_json["mcpServers"] = {}
 
-    # Also create local .mcp.json in current working directory
-    # Some Claude Code setups look for project-level config
+        claude_json["mcpServers"]["roampal-core"] = roampal_server_config
+
+        # Write back
+        try:
+            claude_json_path.write_text(json.dumps(claude_json, indent=2), encoding='utf-8')
+            print(f"  {GREEN}Added MCP server to: {claude_json_path}{RESET}")
+            print(f"  {GREEN}  - User scope (works globally across all projects){RESET}")
+        except Exception as e:
+            print(f"  {RED}Error writing {claude_json_path}: {e}{RESET}")
+            print(f"  {YELLOW}You may need to run: claude mcp add roampal-core python -- -m roampal.mcp.server{RESET}")
+
+    # =========================================================================
+    # Migration: Clean up old broken config at ~/.claude/.mcp.json
+    # =========================================================================
+    old_mcp_config_path = claude_dir / ".mcp.json"
+    if old_mcp_config_path.exists():
+        try:
+            old_config = json.loads(old_mcp_config_path.read_text())
+            if "mcpServers" in old_config and "roampal-core" in old_config.get("mcpServers", {}):
+                # Remove roampal-core from the old location
+                del old_config["mcpServers"]["roampal-core"]
+                if old_config["mcpServers"]:
+                    # Other servers exist, keep the file
+                    old_mcp_config_path.write_text(json.dumps(old_config, indent=2))
+                else:
+                    # Only roampal was there, remove the file
+                    old_mcp_config_path.unlink()
+                print(f"  {GREEN}Migrated from old config: {old_mcp_config_path}{RESET}")
+        except Exception:
+            pass  # Old file might be malformed, ignore
+
+    # =========================================================================
+    # Also create project-level .mcp.json (optional, for project scope)
+    # =========================================================================
+    # This is valid for project-scoped MCP but requires user approval
     local_mcp_path = Path.cwd() / ".mcp.json"
     local_mcp_config = {
         "mcpServers": {
@@ -340,18 +441,20 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False):
             pass
 
     local_mcp_path.write_text(json.dumps(local_mcp_config, indent=2))
-    print(f"  {GREEN}Created local MCP config: {local_mcp_path}{RESET}")
+    print(f"  {GREEN}Created project MCP config: {local_mcp_path}{RESET}")
 
     print(f"  {GREEN}Claude Code configured!{RESET}\n")
 
 
-def configure_cursor(cursor_dir: Path, is_dev: bool = False):
+def configure_cursor(cursor_dir: Path, is_dev: bool = False, force: bool = False):
     """Configure Cursor MCP and hooks.
 
     Args:
         cursor_dir: Path to ~/.cursor directory
         is_dev: If True, adds ROAMPAL_DEV=1 to env section
+        force: If True, overwrite existing config (reserved for future use)
     """
+    # Note: force parameter reserved for future idempotency implementation
     print(f"{BOLD}Configuring Cursor...{RESET}")
 
     # Cursor uses ~/.cursor/mcp.json
@@ -471,10 +574,44 @@ def cmd_start(args):
 
 
 def cmd_status(args):
-    """Check Roampal server status."""
+    """Check Roampal server status and MCP configuration."""
     print_banner()
     print_update_notice()
 
+    # =========================================================================
+    # MCP Configuration Status
+    # =========================================================================
+    print(f"{BOLD}MCP Configuration:{RESET}")
+
+    claude_json_path = Path.home() / ".claude.json"
+    if claude_json_path.exists():
+        try:
+            claude_json = json.loads(claude_json_path.read_text(encoding='utf-8'))
+            roampal_config = claude_json.get("mcpServers", {}).get("roampal-core", {})
+            if roampal_config:
+                command = roampal_config.get("command", "N/A")
+                args_list = roampal_config.get("args", [])
+                env = roampal_config.get("env", {})
+
+                print(f"  Location: {GREEN}{claude_json_path}{RESET} (user scope)")
+                print(f"  Command:  {command} {' '.join(args_list)}")
+                if env:
+                    print(f"  Env:      {env}")
+                print(f"  Status:   {GREEN}[OK] Configured{RESET}")
+            else:
+                print(f"  Status:   {YELLOW}Not configured{RESET}")
+                print(f"  Run: roampal init")
+        except Exception as e:
+            print(f"  {RED}Error reading config: {e}{RESET}")
+    else:
+        print(f"  Status:   {YELLOW}~/.claude.json not found{RESET}")
+        print(f"  Run: roampal init")
+
+    print()  # Empty line separator
+
+    # =========================================================================
+    # Server Status
+    # =========================================================================
     import httpx
 
     host = args.host or "127.0.0.1"
@@ -486,22 +623,25 @@ def cmd_status(args):
     mode_str = f"{YELLOW}DEV{RESET}" if is_dev else f"{GREEN}PROD{RESET}"
     url = f"http://{host}:{port}/api/health"
 
+    print(f"{BOLD}Server Status:{RESET}")
     try:
         response = httpx.get(url, timeout=2.0)
         if response.status_code == 200:
             data = response.json()
-            print(f"Server Status ({mode_str}): {GREEN}RUNNING{RESET}")
+            print(f"  Mode: {mode_str}")
+            print(f"  Status: {GREEN}RUNNING{RESET}")
             print(f"  Port: {port}")
             print(f"  Memory initialized: {data.get('memory_initialized', False)}")
             print(f"  Timestamp: {data.get('timestamp', 'N/A')}")
         else:
-            print(f"{RED}Server returned error: {response.status_code}{RESET}")
+            print(f"  {RED}Server returned error: {response.status_code}{RESET}")
     except httpx.ConnectError:
-        print(f"Server Status ({mode_str}): {YELLOW}NOT RUNNING{RESET}")
+        print(f"  Mode: {mode_str}")
+        print(f"  Status: {YELLOW}NOT RUNNING{RESET}")
         start_cmd = "roampal start --dev" if is_dev else "roampal start"
-        print(f"\nStart with: {start_cmd}")
+        print(f"\n  Start with: {start_cmd}")
     except Exception as e:
-        print(f"{RED}Error checking status: {e}{RESET}")
+        print(f"  {RED}Error checking status: {e}{RESET}")
 
 
 def cmd_stats(args):
@@ -790,18 +930,29 @@ def cmd_doctor(args):
         else:
             check_warn("settings.json not found (run 'roampal init')")
 
-        mcp_path = claude_dir / ".mcp.json"
-        if mcp_path.exists():
+        # Check ~/.claude.json for user-scope MCP (v0.2.5+)
+        claude_json_path = home / ".claude.json"
+        if claude_json_path.exists():
             try:
-                mcp = json.loads(mcp_path.read_text())
-                if "mcpServers" in mcp and "roampal-core" in mcp["mcpServers"]:
-                    check_pass(".mcp.json has roampal-core server")
+                claude_json = json.loads(claude_json_path.read_text())
+                if "mcpServers" in claude_json and "roampal-core" in claude_json["mcpServers"]:
+                    check_pass("~/.claude.json has roampal-core server (user scope)")
                 else:
-                    check_warn(".mcp.json missing roampal-core (run 'roampal init')")
+                    check_warn("~/.claude.json missing roampal-core (run 'roampal init')")
             except json.JSONDecodeError as e:
-                check_fail(f".mcp.json invalid JSON: {e}")
+                check_fail(f"~/.claude.json invalid JSON: {e}")
         else:
-            check_warn(".mcp.json not found (run 'roampal init')")
+            check_warn("~/.claude.json not found (run 'roampal init')")
+
+        # Check for old broken config location
+        old_mcp_path = claude_dir / ".mcp.json"
+        if old_mcp_path.exists():
+            try:
+                old_mcp = json.loads(old_mcp_path.read_text())
+                if "mcpServers" in old_mcp and "roampal-core" in old_mcp["mcpServers"]:
+                    check_warn("Old config at ~/.claude/.mcp.json (run 'roampal init' to migrate)")
+            except:
+                pass
     else:
         check_warn("~/.claude not found (Claude Code not installed?)")
 
@@ -992,6 +1143,7 @@ def main():
     init_parser.add_argument("--dev", action="store_true", help="Initialize for DEV mode (separate data directory)")
     init_parser.add_argument("--claude-code", action="store_true", help="Configure Claude Code only (skip auto-detect)")
     init_parser.add_argument("--cursor", action="store_true", help="Configure Cursor only (skip auto-detect)")
+    init_parser.add_argument("--force", "-f", action="store_true", help="Force overwrite existing config")
 
     # start command
     start_parser = subparsers.add_parser("start", help="Start the memory server")
