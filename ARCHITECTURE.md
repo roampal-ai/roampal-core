@@ -694,13 +694,15 @@ All content is stored and returned in full - no character limits or truncation:
 ```toml
 [project]
 dependencies = [
+    "chromadb>=1.0.0,<2.0.0",
+    "sentence-transformers>=2.2.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.22.0",
-    "chromadb>=0.4.0",
-    "sentence-transformers>=2.0.0",
-    "mcp>=0.1.0",
+    "mcp>=1.0.0",
     "httpx>=0.24.0",
     "pydantic>=2.0.0",
+    "rank-bm25>=0.2.0",
+    "nltk>=3.8.0",
 ]
 ```
 

@@ -38,9 +38,6 @@ class MemoryConfig:
     """More lenient deletion threshold for items < 7 days old"""
 
     # Search and scoring (from lines 709, 1580-1581)
-    cross_encoder_blend_ratio: float = 0.6
-    """Weight given to cross-encoder in final ranking (0.4 original, 0.6 cross-encoder)"""
-
     embedding_weight_proven: float = 0.2
     """Embedding weight for proven memories (high use count)"""
 
@@ -60,38 +57,9 @@ class MemoryConfig:
     Currently hardcoded as `limit * 3` in 4 locations.
     """
 
-    # Storage limits (from line 4221)
-    max_memory_bank_items: int = 1000
-    """Maximum items in memory_bank collection"""
-
     # Timing (from line 398)
     kg_debounce_seconds: int = 5
     """Debounce window for knowledge graph saves"""
-
-    # Default values (from line 993)
-    default_importance: float = 0.7
-    """Default importance for new memories"""
-
-    default_confidence: float = 0.7
-    """Default confidence for new memories"""
-
-    # Promotion timing
-    promotion_use_threshold: int = 3
-    """Minimum uses before considering for promotion"""
-
-    promotion_age_days: int = 7
-    """Minimum age in days before considering for promotion"""
-
-    # Retention periods
-    working_memory_retention_hours: int = 24
-    """Working memory cleanup threshold"""
-
-    history_retention_days: int = 30
-    """History cleanup threshold for low-value items"""
-
-    # Cross-encoder settings
-    cross_encoder_top_k: int = 30
-    """Number of candidates to rerank with cross-encoder"""
 
     # Wilson score
     wilson_confidence: float = 0.95

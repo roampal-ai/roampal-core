@@ -240,8 +240,8 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
             settings = json.loads(settings_path.read_text())
             # PRESERVE existing env section (critical for DEV/PROD isolation)
             existing_env = settings.get("env")
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to parse existing settings.json: {e}")
 
     # Handle env section: preserve existing OR add if --dev
     if existing_env:
@@ -437,8 +437,8 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
             else:
                 existing["mcpServers"] = local_mcp_config["mcpServers"]
             local_mcp_config = existing
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to parse existing local MCP config: {e}")
 
     local_mcp_path.write_text(json.dumps(local_mcp_config, indent=2))
     print(f"  {GREEN}Created project MCP config: {local_mcp_path}{RESET}")
@@ -452,37 +452,61 @@ def configure_cursor(cursor_dir: Path, is_dev: bool = False, force: bool = False
     Args:
         cursor_dir: Path to ~/.cursor directory
         is_dev: If True, adds ROAMPAL_DEV=1 to env section
-        force: If True, overwrite existing config (reserved for future use)
+        force: If True, overwrite existing config even if different
     """
-    # Note: force parameter reserved for future idempotency implementation
     print(f"{BOLD}Configuring Cursor...{RESET}")
 
     # Cursor uses ~/.cursor/mcp.json
     mcp_config_path = cursor_dir / "mcp.json"
-    mcp_config = {
-        "mcpServers": {
-            "roampal-core": {
-                "command": sys.executable,
-                "args": ["-m", "roampal.mcp.server"],
-                "env": {"ROAMPAL_DEV": "1"} if is_dev else {}
-            }
-        }
+    expected_env = {"ROAMPAL_DEV": "1"} if is_dev else {}
+    roampal_server_config = {
+        "command": sys.executable,
+        "args": ["-m", "roampal.mcp.server"],
+        "env": expected_env
     }
 
-    # Merge with existing if present
+    mcp_config = {"mcpServers": {"roampal-core": roampal_server_config}}
+    mcp_needs_write = True
+
+    # Check existing MCP config
     if mcp_config_path.exists():
         try:
             existing = json.loads(mcp_config_path.read_text())
-            if "mcpServers" in existing:
-                existing["mcpServers"]["roampal-core"] = mcp_config["mcpServers"]["roampal-core"]
-            else:
-                existing["mcpServers"] = mcp_config["mcpServers"]
-            mcp_config = existing
-        except:
-            pass
+            existing_config = existing.get("mcpServers", {}).get("roampal-core", {})
 
-    mcp_config_path.write_text(json.dumps(mcp_config, indent=2))
-    print(f"  {GREEN}Created MCP config: {mcp_config_path}{RESET}")
+            if existing_config:
+                # Check if config matches
+                if (existing_config.get("args") == ["-m", "roampal.mcp.server"] and
+                    existing_config.get("env", {}) == expected_env):
+                    print(f"  {GREEN}[OK] roampal-core already configured correctly in {mcp_config_path}{RESET}")
+                    mcp_needs_write = False
+                else:
+                    # Config differs
+                    if not force:
+                        print(f"  {YELLOW}roampal-core config differs:{RESET}")
+                        print(f"    Current: args={existing_config.get('args')}, env={existing_config.get('env', {})}")
+                        print(f"    New:     args={roampal_server_config['args']}, env={expected_env}")
+                        print(f"  {YELLOW}Use --force to overwrite{RESET}")
+                        mcp_needs_write = False
+                    else:
+                        # Force - merge with existing
+                        existing["mcpServers"]["roampal-core"] = roampal_server_config
+                        mcp_config = existing
+                        print(f"  {GREEN}Updated MCP config: {mcp_config_path} (forced){RESET}")
+            else:
+                # No roampal-core entry - add it
+                if "mcpServers" in existing:
+                    existing["mcpServers"]["roampal-core"] = roampal_server_config
+                else:
+                    existing["mcpServers"] = {"roampal-core": roampal_server_config}
+                mcp_config = existing
+        except Exception as e:
+            logger.warning(f"Failed to parse existing MCP config: {e}")
+
+    if mcp_needs_write:
+        mcp_config_path.write_text(json.dumps(mcp_config, indent=2))
+        if not mcp_config_path.exists() or "forced" not in str(mcp_needs_write):
+            print(f"  {GREEN}Created MCP config: {mcp_config_path}{RESET}")
 
     # Cursor 1.7+ supports hooks - create ~/.cursor/hooks.json
     hooks_config_path = cursor_dir / "hooks.json"
@@ -501,37 +525,65 @@ def configure_cursor(cursor_dir: Path, is_dev: bool = False, force: bool = False
         submit_cmd = f'{python_exe} -m roampal.hooks.user_prompt_submit_hook'
         stop_cmd = f'{python_exe} -m roampal.hooks.stop_hook'
 
-    hooks_config = {
-        "version": 1,
-        "hooks": {
-            "beforeSubmitPrompt": [
-                {"command": submit_cmd}
-            ],
-            "stop": [
-                {"command": stop_cmd}
-            ]
-        }
+    expected_hooks = {
+        "beforeSubmitPrompt": [{"command": submit_cmd}],
+        "stop": [{"command": stop_cmd}]
     }
+    hooks_config = {"version": 1, "hooks": expected_hooks}
+    hooks_needs_write = True
 
-    # Merge with existing hooks if present
+    # Check existing hooks config
     if hooks_config_path.exists():
         try:
             existing = json.loads(hooks_config_path.read_text())
-            if "hooks" in existing:
-                existing["hooks"]["beforeSubmitPrompt"] = hooks_config["hooks"]["beforeSubmitPrompt"]
-                existing["hooks"]["stop"] = hooks_config["hooks"]["stop"]
-            else:
-                existing["hooks"] = hooks_config["hooks"]
-            if "version" not in existing:
-                existing["version"] = 1
-            hooks_config = existing
-        except:
-            pass
+            existing_hooks = existing.get("hooks", {})
 
-    hooks_config_path.write_text(json.dumps(hooks_config, indent=2))
-    print(f"  {GREEN}Created hooks config: {hooks_config_path}{RESET}")
-    print(f"  {GREEN}  - beforeSubmitPrompt hook (injects scoring + memories){RESET}")
-    print(f"  {GREEN}  - stop hook (enforces record_response){RESET}")
+            # Check if roampal hooks already match
+            existing_submit = existing_hooks.get("beforeSubmitPrompt", [])
+            existing_stop = existing_hooks.get("stop", [])
+
+            submit_matches = (existing_submit == expected_hooks["beforeSubmitPrompt"])
+            stop_matches = (existing_stop == expected_hooks["stop"])
+
+            if submit_matches and stop_matches:
+                print(f"  {GREEN}[OK] Hooks already configured correctly in {hooks_config_path}{RESET}")
+                hooks_needs_write = False
+            elif existing_submit or existing_stop:
+                # Hooks exist but differ
+                if not force:
+                    print(f"  {YELLOW}Cursor hooks config differs:{RESET}")
+                    if not submit_matches:
+                        print(f"    beforeSubmitPrompt: current differs from expected")
+                    if not stop_matches:
+                        print(f"    stop: current differs from expected")
+                    print(f"  {YELLOW}Use --force to overwrite{RESET}")
+                    hooks_needs_write = False
+                else:
+                    # Force - merge with existing
+                    existing["hooks"]["beforeSubmitPrompt"] = expected_hooks["beforeSubmitPrompt"]
+                    existing["hooks"]["stop"] = expected_hooks["stop"]
+                    if "version" not in existing:
+                        existing["version"] = 1
+                    hooks_config = existing
+                    print(f"  {GREEN}Updated hooks config: {hooks_config_path} (forced){RESET}")
+            else:
+                # No existing roampal hooks - add them
+                if "hooks" in existing:
+                    existing["hooks"]["beforeSubmitPrompt"] = expected_hooks["beforeSubmitPrompt"]
+                    existing["hooks"]["stop"] = expected_hooks["stop"]
+                else:
+                    existing["hooks"] = expected_hooks
+                if "version" not in existing:
+                    existing["version"] = 1
+                hooks_config = existing
+        except Exception as e:
+            logger.warning(f"Failed to parse existing hooks config: {e}")
+
+    if hooks_needs_write:
+        hooks_config_path.write_text(json.dumps(hooks_config, indent=2))
+        print(f"  {GREEN}Created hooks config: {hooks_config_path}{RESET}")
+        print(f"  {GREEN}  - beforeSubmitPrompt hook (injects scoring + memories){RESET}")
+        print(f"  {GREEN}  - stop hook (enforces record_response){RESET}")
 
     print(f"  {GREEN}Cursor configured!{RESET}\n")
 
@@ -951,8 +1003,8 @@ def cmd_doctor(args):
                 old_mcp = json.loads(old_mcp_path.read_text())
                 if "mcpServers" in old_mcp and "roampal-core" in old_mcp["mcpServers"]:
                     check_warn("Old config at ~/.claude/.mcp.json (run 'roampal init' to migrate)")
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not parse old .mcp.json: {e}")
     else:
         check_warn("~/.claude not found (Claude Code not installed?)")
 
