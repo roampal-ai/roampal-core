@@ -23,6 +23,14 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+
+# Fix Windows encoding issues with unicode characters (emojis, box drawing, etc.)
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except (AttributeError, OSError):
+        pass  # Ignore if already reconfigured or in test environment
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
@@ -35,6 +43,7 @@ import uvicorn
 # Import memory system and session manager
 from roampal.backend.modules.memory import UnifiedMemorySystem
 from roampal.backend.modules.memory.unified_memory_system import ActionOutcome
+from roampal.backend.modules.memory.content_graph import ContentGraph
 from roampal.hooks import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -52,6 +61,33 @@ DEV_PORT = 27183
 
 # Cache for update check (only check once per server session)
 _update_check_cache: Optional[tuple] = None
+
+# Cold start tag priorities - one fact per category (v0.2.7)
+TAG_PRIORITIES = ["identity", "preference", "goal", "project", "system_mastery", "agent_growth"]
+
+
+def _first_sentence(text: str, max_chars: int = 300) -> str:
+    """
+    Extract first sentence from text, capped at max_chars.
+
+    v0.2.7: Used for cold start truncation - prevents massive facts
+    from overwhelming context. Full facts still available via search.
+    Bumped from 150 to 300 chars for better summary context.
+    """
+    if not text:
+        return ""
+    # Find first sentence ending
+    for end_char in ['. ', '.\n', '!', '?']:
+        idx = text.find(end_char)
+        if idx > 0:
+            first = text[:idx + 1].strip()
+            if len(first) <= max_chars:
+                return first
+            break
+    # No sentence ending found or sentence too long - truncate
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars - 3].rsplit(' ', 1)[0] + "..."
 
 
 def _check_for_updates() -> tuple:
@@ -115,8 +151,10 @@ async def _build_cold_start_profile() -> Optional[str]:
     """
     Build the cold start user profile injection.
 
-    Dumps ALL memory_bank facts to give the LLM a complete picture
-    of who the user is at the start of each session.
+    v0.2.7: Lean but rich - 10 facts max with balanced coverage:
+    1. Always-inject memories (identity core)
+    2. One fact per tag category (identity, preference, goal, project, system_mastery, agent_growth)
+    3. (Future) Content KG entities - read path exists but entity extraction not yet wired up
 
     Returns:
         Formatted user profile string, or None if no facts exist
@@ -125,52 +163,59 @@ async def _build_cold_start_profile() -> Optional[str]:
         return None
 
     try:
-        # Get memory_bank facts - use a broad query to find user-related facts
-        # Empty query returns random results, so we search for user-specific content
-        # Search for user identity and preference facts
-        all_facts = await _memory.search(
-            query="user name identity who is preference goal project communication style background",
-            collections=["memory_bank"],
-            limit=50  # Get up to 50 facts for cold start
+        # Get all facts from memory_bank, sorted by quality (importance, confidence)
+        all_memory_bank = _memory._memory_bank_service.list_all(include_archived=False)
+
+        # Sort by quality score (importance first, then confidence)
+        sorted_facts = sorted(
+            all_memory_bank,
+            key=lambda f: (
+                f.get("metadata", {}).get("importance", 0.5),
+                f.get("metadata", {}).get("confidence", 0.5)
+            ),
+            reverse=True
         )
 
-        # Group facts by tags for organization
-        identity_facts = []
-        preference_facts = []
-        goal_facts = []
-        project_facts = []
-        other_facts = []
-
-        for fact in all_facts:
-            # Content can be in 'text', 'content', or metadata
-            content = fact.get("text") or fact.get("content") or fact.get("metadata", {}).get("content", "")
-            # Tags can be a list or JSON string
+        # Pick HIGHEST QUALITY fact for EACH tag category (one per tag)
+        all_facts = []
+        seen_tags = set()
+        for fact in sorted_facts:
             tags_raw = fact.get("metadata", {}).get("tags", [])
             if isinstance(tags_raw, str):
                 try:
-                    import json as json_module
-                    tags = json_module.loads(tags_raw)
+                    tags = json.loads(tags_raw) if tags_raw else []
                 except:
                     tags = []
             else:
-                tags = tags_raw
+                tags = tags_raw or []
 
-            # Debug logging
-            logger.debug(f"Cold start fact: content={content[:50]}..., tags={tags}")
+            # Find which priority tag this fact matches (if any)
+            for tag in TAG_PRIORITIES:
+                if tag in tags and tag not in seen_tags:
+                    all_facts.append(fact)
+                    seen_tags.add(tag)
+                    break  # One fact per tag
 
-            if "identity" in tags:
-                identity_facts.append(content)
-            elif "preference" in tags:
-                preference_facts.append(content)
-            elif "goal" in tags:
-                goal_facts.append(content)
-            elif "project" in tags:
-                project_facts.append(content)
+            # Stop once we have one fact per tag category
+            if len(seen_tags) == len(TAG_PRIORITIES):
+                break
+
+        # Check if user has NO identity at all
+        identity_content = []
+        for fact in all_facts:
+            content = fact.get("text") or fact.get("content") or fact.get("metadata", {}).get("content", "")
+            tags_raw = fact.get("metadata", {}).get("tags", [])
+            if isinstance(tags_raw, str):
+                try:
+                    tags = json.loads(tags_raw) if tags_raw else []
+                except:
+                    tags = []
             else:
-                other_facts.append(content)
+                tags = tags_raw or []
+            if "identity" in tags:
+                identity_content.append(content)
 
-        # Check if user has NO identity-tagged facts (name, role, background)
-        if not identity_facts:
+        if not identity_content:
             # Check if they have history (existing user) or not (truly new)
             has_history = await _memory.search(
                 query="",
@@ -179,8 +224,7 @@ async def _build_cold_start_profile() -> Optional[str]:
             )
 
             if has_history:
-                # Existing user, just missing identity - softer prompt
-                return f"""<roampal-identity-missing>
+                return """<roampal-identity-missing>
 You've been working with this user but don't have their identity stored yet.
 
 When natural, consider asking their name to personalize future sessions. Store with:
@@ -190,8 +234,7 @@ No rush - just when it fits the conversation.
 </roampal-identity-missing>
 """
             else:
-                # Truly new user - full onboarding prompt
-                return f"""<roampal-new-user>
+                return """<roampal-new-user>
 NEW USER: You don't have any stored information about this user yet.
 
 Consider naturally asking for their name and what they're working on. Store with:
@@ -202,38 +245,42 @@ Keep it conversational - don't interrogate. A simple "I don't think we've met - 
 </roampal-new-user>
 """
 
-        # Build formatted profile
+        # Build narrative profile - one line per category (compact ~200 chars)
+        tag_labels = {
+            "identity": "Identity",
+            "preference": "Preference",
+            "goal": "Goal",
+            "project": "Project",
+            "system_mastery": "System Mastery",
+            "agent_growth": "Agent Growth"
+        }
+
+        # Group facts by their primary tag, keeping only FIRST fact per category
+        category_facts = {}
+        for fact in all_facts:
+            content = fact.get("text") or fact.get("content") or fact.get("metadata", {}).get("content", "")
+            tags_raw = fact.get("metadata", {}).get("tags", [])
+            if isinstance(tags_raw, str):
+                try:
+                    tags = json.loads(tags_raw) if tags_raw else []
+                except:
+                    tags = []
+            else:
+                tags = tags_raw or []
+
+            for tag in TAG_PRIORITIES:
+                if tag in tags and tag not in category_facts:
+                    category_facts[tag] = content
+                    break
+
+        # Build compact narrative
         profile_parts = ["<roampal-user-profile>"]
-        profile_parts.append("COLD START: Here's everything you know about this user:\n")
+        for tag in TAG_PRIORITIES:
+            if tag in category_facts:
+                profile_parts.append(f"{tag_labels[tag]}: {_first_sentence(category_facts[tag])}")
+        profile_parts.append("</roampal-user-profile>")
 
-        if identity_facts:
-            profile_parts.append("IDENTITY:")
-            for fact in identity_facts:
-                profile_parts.append(f"  - {fact}")
-
-        if preference_facts:
-            profile_parts.append("\nPREFERENCES:")
-            for fact in preference_facts:
-                profile_parts.append(f"  - {fact}")
-
-        if goal_facts:
-            profile_parts.append("\nGOALS:")
-            for fact in goal_facts:
-                profile_parts.append(f"  - {fact}")
-
-        if project_facts:
-            profile_parts.append("\nPROJECTS:")
-            for fact in project_facts:
-                profile_parts.append(f"  - {fact}")
-
-        if other_facts:
-            profile_parts.append("\nOTHER FACTS:")
-            for fact in other_facts:
-                profile_parts.append(f"  - {fact}")
-
-        profile_parts.append("\nUse this context to personalize your responses.")
-        profile_parts.append("</roampal-user-profile>\n")
-
+        logger.info(f"Cold start: {len(all_facts)} facts, {len(category_facts)} categories")
         return "\n".join(profile_parts)
 
     except Exception as e:
@@ -402,16 +449,18 @@ def create_app() -> FastAPI:
                 # Mark first message as seen
                 _session_manager.mark_first_message_seen(conversation_id)
 
-            # Skip query-based context injection on cold start - profile is enough
-            # Regular context injection starts on message 2
-            context = {}
-            if not is_cold_start:
-                # 1. Get memory context (needed for scoring prompt to include surfaced memories)
-                context = await _memory.get_context_for_injection(
-                    query=request.query,
-                    conversation_id=conversation_id,
-                    recent_conversation=request.recent_messages
-                )
+            # v0.2.7: Get context for BOTH cold start and regular messages
+            # Cold start uses it for KNOWN CONTEXT (recent work), non-cold start also uses for scoring
+            context = await _memory.get_context_for_injection(
+                query=request.query,
+                conversation_id=conversation_id,
+                recent_conversation=request.recent_messages
+            )
+
+            # v0.2.7: On cold start, append KNOWN CONTEXT after profile (recent work context)
+            if is_cold_start and context.get("formatted_injection"):
+                formatted_parts.append(context["formatted_injection"])
+                logger.info(f"Cold start: added KNOWN CONTEXT for {conversation_id}")
 
             # 2. Check if assistant completed a response (vs user interrupting mid-work)
             assistant_completed = _session_manager.check_and_clear_completed(conversation_id)
@@ -448,7 +497,8 @@ def create_app() -> FastAPI:
                     logger.info(f"Skipping scoring - user interrupted mid-work for {conversation_id}")
 
             # 3. Add memory context after scoring prompt (only if not cold start)
-            if context.get("formatted_injection"):
+            # v0.2.7: Cold start already added KNOWN CONTEXT above, don't duplicate
+            if not is_cold_start and context.get("formatted_injection"):
                 formatted_parts.append(context["formatted_injection"])
 
             # 4. Cache doc_ids for outcome scoring via record_response
@@ -472,7 +522,8 @@ def create_app() -> FastAPI:
             )
 
         except Exception as e:
-            logger.error(f"Error getting context: {e}")
+            import traceback
+            logger.error(f"Error getting context: {e}\n{traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/hooks/stop", response_model=StopHookResponse)

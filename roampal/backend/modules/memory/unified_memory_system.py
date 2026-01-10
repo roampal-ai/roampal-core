@@ -645,6 +645,44 @@ class UnifiedMemorySystem:
 
         return await self._memory_bank_service.archive(content)
 
+    def get_always_inject(self) -> List[Dict[str, Any]]:
+        """
+        Get all memories marked with always_inject: true.
+
+        These are core identity facts that should appear in EVERY context
+        regardless of semantic relevance to the query.
+
+        Returns:
+            List of always_inject memories
+        """
+        if not self._memory_bank_service:
+            return []
+        return self._memory_bank_service.get_always_inject()
+
+    def get_by_id(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a document by its ID from any collection.
+
+        Args:
+            doc_id: Document ID (e.g., "memory_bank_abc123")
+
+        Returns:
+            Document dict with id, content, metadata, or None if not found
+        """
+        # Determine collection from doc_id prefix
+        for coll_name, adapter in self.collections.items():
+            if doc_id.startswith(coll_name):
+                doc = adapter.get_fragment(doc_id)
+                if doc:
+                    return {
+                        "id": doc_id,
+                        "content": doc.get("content", ""),
+                        "text": doc.get("content", ""),
+                        "metadata": doc.get("metadata", {}),
+                        "collection": coll_name
+                    }
+        return None
+
     # ==================== Outcome Recording ====================
 
     async def record_outcome(
@@ -783,13 +821,57 @@ class UnifiedMemorySystem:
         Format context for injection into LLM prompt.
 
         Shows top 5 memories across all collections with effectiveness stats.
+        Extracts user name from identity-tagged memories.
         """
+        import re
+        import json as json_module
         parts = []
+        user_name = None
+
+        # Find identity-tagged facts in memory_bank (no always_inject required)
+        all_facts = self._memory_bank_service.list_all(include_archived=False)
+        for fact in all_facts:
+            # Check for identity tag
+            tags_raw = fact.get("metadata", {}).get("tags", [])
+            if isinstance(tags_raw, str):
+                try:
+                    tags = json_module.loads(tags_raw) if tags_raw else []
+                except:
+                    tags = []
+            else:
+                tags = tags_raw or []
+
+            if "identity" not in tags:
+                continue
+
+            content = fact.get("content") or fact.get("text") or fact.get("metadata", {}).get("text", "")
+            content_lower = content.lower()
+
+            # Look for name patterns
+            if "name is" in content_lower or "i'm " in content_lower or "i am " in content_lower:
+                # Try "name is X" pattern
+                match = re.search(r"name is (\w+)", content, re.IGNORECASE)
+                if match:
+                    user_name = match.group(1)
+                    break
+                # Try "I'm X" or "I am X" pattern
+                match = re.search(r"i[''`]?m (\w+)|i am (\w+)", content, re.IGNORECASE)
+                if match:
+                    user_name = match.group(1) or match.group(2)
+                    break
 
         memories = context.get("memories", [])
-        if memories:
+
+        if user_name or memories:
             parts.append("═══ KNOWN CONTEXT ═══")
-            for mem in memories[:5]:
+
+            # Add user name simply if found
+            if user_name:
+                parts.append(f"User: {user_name}")
+
+            # Add memories
+            for mem in memories[:3]:
+
                 # Get content from various possible locations
                 content = mem.get("content") or mem.get("text") or mem.get("metadata", {}).get("text", "")
                 collection = mem.get("collection", "unknown")
