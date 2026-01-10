@@ -134,9 +134,6 @@ async def _build_cold_start_profile() -> Optional[str]:
             limit=50  # Get up to 50 facts for cold start
         )
 
-        if not all_facts:
-            return None
-
         # Group facts by tags for organization
         identity_facts = []
         preference_facts = []
@@ -171,6 +168,39 @@ async def _build_cold_start_profile() -> Optional[str]:
                 project_facts.append(content)
             else:
                 other_facts.append(content)
+
+        # Check if user has NO identity-tagged facts (name, role, background)
+        if not identity_facts:
+            # Check if they have history (existing user) or not (truly new)
+            has_history = await _memory.search(
+                query="",
+                collections=["history", "patterns"],
+                limit=1
+            )
+
+            if has_history:
+                # Existing user, just missing identity - softer prompt
+                return f"""<roampal-identity-missing>
+You've been working with this user but don't have their identity stored yet.
+
+When natural, consider asking their name to personalize future sessions. Store with:
+  add_to_memory_bank(content="User's name is [NAME]", tags=["identity"])
+
+No rush - just when it fits the conversation.
+</roampal-identity-missing>
+"""
+            else:
+                # Truly new user - full onboarding prompt
+                return f"""<roampal-new-user>
+NEW USER: You don't have any stored information about this user yet.
+
+Consider naturally asking for their name and what they're working on. Store with:
+  add_to_memory_bank(content="User's name is [NAME]", tags=["identity"])
+  add_to_memory_bank(content="Working on [PROJECT]", tags=["project"])
+
+Keep it conversational - don't interrogate. A simple "I don't think we've met - what's your name?" works.
+</roampal-new-user>
+"""
 
         # Build formatted profile
         profile_parts = ["<roampal-user-profile>"]
@@ -372,12 +402,16 @@ def create_app() -> FastAPI:
                 # Mark first message as seen
                 _session_manager.mark_first_message_seen(conversation_id)
 
-            # 1. Get memory context FIRST (needed for scoring prompt to include surfaced memories)
-            context = await _memory.get_context_for_injection(
-                query=request.query,
-                conversation_id=conversation_id,
-                recent_conversation=request.recent_messages
-            )
+            # Skip query-based context injection on cold start - profile is enough
+            # Regular context injection starts on message 2
+            context = {}
+            if not is_cold_start:
+                # 1. Get memory context (needed for scoring prompt to include surfaced memories)
+                context = await _memory.get_context_for_injection(
+                    query=request.query,
+                    conversation_id=conversation_id,
+                    recent_conversation=request.recent_messages
+                )
 
             # 2. Check if assistant completed a response (vs user interrupting mid-work)
             assistant_completed = _session_manager.check_and_clear_completed(conversation_id)
@@ -413,11 +447,11 @@ def create_app() -> FastAPI:
                 if not is_cold_start:
                     logger.info(f"Skipping scoring - user interrupted mid-work for {conversation_id}")
 
-            # 3. Add memory context after scoring prompt
+            # 3. Add memory context after scoring prompt (only if not cold start)
             if context.get("formatted_injection"):
                 formatted_parts.append(context["formatted_injection"])
 
-            # 3. Cache doc_ids for outcome scoring via record_response
+            # 4. Cache doc_ids for outcome scoring via record_response
             # This ensures hook-injected memories can be scored later
             injected_doc_ids = context.get("doc_ids", [])
             if injected_doc_ids:
@@ -772,10 +806,8 @@ def create_app() -> FastAPI:
             # Track that score_response was called this turn (for Stop hook blocking)
             _session_manager.set_scored_this_turn(conversation_id, True)
 
-            # v0.2.3: Skip session file scan - trust the search cache
-            # The slow get_most_recent_unscored_exchange() scanned ALL session files (O(n×m) I/O)
-            # but doc_ids are already available in _search_cache or request.related
-            # See: https://github.com/roampal/roampal-core/issues/XXX (performance fix)
+            # v0.2.3: Skip session file scan - doc_ids are in _search_cache or request.related
+            # Old approach scanned ALL session files (O(n×m) I/O) - now O(1) cache lookup
 
             # Score cached search results
             # First try exact conversation_id match

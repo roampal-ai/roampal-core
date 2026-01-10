@@ -414,7 +414,8 @@ class UnifiedMemorySystem:
         query: str,
         limit: int = 10,
         collections: Optional[List[CollectionName]] = None,
-        metadata_filters: Optional[Dict[str, Any]] = None
+        metadata_filters: Optional[Dict[str, Any]] = None,
+        sort_by: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Search memory with optional collection filtering.
@@ -424,6 +425,7 @@ class UnifiedMemorySystem:
             limit: Max results per collection
             collections: Which collections to search (default: all)
             metadata_filters: Optional metadata filters
+            sort_by: Sort order - "relevance" (default), "recency", or "score"
 
         Returns:
             Ranked results with scores
@@ -497,10 +499,25 @@ class UnifiedMemorySystem:
             except Exception as e:
                 logger.warning(f"Error searching {coll_name}: {e}")
 
-        # Sort by final_rank_score (quality-weighted)
-        all_results.sort(key=lambda x: x.get("final_rank_score", 0), reverse=True)
-
-        return all_results[:limit * 2]  # Return top across all collections
+        # Sort based on sort_by parameter
+        if sort_by == "recency":
+            # Sort by timestamp (most recent first)
+            def get_timestamp(x):
+                metadata = x.get("metadata", {})
+                ts = metadata.get("timestamp") or metadata.get("created_at") or ""
+                return ts if ts else "0"
+            all_results.sort(key=get_timestamp, reverse=True)
+            # Recency sort: return exactly limit items
+            return all_results[:limit]
+        elif sort_by == "score":
+            # Sort by outcome score
+            all_results.sort(key=lambda x: x.get("metadata", {}).get("score", 0.5), reverse=True)
+            return all_results[:limit]
+        else:
+            # Default: sort by final_rank_score (quality-weighted relevance)
+            all_results.sort(key=lambda x: x.get("final_rank_score", 0), reverse=True)
+            # Semantic search: return limit * 2 for better cross-collection coverage
+            return all_results[:limit * 2]
 
     # ==================== Generic Store (Desktop-compatible wrapper) ====================
 
@@ -732,8 +749,8 @@ class UnifiedMemorySystem:
         # 2. Get KG recommendations (informational - we still search all)
         kg_recs = self.get_tier_recommendations(concepts)
 
-        # 3. Unified search across ALL collections
-        all_collections = ["working", "patterns", "history", "books", "memory_bank"]
+        # 3. Unified search across conversational collections (books excluded - use search_memory explicitly)
+        all_collections = ["working", "patterns", "history", "memory_bank"]
         search_results = await self.search(
             query=query,
             limit=5,

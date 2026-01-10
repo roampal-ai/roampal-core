@@ -372,7 +372,13 @@ WHEN NOT TO SEARCH:
 • get_context_insights already gave you the answer
 
 Collections: working (24h then auto-promotes), history (30d scored), patterns (permanent scored), memory_bank (permanent), books (permanent docs)
-Omit 'collections' parameter for auto-routing (recommended).""",
+Omit 'collections' parameter for auto-routing (recommended).
+
+READING RESULTS:
+• [YYN] = outcome history (last 3: Y=worked, ~=partial, N=failed)
+• s:0.7 = outcome score (0-1, higher = more successful outcomes, statistically weighted)
+• 5d = age of memory
+• [id:patterns_abc123] = memory ID for selective scoring (use with related=["id1","id2"])""",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -413,7 +419,7 @@ Omit 'collections' parameter for auto-routing (recommended).""",
                 description="""Store PERMANENT facts that help maintain continuity across sessions.
 
 WHAT BELONGS HERE:
-• User identity (name, role, background)
+• User identity (name, role, background) - MUST use tags=["identity"]
 • Preferences (communication style, tools, workflows)
 • Goals and projects (what they're working on, priorities)
 • Progress tracking (what worked, what failed, strategy iterations)
@@ -424,9 +430,21 @@ WHAT DOES NOT BELONG:
 • Temporary session facts (current task details)
 • Every fact you hear - be SELECTIVE, this is for PERMANENT knowledge
 
+TAG MEANINGS:
+• identity - name, role, background (REQUIRED for cold start detection)
+• preference - communication style, tools they like, how they work
+• goal - what they're trying to achieve long-term
+• project - current projects, codebases, repos
+• system_mastery - things you learned about being effective for THIS user
+• agent_growth - meta-learning about how to improve as an assistant
+
+ALWAYS_INJECT:
+Use sparingly. Only for facts needed on EVERY message (core identity).
+Most facts should NOT be always_inject - they surface via semantic search when relevant.
+
 Rule of thumb: If it helps maintain continuity across sessions OR enables learning/improvement, store it. If it's session-specific, don't.
 
-Note: memory_bank is NOT outcome-scored. Facts persist until archived.""",
+Note: memory_bank is NOT outcome-scored. Facts persist until deleted.""",
                 inputSchema={
                     "type": "object",
                     "properties": {

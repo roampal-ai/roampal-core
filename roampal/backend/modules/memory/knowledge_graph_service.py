@@ -719,7 +719,7 @@ class KnowledgeGraphService:
     async def get_kg_entities(
         self,
         filter_text: Optional[str] = None,
-        limit: int = 200
+        limit: int = 25  # v0.3.0: Reduced from 200 - frontend only displays 20 nodes (MAX_NODES_DISPLAYED)
     ) -> List[Dict[str, Any]]:
         """
         Get entities from DUAL knowledge graph (Routing KG + Content KG merged).
