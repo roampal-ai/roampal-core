@@ -442,6 +442,14 @@ ALWAYS_INJECT:
 Use sparingly. Only for facts needed on EVERY message (core identity).
 Most facts should NOT be always_inject - they surface via semantic search when relevant.
 
+SIZE GUIDANCE:
+• Keep facts AS SMALL AS POSSIBLE - aim for ~300 chars or less
+• The first ~300 chars of each fact appear in cold start profile summaries
+• Longer facts work but only the beginning shows on cold start - put the key info first
+• Research dumps belong in books collection, not memory_bank
+• If you notice massive facts (1000+ chars), offer to condense them
+• One concept per fact - split multi-topic content into separate memories
+
 Rule of thumb: If it helps maintain continuity across sessions OR enables learning/improvement, store it. If it's session-specific, don't.
 
 Note: memory_bank is NOT outcome-scored. Facts persist until deleted.""",
@@ -503,10 +511,16 @@ Failed outcomes are how bad memories get deleted. Without them, wrong info persi
 Don't default to "worked" just to be optimistic. Wrong memories MUST be demoted.
 
 SELECTIVE SCORING (optional):
-If the scoring prompt shows "Memories surfaced:", you can specify which were actually relevant:
-• related=["doc_id_1", "doc_id_2"] → only those get scored
-• Omit related → all surfaced memories get scored (backwards compatible)
-Unrelated memories get 0 (neutral) - they're not penalized, just skipped.""",
+• Omit `related` → all surfaced memories get scored (default)
+• Specify `related` → only those memories get scored
+
+When to use `related`:
+• Worked BECAUSE of a memory's advice → include it (gets upvoted)
+• Failed BECAUSE of a memory's bad advice → include it (gets downvoted)
+
+⚠️ IF FAILED: DO NOT put helpful memories in related - they will be unfairly penalized.
+Only include memories that gave BAD advice leading to the failure.
+If you failed on your own (not because of bad memory advice), use related=[].""",
                 inputSchema={
                     "type": "object",
                     "properties": {
