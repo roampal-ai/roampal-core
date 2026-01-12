@@ -119,12 +119,14 @@ class OutcomeService:
         metadata = doc.get("metadata", {})
         current_score = metadata.get("score", 0.5)
         uses = metadata.get("uses", 0)
+        success_count = metadata.get("success_count", 0.0)  # v0.2.8: Track cumulative successes
 
         # Time-weighted score update
         time_weight = self._calculate_time_weight(metadata.get("last_used"))
-        score_delta, new_score, uses = self._calculate_score_update(
+        score_delta, new_score, uses, success_delta = self._calculate_score_update(
             outcome, current_score, uses, time_weight
         )
+        success_count += success_delta  # v0.2.8: Accumulate successes (no cap)
 
         # Update context tracking
         if outcome == "worked" and context:
@@ -152,6 +154,7 @@ class OutcomeService:
         metadata.update({
             "score": new_score,
             "uses": uses,
+            "success_count": success_count,  # v0.2.8: Cumulative successes for Wilson score
             "last_outcome": outcome,
             "last_used": datetime.now().isoformat(),
             "outcome_history": json.dumps(outcome_history)
@@ -260,21 +263,30 @@ class OutcomeService:
         Calculate score delta and new values.
 
         Returns:
-            Tuple of (score_delta, new_score, new_uses)
+            Tuple of (score_delta, new_score, new_uses, success_delta)
+
+        v0.2.8: Added success_delta for Wilson score tracking.
+        - worked: +1.0 success, +1 use
+        - partial: +0.5 success, +1 use
+        - failed: +0.0 success, +1 use
         """
         if outcome == "worked":
             score_delta = 0.2 * time_weight
             new_score = min(1.0, current_score + score_delta)
             uses += 1
+            success_delta = 1.0
         elif outcome == "failed":
             score_delta = -0.3 * time_weight
             new_score = max(0.0, current_score + score_delta)
+            uses += 1  # v0.2.8: Fixed - failed should increment uses
+            success_delta = 0.0
         else:  # partial
             score_delta = 0.05 * time_weight
             new_score = min(1.0, current_score + score_delta)
             uses += 1
+            success_delta = 0.5
 
-        return score_delta, new_score, uses
+        return score_delta, new_score, uses, success_delta
 
     async def _update_kg_with_outcome(
         self,

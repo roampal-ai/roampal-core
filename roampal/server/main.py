@@ -65,6 +65,69 @@ _update_check_cache: Optional[tuple] = None
 # Cold start tag priorities - one fact per category (v0.2.7)
 TAG_PRIORITIES = ["identity", "preference", "goal", "project", "system_mastery", "agent_growth"]
 
+# v0.2.8: Parent process monitoring for lifecycle management
+_parent_monitor_task: Optional[asyncio.Task] = None
+
+
+def _is_parent_alive(parent_pid: int) -> bool:
+    """
+    v0.2.8: Check if parent process is still alive. Cross-platform, no dependencies.
+
+    Uses OS-native APIs:
+    - Windows: ctypes + kernel32 OpenProcess/GetExitCodeProcess
+    - Unix: os.kill with signal 0
+    """
+    if sys.platform == "win32":
+        # Windows: Use ctypes to check process
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+
+        try:
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, parent_pid)
+            if not handle:
+                return False  # Can't open = doesn't exist
+
+            exit_code = ctypes.c_ulong()
+            result = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            kernel32.CloseHandle(handle)
+
+            if not result:
+                return False
+            return exit_code.value == STILL_ACTIVE
+        except Exception:
+            # If ctypes fails, assume parent is alive (fail open)
+            return True
+    else:
+        # Unix: signal 0 checks if process exists without actually sending a signal
+        try:
+            os.kill(parent_pid, 0)
+            return True
+        except OSError:
+            return False
+
+
+async def _monitor_parent_process():
+    """
+    v0.2.8: Exit if parent MCP process dies.
+
+    Runs every 2 seconds. If parent PID no longer exists, FastAPI exits.
+    This catches SIGKILL and crashes that bypass atexit handlers.
+
+    No external dependencies - uses ctypes (Windows) or os.kill (Unix).
+    """
+    parent_pid = os.getppid()
+    logger.info(f"v0.2.8: Monitoring parent process {parent_pid} for lifecycle management")
+
+    while True:
+        await asyncio.sleep(2)  # Check every 2 seconds
+
+        if not _is_parent_alive(parent_pid):
+            logger.info(f"Parent process {parent_pid} died. Shutting down FastAPI server.")
+            # Use os._exit for immediate termination (no cleanup needed for zombie prevention)
+            os._exit(0)
+
 
 def _first_sentence(text: str, max_chars: int = 300) -> str:
     """
@@ -349,7 +412,8 @@ class RecordOutcomeRequest(BaseModel):
     """Request to record outcome for scoring."""
     conversation_id: str
     outcome: str  # worked, failed, partial, unknown
-    related: Optional[List[str]] = None  # Optional: filter to only score these doc_ids
+    related: Optional[List[str]] = None  # DEPRECATED: use memory_scores instead
+    memory_scores: Optional[Dict[str, str]] = None  # v0.2.8: Per-memory scoring (doc_id -> outcome)
 
 
 # ==================== Lifecycle ====================
@@ -357,7 +421,7 @@ class RecordOutcomeRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage memory system lifecycle."""
-    global _memory, _session_manager
+    global _memory, _session_manager, _parent_monitor_task
     logger.info("Starting Roampal server...")
 
     # Check for dev mode or custom data path
@@ -386,10 +450,19 @@ async def lifespan(app: FastAPI):
     _session_manager = SessionManager(_memory.data_path)
     logger.info("Session manager initialized")
 
+    # v0.2.8: Start parent process monitor (kills FastAPI when MCP dies)
+    _parent_monitor_task = asyncio.create_task(_monitor_parent_process())
+
     yield
 
     # Cleanup
     logger.info("Shutting down Roampal server...")
+    if _parent_monitor_task:
+        _parent_monitor_task.cancel()
+        try:
+            await _parent_monitor_task
+        except asyncio.CancelledError:
+            pass
 
 
 def create_app() -> FastAPI:
@@ -877,23 +950,31 @@ def create_app() -> FastAPI:
                 if cached_doc_ids:
                     logger.info(f"Using cache from session {most_recent_key} (MCP used {conversation_id})")
 
-            # 2a. If related doc_ids provided, use directly (bypass stale cache)
-            # This fixes the timing issue where cache is overwritten before scoring
-            if request.related is not None and len(request.related) > 0:
+            # v0.2.8: Per-memory scoring - process each memory with individual outcome
+            if request.memory_scores:
+                for doc_id, mem_outcome in request.memory_scores.items():
+                    if mem_outcome in ["worked", "failed", "partial"]:
+                        await _memory.record_outcome(doc_ids=[doc_id], outcome=mem_outcome)
+                        doc_ids_scored.append(doc_id)
+                logger.info(f"Per-memory scoring: {len(doc_ids_scored)} memories with individual outcomes")
+
+            # DEPRECATED: related param (backward compat)
+            elif request.related is not None:
                 doc_ids_scored.extend(request.related)
-                logger.info(f"Direct scoring: {len(request.related)} doc_ids from related param")
+                logger.info(f"Direct scoring (deprecated): {len(request.related)} doc_ids from related param")
+                if doc_ids_scored and request.outcome in ["worked", "failed", "partial"]:
+                    await _memory.record_outcome(doc_ids=doc_ids_scored, outcome=request.outcome)
+
+            # Fallback: score all cached with exchange outcome
             elif cached_doc_ids:
-                # No related filter - score all cached (backwards compatible)
                 doc_ids_scored.extend(cached_doc_ids)
                 logger.info(f"Cache scoring: {len(cached_doc_ids)} doc_ids")
+                if doc_ids_scored and request.outcome in ["worked", "failed", "partial"]:
+                    await _memory.record_outcome(doc_ids=doc_ids_scored, outcome=request.outcome)
 
-            # 3. Apply outcome to filtered documents
-            if doc_ids_scored and request.outcome in ["worked", "failed", "partial"]:
-                result = await _memory.record_outcome(
-                    doc_ids=doc_ids_scored,
-                    outcome=request.outcome
-                )
-                logger.info(f"Scored {len(doc_ids_scored)} documents with outcome '{request.outcome}'")
+            # Log final result and trigger background updates
+            if doc_ids_scored:
+                logger.info(f"Scored {len(doc_ids_scored)} documents")
 
                 # ========== FAST PATH COMPLETE (v0.2.3) ==========
                 # Score recorded. Defer heavy Action KG and routing updates to background.
@@ -905,8 +986,6 @@ def create_app() -> FastAPI:
                         cached_query=cached_query
                     )
                 )
-            else:
-                result = {"outcome": request.outcome, "documents_updated": 0}
 
             # Clear search cache for the key we used
             if cache_key_used in _search_cache:
@@ -915,8 +994,7 @@ def create_app() -> FastAPI:
             return {
                 "success": True,
                 "outcome": request.outcome,
-                "documents_scored": len(doc_ids_scored),
-                **result
+                "documents_scored": len(doc_ids_scored)
             }
 
         except Exception as e:

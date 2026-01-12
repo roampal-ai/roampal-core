@@ -368,11 +368,36 @@ class SessionManager:
             if memory_lines:
                 memories_section = "\nMemories surfaced:\n" + "\n".join(memory_lines) + "\n"
 
-        # Build selective scoring instruction
-        scoring_instruction = "Call score_response(outcome=\"worked|failed|partial|unknown\") FIRST, then respond."
+        # Build per-memory scoring instruction (v0.2.8)
+        scoring_instruction = "Call score_response(outcome=\"worked|failed|partial|unknown\", memory_scores={}) FIRST, then respond."
         if surfaced_memories:
-            scoring_instruction = """Call score_response(outcome="...", related=["doc_ids that were relevant"]) FIRST.
-- related is optional: omit to score all, or list only the memories you actually used"""
+            # Build explicit list of memories to score
+            memory_score_lines = []
+            for mem in surfaced_memories:
+                doc_id = mem.get("id", mem.get("doc_id", "unknown"))
+                memory_score_lines.append(f'        "{doc_id}": "___"')
+            memory_scores_template = ",\n".join(memory_score_lines)
+
+            scoring_instruction = f"""Score each cached memory individually:
+
+Cached memories to score:
+{chr(10).join([f"- {mem.get('id', mem.get('doc_id', 'unknown'))}" for mem in surfaced_memories])}
+
+Call score_response(
+    outcome="worked|failed|partial|unknown",
+    memory_scores={{
+{memory_scores_template}
+    }}
+)
+
+SCORING GUIDE:
+• worked = this memory was helpful
+• partial = somewhat helpful
+• unknown = didn't use this memory
+• failed = this memory was MISLEADING (gave bad advice)
+
+You MUST score every cached memory above.
+You MAY add scores for other memories in your context (KNOWN CONTEXT, earlier conversation, etc.)."""
 
         return f"""<roampal-score-required>
 Score the previous exchange before responding.
