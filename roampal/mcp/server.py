@@ -43,6 +43,8 @@ import threading
 import socket
 import os
 import sys
+import atexit
+import subprocess
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
@@ -139,6 +141,9 @@ _mcp_search_cache: Dict[str, Dict[str, Any]] = {}
 # Flag to track if FastAPI server is running
 _fastapi_started = False
 
+# v0.2.8: Track FastAPI subprocess for lifecycle management
+_fastapi_process: Optional[subprocess.Popen] = None
+
 # Dev mode flag (set via command line or env)
 _dev_mode = False
 
@@ -213,8 +218,13 @@ def _start_fastapi_server():
 
     Uses subprocess instead of threading to avoid event loop conflicts between
     uvicorn and the MCP server's asyncio loop.
+
+    v0.2.8: Child process lifecycle - FastAPI dies when MCP dies.
+    - Windows: Uses STARTUPINFO to hide console without detaching
+    - Linux/macOS: Child naturally dies with parent (same process group)
+    - atexit handler ensures graceful cleanup on normal exit
     """
-    global _fastapi_started
+    global _fastapi_started, _fastapi_process
 
     if _fastapi_started:
         return
@@ -228,8 +238,6 @@ def _start_fastapi_server():
         _fastapi_started = True
         return
 
-    import subprocess
-
     try:
         # Build environment - pass through dev mode
         env = os.environ.copy()
@@ -240,22 +248,56 @@ def _start_fastapi_server():
         # Use the same Python that's running this MCP server
         cmd = [sys.executable, "-m", "roampal.server.main", "--port", str(port)]
 
-        subprocess.Popen(
+        # v0.2.8: Platform-specific subprocess handling
+        # Goal: Hide console window without detaching from parent process
+        kwargs = {}
+        if sys.platform == "win32":
+            # Windows: STARTUPINFO hides window but stays in process tree
+            # This replaces CREATE_NO_WINDOW which fully detached the child
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            kwargs["startupinfo"] = startupinfo
+        # Linux/macOS: Child naturally dies with parent (same process group)
+
+        _fastapi_process = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            # Don't inherit stdin (MCP uses it)
             stdin=subprocess.DEVNULL,
-            # Pass environment with dev flag
             env=env,
-            # Detach from parent process group on Windows
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            **kwargs
         )
         _fastapi_started = True
         mode = "DEV" if _dev_mode else "PROD"
-        logger.info(f"Started FastAPI hook server on port {port} ({mode} mode)")
+        logger.info(f"Started FastAPI hook server on port {port} ({mode} mode, pid={_fastapi_process.pid})")
     except Exception as e:
         logger.error(f"Failed to start FastAPI hook server: {e}")
+
+
+def _cleanup_fastapi():
+    """
+    v0.2.8: Kill FastAPI subprocess on MCP exit.
+
+    Called by atexit handler for graceful shutdown.
+    On crash, child dies automatically (no longer detached).
+    """
+    global _fastapi_process
+    if _fastapi_process and _fastapi_process.poll() is None:
+        logger.info("Cleaning up FastAPI hook server...")
+        try:
+            _fastapi_process.terminate()
+            _fastapi_process.wait(timeout=2)
+        except Exception:
+            # Force kill if terminate doesn't work
+            try:
+                _fastapi_process.kill()
+            except Exception:
+                pass
+
+
+# v0.2.8: Register cleanup handler
+atexit.register(_cleanup_fastapi)
 
 
 def _ensure_server_running(timeout: float = 5.0) -> bool:
@@ -495,47 +537,42 @@ Note: memory_bank is NOT outcome-scored. Facts persist until deleted.""",
 ⚠️ IMPORTANT: This tool is ONLY for scoring when prompted by the hook. Do NOT call it at other times.
 For storing important learnings at any time, use record_response(key_takeaway="...") instead.
 
-OUTCOME DETECTION (read user's reaction):
+EXCHANGE OUTCOME (read user's reaction):
 ✓ worked = user satisfied, says thanks, moves on
 ✗ failed = user corrects you, says "no", "that's wrong", provides the right answer
 ~ partial = user says "kind of" or takes some but not all of your answer
 ? unknown = no clear signal from user
 
-⚠️ CRITICAL - "failed" OUTCOMES ARE ESSENTIAL:
-• If user says you were wrong → outcome="failed"
-• If memory you retrieved was outdated → outcome="failed"
-• If user had to correct you → outcome="failed"
-• If you gave advice that didn't help → outcome="failed"
+PER-MEMORY SCORING (v0.2.8):
+You MUST score each cached memory individually in memory_scores:
+• worked = this memory was helpful
+• partial = somewhat helpful
+• unknown = didn't use this memory
+• failed = this memory was MISLEADING
 
-Failed outcomes are how bad memories get deleted. Without them, wrong info persists forever.
-Don't default to "worked" just to be optimistic. Wrong memories MUST be demoted.
+You MAY add scores for any other memory in your context (KNOWN CONTEXT, earlier conversation, searched memories).
 
-SELECTIVE SCORING (optional):
-• Omit `related` → all surfaced memories get scored (default)
-• Specify `related` → only those memories get scored
-
-When to use `related`:
-• Worked BECAUSE of a memory's advice → include it (gets upvoted)
-• Failed BECAUSE of a memory's bad advice → include it (gets downvoted)
-
-⚠️ IF FAILED: DO NOT put helpful memories in related - they will be unfairly penalized.
-Only include memories that gave BAD advice leading to the failure.
-If you failed on your own (not because of bad memory advice), use related=[].""",
+⚠️ CRITICAL - "failed" for memories means MISLEADING, not just unused.
+Only mark a memory as "failed" if it gave bad advice that led you astray.
+If you didn't use a memory, mark it "unknown" not "failed".""",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "outcome": {
                             "type": "string",
                             "enum": ["worked", "failed", "partial", "unknown"],
-                            "description": "How helpful was your response based on user's reaction"
+                            "description": "Exchange outcome based on user's reaction"
                         },
-                        "related": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Optional: doc_ids of memories that were actually relevant. Omit to score all surfaced memories."
+                        "memory_scores": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string",
+                                "enum": ["worked", "failed", "partial", "unknown"]
+                            },
+                            "description": "Score for each memory: doc_id -> outcome. MUST include all cached memories. MAY include extras from context."
                         }
                     },
-                    "required": ["outcome"]
+                    "required": ["outcome", "memory_scores"]
                 }
             ),
             types.Tool(
@@ -744,7 +781,8 @@ Don't wait to be asked - good assistants remember what matters.""",
 
             elif name == "score_response":
                 outcome = arguments.get("outcome", "unknown")
-                related = arguments.get("related")  # Optional list of doc_ids to score
+                memory_scores = arguments.get("memory_scores", {})  # v0.2.8: Per-memory scoring
+                related = arguments.get("related")  # Deprecated, backward compat
 
                 # v0.2.0: Ensure FastAPI server is running before calling it
                 if not _ensure_server_running(timeout=3.0):
@@ -760,8 +798,11 @@ Don't wait to be asked - good assistants remember what matters.""",
                         "conversation_id": session_id,
                         "outcome": outcome
                     }
-                    # Only include related if explicitly provided (backwards compatible)
-                    if related is not None:
+                    # v0.2.8: Include memory_scores for per-memory scoring
+                    if memory_scores:
+                        payload["memory_scores"] = memory_scores
+                    # Backward compat: related still works (deprecated)
+                    elif related is not None:
                         payload["related"] = related
 
                     async with httpx.AsyncClient() as client:
@@ -778,23 +819,28 @@ Don't wait to be asked - good assistants remember what matters.""",
 
                 # Fall back to MCP cache if FastAPI returned 0 or failed
                 if scored_count == 0:
-                    # If related provided, use directly (don't filter cache)
-                    if related is not None and len(related) > 0:
-                        doc_ids = related
+                    # v0.2.8: Per-memory scoring - process each memory individually
+                    if memory_scores:
+                        for doc_id, mem_outcome in memory_scores.items():
+                            result = await _memory.record_outcome([doc_id], mem_outcome)
+                            scored_count += result.get("documents_updated", 0)
+                    # Backward compat: related parameter (deprecated)
+                    elif related is not None:
+                        if related:  # Non-empty list
+                            result = await _memory.record_outcome(related, outcome)
+                            scored_count = result.get("documents_updated", 0)
+                        # Empty list = score none (intentional)
                     elif session_id in _mcp_search_cache:
                         cached = _mcp_search_cache[session_id]
                         doc_ids = cached.get("doc_ids", [])
-                    else:
-                        doc_ids = []
-
-                    if doc_ids:
-                        result = await _memory.record_outcome(doc_ids, outcome)
-                        scored_count = result.get("documents_updated", 0)
+                        if doc_ids:
+                            result = await _memory.record_outcome(doc_ids, outcome)
+                            scored_count = result.get("documents_updated", 0)
 
                     if session_id in _mcp_search_cache:
                         del _mcp_search_cache[session_id]
 
-                logger.info(f"Scored response: outcome={outcome}, related={related}, scored={scored_count}")
+                logger.info(f"Scored response: outcome={outcome}, memory_scores={len(memory_scores)} entries, scored={scored_count}")
                 return [types.TextContent(
                     type="text",
                     text=f"Scored (outcome={outcome}, {scored_count} memories updated)"
