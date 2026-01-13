@@ -388,19 +388,32 @@ class SearchService:
         if coll_name == "patterns":
             result["distance"] = result.get("distance", 1.0) * 0.9
 
-        # Memory bank: boost by importance * confidence
+        # Memory bank: boost by importance * confidence, with Wilson influence (v0.2.9)
         elif coll_name == "memory_bank":
             metadata = result.get("metadata", {})
             importance = self._parse_numeric(metadata.get("importance", 0.7))
             confidence = self._parse_numeric(metadata.get("confidence", 0.7))
             quality_score = importance * confidence
 
-            # Quality boost
-            metadata_boost = 1.0 - quality_score * 0.8
+            # v0.2.9: Blend quality with Wilson score if enough uses
+            uses = int(metadata.get("uses", 0))
+            success_count = float(metadata.get("success_count", 0.0))
+
+            if uses >= 3:
+                # Calculate Wilson score from memory's own outcomes
+                wilson = success_count / uses if uses > 0 else 0.5
+                # 80% quality + 20% Wilson
+                blended_score = 0.8 * quality_score + 0.2 * wilson
+            else:
+                # Not enough data - use quality only (cold start protection)
+                blended_score = quality_score
+
+            # Quality boost (lower distance = better ranking)
+            metadata_boost = 1.0 - blended_score * 0.8
             entity_boost = self._calculate_entity_boost(query, result.get("id", ""))
             result["distance"] = result.get("distance", 1.0) * metadata_boost / entity_boost
 
-            # Doc effectiveness boost
+            # Doc effectiveness boost (cross-doc pattern tracking)
             doc_id = result.get("id") or result.get("doc_id")
             if doc_id:
                 eff = self.get_doc_effectiveness(doc_id)
@@ -591,9 +604,18 @@ class SearchService:
                     confidence = self._parse_numeric(metadata.get("confidence", 0.7))
                     quality = importance * confidence
 
+                    # v0.2.9: Blend quality with Wilson if enough uses
+                    uses = int(metadata.get("uses", 0))
+                    success_count = float(metadata.get("success_count", 0.0))
+                    if uses >= 3:
+                        wilson = success_count / uses if uses > 0 else 0.5
+                        blended_quality = 0.8 * quality + 0.2 * wilson
+                    else:
+                        blended_quality = quality
+
                     ce_norm = (ce_score + 1) / 2
                     ce_weight = 0.3
-                    quality_boost = 1.0 + quality * 0.3
+                    quality_boost = 1.0 + blended_quality * 0.3
                     blended = ((1 - ce_weight) * original_score + ce_weight * ce_norm) * quality_boost
                 else:
                     ce_norm = (ce_score + 1) / 2

@@ -446,6 +446,12 @@ async def lifespan(app: FastAPI):
     await _memory.initialize()
     logger.info("Memory system initialized")
 
+    # v0.2.9: Cleanup legacy archived memories (one-time migration)
+    if _memory._memory_bank_service:
+        cleaned = _memory._memory_bank_service.cleanup_archived()
+        if cleaned > 0:
+            logger.info(f"v0.2.9 migration: cleaned up {cleaned} archived memories")
+
     # Initialize session manager (uses same data path)
     _session_manager = SessionManager(_memory.data_path)
     logger.info("Session manager initialized")
@@ -614,8 +620,19 @@ def create_app() -> FastAPI:
         try:
             conversation_id = request.conversation_id or "default"
 
+            # Skip storing if either message is empty/blank
+            user_msg = (request.user_message or "").strip()
+            assistant_msg = (request.assistant_response or "").strip()
+
+            if not user_msg or not assistant_msg:
+                logger.warning(f"Skipping empty exchange storage: user={bool(user_msg)}, assistant={bool(assistant_msg)}")
+                return StopHookResponse(
+                    status="skipped",
+                    message="Empty exchange not stored"
+                )
+
             # Store the exchange in working memory
-            content = f"User: {request.user_message}\n\nAssistant: {request.assistant_response}"
+            content = f"User: {user_msg}\n\nAssistant: {assistant_msg}"
             doc_id = await _memory.store_working(
                 content=content,
                 conversation_id=conversation_id,

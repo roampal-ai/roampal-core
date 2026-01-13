@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roampal"
-version = "0.2.8.1"
+version = "0.2.9"
 description = "Persistent memory for AI coding tools (Claude Code, Cursor, etc.)"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 authors = [
-    {name = "Roampal", email = "hello@roampal.ai"}
+    {name = "Roampal", email = "roampal@protonmail.com"}
 ]
 keywords = ["ai", "memory", "claude", "cursor", "mcp", "llm"]
 classifiers = [
@@ -45,8 +45,8 @@ roampal = "roampal.cli:main"
 
 [project.urls]
 Homepage = "https://roampal.ai"
-Repository = "https://github.com/roampal/roampal-core"
-Documentation = "https://docs.roampal.ai"
+Repository = "https://github.com/roampal-ai/roampal-core"
+Documentation = "https://github.com/roampal-ai/roampal-core#readme"
 
 [tool.setuptools.packages.find]
 where = ["."]

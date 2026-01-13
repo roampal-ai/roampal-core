@@ -121,7 +121,8 @@ class TestPromotionHistoryToPatterns:
             collection="history",
             score=0.95,  # Above high_value_threshold
             uses=5,
-            metadata={"text": "proven pattern", "score": 0.95, "uses": 5}
+            # v0.2.9: Requires success_count >= 5 for patterns eligibility
+            metadata={"text": "proven pattern", "score": 0.95, "uses": 5, "success_count": 5.0}
         )
 
         assert result is not None

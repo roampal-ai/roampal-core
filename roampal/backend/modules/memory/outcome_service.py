@@ -105,12 +105,6 @@ class OutcomeService:
             logger.info(f"[KG] Learned routing pattern for books, but skipping score update (static reference material)")
             return None
 
-        # SAFEGUARD: Memory bank is user identity/facts, not scorable patterns
-        # But we still updated KG routing above so system learns to route to memory_bank
-        if doc_id.startswith("memory_bank_"):
-            logger.info(f"[KG] Learned routing pattern for memory_bank, but skipping score update (persistent user facts)")
-            return None
-
         if not doc:
             logger.warning(f"Document {doc_id} not found")
             return None
@@ -269,6 +263,9 @@ class OutcomeService:
         - worked: +1.0 success, +1 use
         - partial: +0.5 success, +1 use
         - failed: +0.0 success, +1 use
+
+        v0.2.9: unknown handling (all collections).
+        - unknown: +0.25 success, +1 use (weak negative signal for natural selection)
         """
         if outcome == "worked":
             score_delta = 0.2 * time_weight
@@ -285,8 +282,15 @@ class OutcomeService:
             new_score = min(1.0, current_score + score_delta)
             uses += 1
             success_delta = 0.5
+        elif outcome == "unknown":
+            # v0.2.9: unknown = surfaced but not used (all collections)
+            # Weak negative signal: 0.25 success creates gradual drift for noise
+            score_delta = 0.0  # Don't change raw score
+            new_score = current_score
+            uses += 1
+            success_delta = 0.25
         else:
-            # v0.2.8.1: Guard - unknown or invalid outcomes don't affect score
+            # Guard - invalid outcomes don't affect score
             logger.warning(f"Unexpected outcome '{outcome}' - no score change")
             return 0.0, current_score, uses, 0.0
 
