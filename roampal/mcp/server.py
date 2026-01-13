@@ -587,22 +587,14 @@ OPTIONAL - Only use for significant exchanges:
 
 Most routine exchanges don't need this - the transcript is enough.
 
-INITIAL SCORING (optional):
-You can score the takeaway at creation time based on the current exchange:
-• initial_score="worked" → starts at 0.7 (boosted)
-• initial_score="failed" → starts at 0.2 (demoted, but still stored as "what not to do")
-• Omit → starts at 0.5 (neutral default)""",
+Key takeaways start at 0.7 (user explicitly asked to remember = higher confidence).
+Scoring happens via score_response on the next turn: +0.2 worked, +0.05 partial, -0.3 failed.""",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "key_takeaway": {
                             "type": "string",
                             "description": "1-2 sentence summary of the important learning"
-                        },
-                        "initial_score": {
-                            "type": "string",
-                            "enum": ["worked", "failed", "partial"],
-                            "description": "Optional: Score based on current exchange outcome. Omit for neutral 0.5 start."
                         }
                     },
                     "required": ["key_takeaway"]
@@ -851,7 +843,6 @@ Don't wait to be asked - good assistants remember what matters.""",
 
             elif name == "record_response":
                 key_takeaway = arguments.get("key_takeaway", "")
-                initial_score = arguments.get("initial_score")  # Optional: worked, failed, partial
 
                 if not key_takeaway:
                     return [types.TextContent(
@@ -859,15 +850,9 @@ Don't wait to be asked - good assistants remember what matters.""",
                         text="Error: 'key_takeaway' is required"
                     )]
 
-                # Calculate starting score based on initial_score
-                # Matches score deltas from ARCHITECTURE.md: worked +0.20, failed -0.30, partial +0.05
-                starting_score = 0.5  # neutral default
-                if initial_score == "worked":
-                    starting_score = 0.7  # 0.5 + 0.2
-                elif initial_score == "failed":
-                    starting_score = 0.2  # 0.5 - 0.3
-                elif initial_score == "partial":
-                    starting_score = 0.55  # 0.5 + 0.05
+                # Key takeaways start at 0.7 (user explicitly asked to remember = higher confidence)
+                # Scoring happens via score_response: +0.2 worked, +0.05 partial, -0.3 failed
+                starting_score = 0.7
 
                 # Store the takeaway in working memory
                 doc_id = await _memory.store_working(
@@ -875,12 +860,11 @@ Don't wait to be asked - good assistants remember what matters.""",
                     conversation_id=session_id,
                     metadata={
                         "type": "key_takeaway",
-                        "timestamp": datetime.now().isoformat(),
-                        "initial_outcome": initial_score
+                        "timestamp": datetime.now().isoformat()
                     },
                     initial_score=starting_score
                 )
-                logger.info(f"Recorded takeaway (score={starting_score}): {key_takeaway[:50]}...")
+                logger.info(f"Recorded takeaway (score=0.7): {key_takeaway[:50]}...")
                 return [types.TextContent(
                     type="text",
                     text=f"Recorded: {key_takeaway}"

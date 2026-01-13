@@ -83,6 +83,7 @@ class TestRecordOutcome:
         assert result is not None
         assert result["score"] > 0.5  # Score increased
         assert result["uses"] == 1
+        assert result["success_count"] == 1.0  # v0.2.8: Worked adds 1 success
         assert result["last_outcome"] == "worked"
         mock_collections["working"].update_fragment_metadata.assert_called_once()
 
@@ -97,7 +98,8 @@ class TestRecordOutcome:
 
         assert result is not None
         assert result["score"] < 0.5  # Score decreased
-        assert result["uses"] == 0  # Uses not incremented for failure
+        assert result["uses"] == 1  # v0.2.8: Failed now increments uses
+        assert result["success_count"] == 0.0  # v0.2.8: Failed adds 0 success
         assert result["last_outcome"] == "failed"
 
     @pytest.mark.asyncio
@@ -111,6 +113,7 @@ class TestRecordOutcome:
         assert result is not None
         assert result["score"] > 0.5  # Score slightly increased
         assert result["uses"] == 1  # Uses incremented for partial
+        assert result["success_count"] == 0.5  # v0.2.8: Partial adds 0.5 success
         assert result["last_outcome"] == "partial"
 
     @pytest.mark.asyncio
@@ -123,13 +126,17 @@ class TestRecordOutcome:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_safeguard_memory_bank(self, service):
-        """Should not score memory bank items."""
+    async def test_unknown_outcome_all_collections(self, service, mock_collections):
+        """v0.2.9: unknown = +1 use, +0.25 success for ALL collections."""
+        # Test unknown outcome on working collection
         result = await service.record_outcome(
-            doc_id="memory_bank_test123",
-            outcome="worked"
+            doc_id="working_test123",
+            outcome="unknown"
         )
-        assert result is None
+        assert result is not None
+        assert result["uses"] == 1  # Incremented
+        assert result["success_count"] == 0.25  # v0.2.9: unknown = 0.25 success for all collections
+        assert result["score"] == 0.5  # Raw score unchanged
 
     @pytest.mark.asyncio
     async def test_not_found(self, service, mock_collections):
@@ -219,50 +226,53 @@ class TestScoreCalculation:
 
     def test_worked_increases_score(self, service):
         """Worked should increase score."""
-        delta, new_score, uses = service._calculate_score_update(
+        delta, new_score, uses, success_delta = service._calculate_score_update(
             "worked", 0.5, 0, 1.0
         )
         assert delta > 0
         assert new_score > 0.5
         assert uses == 1
+        assert success_delta == 1.0  # v0.2.8
 
     def test_failed_decreases_score(self, service):
         """Failed should decrease score."""
-        delta, new_score, uses = service._calculate_score_update(
+        delta, new_score, uses, success_delta = service._calculate_score_update(
             "failed", 0.5, 0, 1.0
         )
         assert delta < 0
         assert new_score < 0.5
-        assert uses == 0
+        assert uses == 1  # v0.2.8: Failed now increments uses
+        assert success_delta == 0.0  # v0.2.8
 
     def test_partial_slightly_increases(self, service):
         """Partial should slightly increase score."""
-        delta, new_score, uses = service._calculate_score_update(
+        delta, new_score, uses, success_delta = service._calculate_score_update(
             "partial", 0.5, 0, 1.0
         )
         assert delta > 0
         assert delta < 0.1  # Small increase
         assert new_score > 0.5
         assert uses == 1
+        assert success_delta == 0.5  # v0.2.8
 
     def test_score_capped_at_1(self, service):
         """Score should not exceed 1.0."""
-        delta, new_score, uses = service._calculate_score_update(
+        delta, new_score, uses, _ = service._calculate_score_update(
             "worked", 0.95, 0, 1.0
         )
         assert new_score <= 1.0
 
     def test_score_capped_at_0(self, service):
         """Score should not go below 0.0."""
-        delta, new_score, uses = service._calculate_score_update(
+        delta, new_score, uses, _ = service._calculate_score_update(
             "failed", 0.1, 0, 1.0
         )
         assert new_score >= 0.0
 
     def test_time_weight_affects_delta(self, service):
         """Time weight should affect score delta."""
-        delta_full, _, _ = service._calculate_score_update("worked", 0.5, 0, 1.0)
-        delta_half, _, _ = service._calculate_score_update("worked", 0.5, 0, 0.5)
+        delta_full, _, _, _ = service._calculate_score_update("worked", 0.5, 0, 1.0)
+        delta_half, _, _, _ = service._calculate_score_update("worked", 0.5, 0, 0.5)
 
         assert abs(delta_half - delta_full * 0.5) < 0.01
 

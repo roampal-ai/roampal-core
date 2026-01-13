@@ -798,8 +798,9 @@ class UnifiedMemorySystem:
         # 4. Apply Wilson scoring for proper ranking
         scored_results = self._scoring_service.apply_scoring_to_results(search_results)
 
-        # 5. Take top 5 across all collections
-        top_memories = scored_results[:5]
+        # 5. Filter empty memories and take top 3 across all collections
+        valid_results = [m for m in scored_results if m.get("content") or m.get("text")]
+        top_memories = valid_results[:3]
 
         # 6. Enrich with Action KG effectiveness stats
         for mem in top_memories:
@@ -820,7 +821,7 @@ class UnifiedMemorySystem:
         """
         Format context for injection into LLM prompt.
 
-        Shows top 5 memories across all collections with effectiveness stats.
+        Shows top 3 memories across all collections with effectiveness stats.
         Extracts user name from identity-tagged memories.
         """
         import re

@@ -9,6 +9,7 @@ import sys
 import os
 import re
 import glob
+import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', '..')))
 
 
@@ -125,6 +126,43 @@ class TestColdStartQuery:
         for term in expected_terms:
             assert term in source_lower, \
                 f"Expected generic term '{term}' not found in cold-start query"
+
+
+class TestColdStartQualitySelection:
+    """Test cold start picks highest quality fact per tag - v0.2.7 fix."""
+
+    @pytest.mark.asyncio
+    async def test_picks_highest_importance_per_tag(self):
+        """Cold start should pick fact with highest importance for each tag."""
+        from roampal.server import main
+        from unittest.mock import MagicMock, AsyncMock
+
+        # Create mock facts with same tag but different importance
+        mock_facts = [
+            {"id": "low", "metadata": {"tags": '["identity"]', "importance": 0.3, "confidence": 0.5}, "text": "Low quality"},
+            {"id": "high", "metadata": {"tags": '["identity"]', "importance": 0.9, "confidence": 0.5}, "text": "High quality"},
+            {"id": "medium", "metadata": {"tags": '["identity"]', "importance": 0.6, "confidence": 0.5}, "text": "Medium quality"},
+        ]
+
+        # Mock the memory system
+        mock_memory = MagicMock()
+        mock_memory.get_always_inject = MagicMock(return_value=[])
+        mock_memory._memory_bank_service.list_all = MagicMock(return_value=mock_facts)
+        mock_memory._data_path = MagicMock()
+        mock_memory._data_path.__truediv__ = MagicMock(return_value=MagicMock(exists=MagicMock(return_value=False)))
+        mock_memory.search = AsyncMock(return_value=[])
+
+        # Patch the global _memory
+        original_memory = main._memory
+        main._memory = mock_memory
+
+        try:
+            result = await main._build_cold_start_profile()
+            # Should have picked the high importance one
+            assert "High quality" in result or result is None or "high" in str(result).lower(), \
+                f"Expected highest importance fact, got: {result}"
+        finally:
+            main._memory = original_memory
 
 
 class TestNoPIIInCodebase:

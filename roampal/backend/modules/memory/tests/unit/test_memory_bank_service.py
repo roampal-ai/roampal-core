@@ -131,25 +131,25 @@ class TestUpdate:
         )
 
     @pytest.mark.asyncio
-    async def test_update_archives_old(self, service, mock_collection):
-        """Should archive old version when updating."""
+    async def test_update_in_place_no_archive(self, service, mock_collection):
+        """Should update in place without creating archive copy (v0.2.9+)."""
         await service.update(
             doc_id="memory_bank_test123",
             new_text="new content",
             reason="correction"
         )
 
-        # Should have 2 upsert calls: archive + update
-        assert mock_collection.upsert_vectors.call_count == 2
+        # Should have only 1 upsert call (no archive copy)
+        assert mock_collection.upsert_vectors.call_count == 1
 
-        # Check archive call
-        archive_call = mock_collection.upsert_vectors.call_args_list[0]
-        archive_id = archive_call[1]["ids"][0]
-        archive_metadata = archive_call[1]["metadatas"][0]
+        # Check update call
+        update_call = mock_collection.upsert_vectors.call_args_list[0]
+        update_id = update_call[1]["ids"][0]
+        update_metadata = update_call[1]["metadatas"][0]
 
-        assert "archived" in archive_id
-        assert archive_metadata["status"] == "archived"
-        assert archive_metadata["archive_reason"] == "correction"
+        assert update_id == "memory_bank_test123"
+        assert update_metadata["text"] == "new content"
+        assert update_metadata["update_reason"] == "correction"
 
     @pytest.mark.asyncio
     async def test_update_preserves_metadata(self, service, mock_collection):
@@ -159,7 +159,7 @@ class TestUpdate:
             new_text="new content"
         )
 
-        update_call = mock_collection.upsert_vectors.call_args_list[1]
+        update_call = mock_collection.upsert_vectors.call_args_list[0]
         metadata = update_call[1]["metadatas"][0]
 
         assert metadata["importance"] == 0.7

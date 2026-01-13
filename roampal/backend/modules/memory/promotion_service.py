@@ -105,8 +105,10 @@ class PromotionService:
                 return await self._promote_working_to_history(doc_id, doc, metadata, score, uses)
 
         # Promotion: history -> patterns
+        # v0.2.9: Require success_count >= 5 (must prove usefulness after entering history)
         elif collection == "history":
-            if score >= self.config.high_value_threshold and uses >= 3:
+            success_count = float(metadata.get("success_count", 0.0))
+            if score >= self.config.high_value_threshold and uses >= 3 and success_count >= 5:
                 return await self._promote_history_to_patterns(doc_id, doc, metadata, score, uses)
 
         # Demotion: patterns -> history
@@ -143,6 +145,11 @@ class PromotionService:
         promotion_history.append(promotion_record)
         metadata["promotion_history"] = json.dumps(promotion_history)
         metadata["promoted_from"] = "working"
+
+        # v0.2.9: Reset counters on history entry - memory must prove itself fresh
+        metadata["success_count"] = 0.0
+        metadata["uses"] = 0
+        metadata["promoted_to_history_at"] = datetime.now().isoformat()
 
         # Get text for embedding
         text_for_embedding = metadata.get("text") or metadata.get("content") or doc.get("content", "")

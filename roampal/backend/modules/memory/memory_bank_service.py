@@ -109,7 +109,10 @@ class MemoryBankService:
             "created_at": datetime.now().isoformat(),
             "mentioned_count": 1,
             "last_mentioned": datetime.now().isoformat(),
-            "always_inject": always_inject
+            "always_inject": always_inject,
+            # v0.2.9: Wilson scoring fields
+            "uses": 0,
+            "success_count": 0.0
         }
 
         # Store in collection
@@ -129,12 +132,12 @@ class MemoryBankService:
         reason: str = "llm_update"
     ) -> str:
         """
-        Update memory with auto-archiving of old version.
+        Update memory in place (no archiving).
 
         Args:
             doc_id: Memory to update
             new_text: New content
-            reason: Why updating (for audit trail)
+            reason: Why updating
 
         Returns:
             Document ID
@@ -145,25 +148,7 @@ class MemoryBankService:
             logger.warning(f"Memory {doc_id} not found, creating new")
             return await self.store(new_text, tags=["updated"])
 
-        # Auto-archive old version
-        archive_id = f"{doc_id}_archived_{int(datetime.now().timestamp())}"
-        old_text = old_doc.get("metadata", {}).get("content",
-                   old_doc.get("metadata", {}).get("text", ""))
-        old_embedding = await self.embed_fn(old_text)
-
-        await self.collection.upsert_vectors(
-            ids=[archive_id],
-            vectors=[old_embedding],
-            metadatas=[{
-                **old_doc.get("metadata", {}),
-                "status": "archived",
-                "original_id": doc_id,
-                "archive_reason": reason,
-                "archived_at": datetime.now().isoformat()
-            }]
-        )
-
-        # Update in-place
+        # Update in-place (no archive copy)
         new_embedding = await self.embed_fn(new_text)
         old_metadata = old_doc.get("metadata", {})
 
@@ -318,6 +303,35 @@ class MemoryBankService:
         except Exception as e:
             logger.error(f"Failed to delete memory {doc_id}: {e}")
             return False
+
+    def cleanup_archived(self) -> int:
+        """
+        Delete all archived memories (cleanup legacy archive-on-update behavior).
+
+        Returns:
+            Number of archived memories deleted
+        """
+        all_ids = self.collection.list_all_ids()
+        archived_ids = []
+
+        for doc_id in all_ids:
+            # Check for _archived_ in ID (legacy format)
+            if "_archived_" in doc_id:
+                archived_ids.append(doc_id)
+                continue
+
+            # Check for status: archived in metadata
+            doc = self.collection.get_fragment(doc_id)
+            if doc:
+                status = doc.get("metadata", {}).get("status", "active")
+                if status == "archived":
+                    archived_ids.append(doc_id)
+
+        if archived_ids:
+            self.collection.delete_vectors(archived_ids)
+            logger.info(f"Cleaned up {len(archived_ids)} archived memories")
+
+        return len(archived_ids)
 
     def get(self, doc_id: str) -> Optional[Dict[str, Any]]:
         """

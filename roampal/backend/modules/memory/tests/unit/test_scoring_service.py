@@ -150,6 +150,35 @@ class TestScoringService:
         expected_wilson = wilson_score_lower(2.5, 3)
         assert abs(wilson - expected_wilson) < 0.01
 
+    def test_calculate_learned_score_with_success_count(self, service):
+        """v0.2.8: Should use success_count when provided (bypasses 10-entry cap)."""
+        # Simulate 100 uses with 90 worked (90% success rate)
+        # Old behavior: outcome_history capped at 10 entries would break Wilson
+        # New behavior: success_count=90.0 is used directly
+        learned, wilson = service.calculate_learned_score(
+            raw_score=0.5,
+            uses=100,
+            outcome_history="[]",  # Empty history - would fail without success_count
+            success_count=90.0
+        )
+        expected_wilson = wilson_score_lower(90, 100)
+        assert abs(wilson - expected_wilson) < 0.01
+        assert wilson > 0.8  # 90% success with 100 uses should be high confidence
+
+    def test_success_count_overrides_history(self, service):
+        """v0.2.8: success_count should take precedence over outcome_history."""
+        # History says 1 success (10 worked out of 10)
+        # But success_count says 50 successes
+        history = json.dumps([{"outcome": "worked"} for _ in range(10)])
+        learned, wilson = service.calculate_learned_score(
+            raw_score=0.5,
+            uses=100,
+            outcome_history=history,  # Would give 10 successes
+            success_count=50.0  # Should use this instead
+        )
+        expected_wilson = wilson_score_lower(50, 100)
+        assert abs(wilson - expected_wilson) < 0.01
+
     def test_dynamic_weights_proven(self, service):
         """Proven memories should have high learned weight."""
         emb_w, learn_w = service.get_dynamic_weights(5, 0.85, "history")
