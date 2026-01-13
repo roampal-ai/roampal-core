@@ -822,6 +822,9 @@ Don't wait to be asked - good assistants remember what matters.""",
                     # v0.2.8: Per-memory scoring - process each memory individually
                     if memory_scores:
                         for doc_id, mem_outcome in memory_scores.items():
+                            # v0.2.8.1: Skip unknowns - they mean "didn't use this memory"
+                            if mem_outcome == "unknown":
+                                continue
                             result = await _memory.record_outcome([doc_id], mem_outcome)
                             scored_count += result.get("documents_updated", 0)
                     # Backward compat: related parameter (deprecated)

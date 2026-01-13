@@ -280,11 +280,15 @@ class OutcomeService:
             new_score = max(0.0, current_score + score_delta)
             uses += 1  # v0.2.8: Fixed - failed should increment uses
             success_delta = 0.0
-        else:  # partial
+        elif outcome == "partial":  # v0.2.8.1: explicit partial check
             score_delta = 0.05 * time_weight
             new_score = min(1.0, current_score + score_delta)
             uses += 1
             success_delta = 0.5
+        else:
+            # v0.2.8.1: Guard - unknown or invalid outcomes don't affect score
+            logger.warning(f"Unexpected outcome '{outcome}' - no score change")
+            return 0.0, current_score, uses, 0.0
 
         return score_delta, new_score, uses, success_delta
 
