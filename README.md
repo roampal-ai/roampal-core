@@ -102,7 +102,7 @@ The AI has these tools for memory access:
 - Check HTTP server: `curl http://127.0.0.1:27182/api/health`
 
 **MCP not connecting?**
-- Verify `~/.claude/.mcp.json` exists and has correct Python path
+- Verify `~/.claude/mcp.json` exists and has correct Python path
 - Check Claude Code output panel for MCP errors
 
 **Context not appearing?**
