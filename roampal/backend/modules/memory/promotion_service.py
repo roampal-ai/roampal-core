@@ -262,6 +262,12 @@ class PromotionService:
         score: float
     ):
         """Handle deletion of low-scoring memories."""
+        # v0.2.9.1 FIX: memory_bank and books are PERMANENT - never delete based on score
+        # Scores are only used for Wilson ranking, not lifecycle management
+        if collection in ("memory_bank", "books"):
+            logger.debug(f"[PROMOTION] Skipping deletion for {collection} (permanent collection)")
+            return
+
         # Calculate age
         age_days = 0
         if metadata.get("timestamp"):
