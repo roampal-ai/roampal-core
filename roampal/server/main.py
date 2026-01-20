@@ -947,6 +947,27 @@ def create_app() -> FastAPI:
             # Track that score_response was called this turn (for Stop hook blocking)
             _session_manager.set_scored_this_turn(conversation_id, True)
 
+            # v0.2.9.2: Score the exchange itself with the outcome
+            # This was accidentally removed in v0.2.3's performance fix
+            exchange_doc_id = None
+            exchange_conv_id = conversation_id  # Track which session the exchange came from
+            if request.outcome in ["worked", "failed", "partial"]:
+                # Get exchange doc_id from session manager's cache (O(1) lookup)
+                previous = _session_manager._last_exchange_cache.get(conversation_id)
+                if not previous:
+                    # Try most recent cache entry (handles session ID mismatch)
+                    for cid, exc in _session_manager._last_exchange_cache.items():
+                        if not exc.get("scored", False):
+                            previous = exc
+                            exchange_conv_id = cid  # Use the actual conversation_id
+                            break
+                if previous and previous.get("doc_id") and not previous.get("scored", False):
+                    exchange_doc_id = previous["doc_id"]
+                    await _memory.record_outcome(doc_ids=[exchange_doc_id], outcome=request.outcome)
+                    # Mark as scored in session manager (use correct conversation_id)
+                    await _session_manager.mark_scored(exchange_conv_id, exchange_doc_id, request.outcome)
+                    logger.info(f"Scored exchange {exchange_doc_id} with outcome={request.outcome}")
+
             # v0.2.3: Skip session file scan - doc_ids are in _search_cache or request.related
             # Old approach scanned ALL session files (O(n×m) I/O) - now O(1) cache lookup
 
