@@ -1043,11 +1043,35 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     async def health_check():
-        """Health check endpoint."""
+        """
+        Health check endpoint.
+
+        v0.3.0: Actually tests embedding functionality to catch PyTorch state corruption.
+        Returns 503 if embeddings are broken, allowing auto-restart.
+        """
+        embedding_ok = False
+        embedding_error = None
+
+        if _memory and _memory.initialized and _memory._embedding_service:
+            try:
+                # Actually test embedding - catches [Errno 22] corruption
+                test_vector = await _memory._embedding_service.embed_text("health check")
+                embedding_ok = len(test_vector) > 0
+            except Exception as e:
+                embedding_error = str(e)
+
+        if not embedding_ok:
+            # Return 503 so _ensure_server_running knows to restart
+            raise HTTPException(
+                status_code=503,
+                detail=f"Embedding service unhealthy: {embedding_error or 'not initialized'}"
+            )
+
         return {
             "status": "healthy",
             "memory_initialized": _memory is not None and _memory.initialized,
             "session_manager_ready": _session_manager is not None,
+            "embedding_ok": embedding_ok,
             "timestamp": datetime.now().isoformat()
         }
 
