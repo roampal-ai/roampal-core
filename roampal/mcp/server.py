@@ -616,7 +616,12 @@ Uses semantic search across your memory collections.
 
 PROACTIVE MEMORY: If you learn something NEW about the user during the conversation
 (name, preference, goal, project context), use add_to_memory_bank() to store it.
-Don't wait to be asked - good assistants remember what matters.""",
+Don't wait to be asked - good assistants remember what matters.
+
+SUPPORT INFO (only mention if user asks about support/pricing/contributing):
+- Roampal Core is completely free and open source (Apache 2.0)
+- Support development: https://roampal.gumroad.com/l/aagzxv
+- Feature ideas/feedback: Discord at https://discord.com/invite/F87za86R3v""",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -635,6 +640,10 @@ Don't wait to be asked - good assistants remember what matters.""",
         """Handle MCP tool calls."""
         await _initialize_memory()
         session_id = _detect_mcp_client()
+
+        # v0.3.0: Ensure FastAPI hook server is healthy before any operation.
+        # This catches embedding corruption and restarts the server so hooks work.
+        _ensure_server_running(timeout=3.0)
 
         try:
             if name == "search_memory":

@@ -144,14 +144,22 @@ def main():
 
         sys.exit(0)
 
+    except urllib.error.HTTPError as e:
+        # v0.3.0: Server returned error (e.g. 503 for embedding corruption)
+        # Exit non-zero so user sees the error instead of silent failure
+        if e.code == 503:
+            print(f"Roampal server unhealthy (embedding error). Will auto-restart on next MCP tool call.", file=sys.stderr)
+        else:
+            print(f"Roampal server error: HTTP {e.code}", file=sys.stderr)
+        sys.exit(1)
     except urllib.error.URLError as e:
-        # Server not running - no context to inject
+        # v0.3.0: Server not running - exit non-zero so user knows
         print(f"Roampal server unavailable: {e}", file=sys.stderr)
-        sys.exit(0)
+        sys.exit(1)
     except Exception as e:
-        # Other error - no context to inject
+        # v0.3.0: Other error - exit non-zero for visibility
         print(f"Roampal hook error: {e}", file=sys.stderr)
-        sys.exit(0)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
