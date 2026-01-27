@@ -136,6 +136,14 @@ The AI has these tools for memory access:
 └─────────────────────────────────────────────────────────┘
 ```
 
+## Support
+
+Roampal Core is completely free.
+
+Support development: [roampal.gumroad.com](https://roampal.gumroad.com/l/aagzxv)
+
+Have feature ideas? Join the [Discord](https://discord.com/invite/F87za86R3v).
+
 ## License
 
 Apache 2.0
