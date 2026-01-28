@@ -787,22 +787,37 @@ class UnifiedMemorySystem:
         # 2. Get KG recommendations (informational - we still search all)
         kg_recs = self.get_tier_recommendations(concepts)
 
-        # 3. Unified search across conversational collections (books excluded - use search_memory explicitly)
-        all_collections = ["working", "patterns", "history", "memory_bank"]
-        search_results = await self.search(
+        # 3. Reserved slot: Always include 1 working memory for session context
+        working_results = await self.search(
             query=query,
-            limit=5,
-            collections=all_collections
+            limit=1,
+            collections=["working"]
+        )
+        working_scored = self._scoring_service.apply_scoring_to_results(working_results)
+        reserved_working = [m for m in working_scored if m.get("content") or m.get("text")][:1]
+        reserved_ids = {m.get("id") for m in reserved_working if m.get("id")}
+
+        # 4. Search remaining collections for other slots
+        other_collections = ["patterns", "history", "memory_bank"]
+        other_results = await self.search(
+            query=query,
+            limit=4,
+            collections=other_collections
         )
 
-        # 4. Apply Wilson scoring for proper ranking
-        scored_results = self._scoring_service.apply_scoring_to_results(search_results)
+        # 5. Apply Wilson scoring for proper ranking
+        scored_results = self._scoring_service.apply_scoring_to_results(other_results)
 
-        # 5. Filter empty memories and take top 3 across all collections
-        valid_results = [m for m in scored_results if m.get("content") or m.get("text")]
-        top_memories = valid_results[:3]
+        # 6. Filter empty memories, exclude any duplicates from reserved
+        valid_results = [
+            m for m in scored_results
+            if (m.get("content") or m.get("text")) and m.get("id") not in reserved_ids
+        ]
 
-        # 6. Enrich with Action KG effectiveness stats
+        # 7. Combine: 1 reserved working + top 2 from other collections
+        top_memories = reserved_working + valid_results[:2]
+
+        # 8. Enrich with Action KG effectiveness stats
         for mem in top_memories:
             coll = mem.get("collection", "unknown")
             eff = self.get_action_effectiveness("general", "search", coll)
