@@ -171,11 +171,11 @@ async def test_at_maturity_level(
 
     system = UnifiedMemorySystem(
         data_path=data_dir,
-        
-        llm_service=MockLLMService()
     )
     await system.initialize()
-    system.embedding_service = embedding_service
+    system._embedding_service = embedding_service
+    if system._search_service:
+        system._search_service.embed_fn = embedding_service.embed_text
 
     # Store good advice
     good_id = await system.store(
@@ -213,6 +213,7 @@ async def test_at_maturity_level(
                 meta = result["metadatas"][0]
                 meta["uses"] = maturity["uses"]
                 meta["score"] = good_success_rate
+                meta["success_count"] = float(maturity["worked"])
                 meta["outcome_history"] = json.dumps(good_outcome_history)
                 meta["last_outcome"] = "worked"
                 adapter.collection.update(ids=[good_id], metadatas=[meta])
@@ -238,6 +239,7 @@ async def test_at_maturity_level(
                 meta = result["metadatas"][0]
                 meta["uses"] = maturity["uses"]
                 meta["score"] = bad_success_rate
+                meta["success_count"] = float(bad_worked)
                 meta["outcome_history"] = json.dumps(bad_outcome_history)
                 meta["last_outcome"] = "failed"
                 adapter.collection.update(ids=[bad_id], metadatas=[meta])

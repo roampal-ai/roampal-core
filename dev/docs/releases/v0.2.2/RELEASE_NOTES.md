@@ -477,5 +477,5 @@ Existing memory_bank entries will have `always_inject: False` by default.
 
 Users can manually add identity info with the flag:
 ```
-add_to_memory_bank(content="User's name is Logan", tags=["identity"], always_inject=true)
+add_to_memory_bank(content="User's name is [NAME]", tags=["identity"], always_inject=true)
 ```

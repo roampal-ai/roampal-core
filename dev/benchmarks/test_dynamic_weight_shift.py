@@ -223,11 +223,11 @@ async def run_scenario(scenario, data_dir, embedding_service):
     # Create memory system
     system = UnifiedMemorySystem(
         data_path=data_dir,
-        
-        llm_service=MockLLMService()
     )
     await system.initialize()
-    system.embedding_service = embedding_service
+    system._embedding_service = embedding_service
+    if system._search_service:
+        system._search_service.embed_fn = embedding_service.embed_text
 
     # Create proven memory
     proven_id = await create_proven_memory(system, scenario["proven_memory"])

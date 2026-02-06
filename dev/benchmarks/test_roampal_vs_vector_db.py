@@ -364,65 +364,54 @@ def cohens_d(treatment: List[float], control: List[float]) -> float:
         return 0.0
 
     pooled_var = ((n_t - 1) * var_t + (n_c - 1) * var_c) / (n_t + n_c - 2)
-    pooled_std = math.sqrt(pooled_var) if pooled_var > 0 else 0.001
+    if pooled_var == 0:
+        # Zero variance means all values identical within each group.
+        # Cohen's d is undefined; return inf with a note rather than d=1000.
+        return float('inf') if mean_t != mean_c else 0.0
+    pooled_std = math.sqrt(pooled_var)
 
     return (mean_t - mean_c) / pooled_std
 
 
 def paired_t_test(treatment: List[float], control: List[float]) -> Tuple[float, float]:
-    """
-    Paired t-test for dependent samples.
-    Returns (t_statistic, p_value).
-    """
+    """Paired t-test using scipy for proper p-value computation."""
     if len(treatment) != len(control) or len(treatment) < 2:
         return (0.0, 1.0)
 
-    differences = [t - c for t, c in zip(treatment, control)]
-    mean_diff = statistics.mean(differences)
-
     try:
-        std_diff = statistics.stdev(differences)
-    except:
-        std_diff = 0.001
-
-    if std_diff == 0:
-        if mean_diff > 0:
-            return (float('inf'), 0.001)
-        elif mean_diff < 0:
-            return (float('-inf'), 0.001)
-        else:
+        from scipy import stats
+        t_stat, p_value = stats.ttest_rel(treatment, control)
+        if math.isnan(t_stat):
             return (0.0, 1.0)
-
-    n = len(differences)
-    t_stat = mean_diff / (std_diff / math.sqrt(n))
-
-    # Lookup table for two-tailed p-values (df=29 for n=30)
-    # These are approximate but accurate enough for our purposes
-    abs_t = abs(t_stat)
-    if abs_t > 3.66:
-        p_value = 0.001
-    elif abs_t > 2.76:
-        p_value = 0.01
-    elif abs_t > 2.05:
-        p_value = 0.05
-    elif abs_t > 1.70:
-        p_value = 0.10
-    else:
-        p_value = 0.20
-
-    return (t_stat, p_value)
+        return (t_stat, p_value)
+    except ImportError:
+        differences = [t - c for t, c in zip(treatment, control)]
+        mean_diff = statistics.mean(differences)
+        try:
+            std_diff = statistics.stdev(differences)
+        except:
+            std_diff = 0.0
+        if std_diff == 0:
+            return (float('inf') if mean_diff > 0 else 0.0, 0.0 if mean_diff != 0 else 1.0)
+        n = len(differences)
+        t_stat = mean_diff / (std_diff / math.sqrt(n))
+        return (t_stat, float('nan'))
 
 
 def confidence_interval(data: List[float], confidence: float = 0.95) -> Tuple[float, float]:
-    """Calculate confidence interval for mean."""
+    """Calculate confidence interval for mean using scipy t-distribution."""
     if len(data) < 2:
         return (0.0, 1.0)
 
     mean = statistics.mean(data)
     std_err = statistics.stdev(data) / math.sqrt(len(data))
 
-    # t-value for 95% CI with df=29
-    t_val = 2.045
+    try:
+        from scipy import stats
+        df = len(data) - 1
+        t_val = stats.t.ppf((1 + confidence) / 2, df)
+    except ImportError:
+        t_val = 2.045  # approximate for df=29 at 95%
 
     margin = t_val * std_err
     return (mean - margin, mean + margin)
@@ -500,50 +489,63 @@ async def run_treatment_scenario(scenario: Dict, data_dir: str, embedding_servic
     # Create Roampal memory system
     system = UnifiedMemorySystem(
         data_path=data_dir,
-        
-        llm_service=MockLLMService()
     )
     await system.initialize()
-    system.embedding_service = embedding_service
+    system._embedding_service = embedding_service
+    if system._search_service:
+        system._search_service.embed_fn = embedding_service.embed_text
 
-    # Store good advice and record positive outcomes
+    # Store both pieces of advice
     good_id = await system.store(
         text=scenario["good_advice"],
         collection="working",
         metadata={"type": "good", "scenario": scenario["id"]}
     )
-
-    # Record "worked" outcomes to increase score (0.5 -> 0.7 -> 0.9)
-    for _ in range(2):
-        try:
-            await system.record_outcome(doc_id=good_id, outcome="worked")
-        except:
-            pass
-
-    # Simulate multiple retrievals to reach "proven" status
-    adapter = system.collections.get("working")
-    if adapter:
-        try:
-            result = adapter.collection.get(ids=[good_id], include=["metadatas"])
-            if result and result.get("metadatas"):
-                meta = result["metadatas"][0]
-                meta["uses"] = 5  # Proven threshold
-                adapter.collection.update(ids=[good_id], metadatas=[meta])
-        except:
-            pass
-
-    # Store bad advice and record negative outcomes
     bad_id = await system.store(
         text=scenario["bad_advice"],
         collection="working",
         metadata={"type": "bad", "scenario": scenario["id"]}
     )
 
-    # Record "failed" outcome to decrease score (0.5 -> 0.2)
-    try:
-        await system.record_outcome(doc_id=bad_id, outcome="failed")
-    except:
-        pass
+    # Apply outcomes by directly setting metadata (consistent with 4-way benchmark).
+    # This avoids the uses/success_count inconsistency that occurs when manually
+    # overriding uses after calling record_outcome (Wilson would see 2/5 = 40%
+    # success rate instead of the intended 90%).
+    adapter = system.collections.get("working")
+    if adapter:
+        # Good advice: proven high-value (5 uses, 90% success rate)
+        try:
+            result = adapter.collection.get(ids=[good_id], include=["metadatas"])
+            if result and result.get("metadatas"):
+                meta = result["metadatas"][0]
+                meta["uses"] = 5
+                meta["score"] = 0.9
+                meta["success_count"] = 4.5  # 4.5/5 = 90%
+                meta["last_outcome"] = "worked"
+                meta["outcome_history"] = json.dumps([
+                    {"outcome": "worked", "timestamp": f"2025-01-{i+1:02d}"}
+                    for i in range(5)
+                ][:5])
+                adapter.collection.update(ids=[good_id], metadatas=[meta])
+        except Exception:
+            pass
+
+        # Bad advice: failing (5 uses, 20% success rate)
+        try:
+            result = adapter.collection.get(ids=[bad_id], include=["metadatas"])
+            if result and result.get("metadatas"):
+                meta = result["metadatas"][0]
+                meta["uses"] = 5
+                meta["score"] = 0.2
+                meta["success_count"] = 1.0  # 1/5 = 20%
+                meta["last_outcome"] = "failed"
+                meta["outcome_history"] = json.dumps([
+                    {"outcome": "failed", "timestamp": f"2025-01-{i+1:02d}"}
+                    for i in range(4)
+                ] + [{"outcome": "worked", "timestamp": "2025-01-05"}])
+                adapter.collection.update(ids=[bad_id], metadatas=[meta])
+        except Exception:
+            pass
 
     # Search with Roampal (includes dynamic weight shifting)
     results = await system.search(
@@ -763,8 +765,8 @@ async def main():
                 "ci_95_high": ci_high,
             },
             "conclusion": {
-                "significant": p_value < 0.05,
-                "roampal_wins": treatment_rate > control_rate and p_value < 0.05,
+                "significant": bool(p_value < 0.05),
+                "roampal_wins": bool(treatment_rate > control_rate and p_value < 0.05),
             }
         }, f, indent=2)
 

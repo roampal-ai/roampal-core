@@ -421,6 +421,49 @@ Separately, record_response(key_takeaway="...") is OPTIONAL - only for significa
 
 """
 
+    def build_scoring_prompt_simple(
+        self,
+        previous_exchange: Dict[str, Any],
+        current_user_message: str,
+        surfaced_memories: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
+        """
+        Build a simplified scoring prompt for non-Claude models (OpenCode).
+
+        Only asks the main LLM to score cached memories — exchange outcome
+        is handled by the independent LLM scoring call in the plugin.
+        """
+        # Build memory list with content so the model knows what each memory was about.
+        # The previous turn's system prompt (where these were shown) is gone —
+        # the model can't score what it can't see.
+        memory_lines = []
+        memory_scores_str = "{}"
+        if surfaced_memories:
+            scores = ", ".join(
+                f'"{mem.get("id", mem.get("doc_id", "unknown"))}": "unknown"'
+                for mem in surfaced_memories
+            )
+            memory_scores_str = "{" + scores + "}"
+            for mem in surfaced_memories:
+                mid = mem.get("id", mem.get("doc_id", "unknown"))
+                content = mem.get("content", mem.get("text", ""))[:200]
+                memory_lines.append(f"- {mid}: \"{content}\"")
+
+        memory_list = "\n".join(memory_lines) if memory_lines else "(none)"
+
+        return f"""REQUIRED: Call score_response to score if these memories were helpful.
+
+These memories were in your context last turn:
+{memory_list}
+
+Call score_response with:
+  outcome: "unknown"
+  memory_scores: {memory_scores_str}
+
+Score each: "worked" = helpful, "failed" = misleading, "partial" = somewhat useful, "unknown" = didn't use.
+Then respond to the user.
+"""
+
     # ========== Completion State Tracking ==========
     # These methods track whether the assistant has completed a response,
     # so we only inject scoring prompts when the user responds to completed work.

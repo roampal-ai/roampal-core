@@ -268,8 +268,8 @@ class TestScoringConsistency:
     def service(self):
         return ScoringService()
 
-    def test_memory_bank_quality_scoring(self, service):
-        """Memory bank should use importance*confidence as learned score."""
+    def test_memory_bank_quality_scoring_cold_start(self, service):
+        """Memory bank with < 3 uses should use pure importance*confidence."""
         metadata = {
             "score": 0.5,
             "uses": 0,
@@ -277,7 +277,73 @@ class TestScoringConsistency:
             "confidence": 0.8,
         }
         result = service.calculate_final_score(metadata, distance=0.5, collection="memory_bank")
+        # Pure quality: 0.9 * 0.8 = 0.72
         assert abs(result["learned_score"] - 0.72) < 0.01
+
+    def test_memory_bank_quality_scoring_under_threshold(self, service):
+        """Memory bank with 1-2 uses should still use pure quality (cold start protection)."""
+        metadata = {
+            "score": 0.5,
+            "uses": 2,
+            "importance": 0.9,
+            "confidence": 0.8,
+            "success_count": 2.0,
+            "outcome_history": "[]",
+        }
+        result = service.calculate_final_score(metadata, distance=0.5, collection="memory_bank")
+        # Still pure quality below 3 uses: 0.9 * 0.8 = 0.72
+        assert abs(result["learned_score"] - 0.72) < 0.01
+
+    def test_memory_bank_wilson_blend_after_3_uses(self, service):
+        """Memory bank should blend 80% quality + 20% Wilson after 3+ uses (v0.2.9)."""
+        metadata = {
+            "score": 0.5,
+            "uses": 10,
+            "importance": 0.9,
+            "confidence": 0.8,
+            "success_count": 8.0,
+            "outcome_history": "[]",
+        }
+        result = service.calculate_final_score(metadata, distance=0.5, collection="memory_bank")
+        quality = 0.9 * 0.8  # 0.72
+        wilson = result["wilson_score"]
+        expected = 0.8 * quality + 0.2 * wilson
+        # Verify the 80/20 blend formula
+        assert abs(result["learned_score"] - expected) < 0.01
+        # Verify Wilson actually influenced the score (not pure quality)
+        assert abs(result["learned_score"] - quality) > 0.001
+
+    def test_memory_bank_wilson_blend_at_threshold(self, service):
+        """Memory bank should start blending at exactly 3 uses."""
+        metadata = {
+            "score": 0.5,
+            "uses": 3,
+            "importance": 0.7,
+            "confidence": 0.7,
+            "success_count": 3.0,
+            "outcome_history": "[]",
+        }
+        result = service.calculate_final_score(metadata, distance=0.5, collection="memory_bank")
+        quality = 0.7 * 0.7  # 0.49
+        wilson = result["wilson_score"]
+        expected = 0.8 * quality + 0.2 * wilson
+        assert abs(result["learned_score"] - expected) < 0.01
+
+    def test_memory_bank_wilson_blend_low_success(self, service):
+        """Memory bank with low success rate should rank lower via Wilson blend."""
+        # High quality memory that keeps failing
+        metadata = {
+            "score": 0.5,
+            "uses": 10,
+            "importance": 0.9,
+            "confidence": 0.9,
+            "success_count": 1.0,  # Only 1/10 worked
+            "outcome_history": "[]",
+        }
+        result = service.calculate_final_score(metadata, distance=0.5, collection="memory_bank")
+        quality = 0.9 * 0.9  # 0.81
+        # Wilson should pull the score down from 0.81
+        assert result["learned_score"] < quality
 
 
 if __name__ == "__main__":

@@ -17,10 +17,21 @@ KEY COMPARISON:
 - Control: ChromaDB top-k retrieval (standard RAG pattern)
   - Returns k semantically similar chunks
   - No outcome learning - pure vector similarity
+  - Must return multiple results because it can't tell which one is correct
 
 - Treatment: Roampal outcome-weighted retrieval
   - Returns 1 best result based on learned outcomes
   - Dynamic weight shifting: proven memories (60% score, 40% embedding)
+  - Can return fewer results because outcome scoring provides confidence
+    in which memory will actually help the LLM
+
+WHY THIS MATTERS:
+-----------------
+Token efficiency is a CONSEQUENCE of accuracy. Traditional RAG hedges by
+returning top-k results because it has no signal for which chunk is correct.
+Roampal's outcome history tells it which memories worked in past conversations,
+so it can confidently return just 1. The ~80% token reduction (1/5 = 80%) is
+a structural property that holds at any chunk size.
 
 ADVERSARIAL DESIGN:
 -------------------
@@ -1071,11 +1082,11 @@ async def run_treatment_roampal(scenario: Dict, data_dir: str, embedding_service
     """
     system = UnifiedMemorySystem(
         data_path=data_dir,
-        
-        llm_service=MockLLMService()
     )
     await system.initialize()
-    system.embedding_service = embedding_service
+    system._embedding_service = embedding_service
+    if system._search_service:
+        system._search_service.embed_fn = embedding_service.embed_text
 
     # Store good advice with positive outcomes
     good_id = await system.store(

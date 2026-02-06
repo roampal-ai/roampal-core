@@ -63,7 +63,7 @@ def _format_context_injection(self, context: Dict[str, Any]) -> str:
 **Result:**
 ```
 ═══ KNOWN CONTEXT ═══
-User: Logan
+User: Alex
 • [memory 1] (collection)
 • [memory 2] (collection)
 • [memory 3] (collection)

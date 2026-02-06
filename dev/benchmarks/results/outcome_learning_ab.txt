@@ -1,11 +1,88 @@
-WARNING: Real embeddings not available. Install sentence-transformers.
+C:\roampal-core\roampal\backend\modules\memory\chromadb_adapter.py:641: RuntimeWarning: coroutine 'ChromaDBAdapter.cleanup' was never awaited
+  pass  # Ignore errors in destructor
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
 ======================================================================
 A/B TEST: Outcome-Based Learning vs Plain Vector Search
 ======================================================================
 
-This test proves that outcome scoring improves retrieval quality.
-Both conditions use identical embeddings and storage.
-The ONLY difference: whether search results are ranked by outcome scores.
+ADVERSARIAL DESIGN: Queries match BAD advice better semantically.
+The ONLY difference: whether outcome scores are applied.
 
-ERROR: This test requires real embeddings.
-Install: pip install sentence-transformers
+Loading embedding model (all-mpnet-base-v2, 768d)...
+Model loaded.
+
+----------------------------------------------------------------------
+Running 10 adversarial scenarios...
+----------------------------------------------------------------------
+
+[1/10] Print Debugging vs Debugger
+    Query: "How should I use print statements to check variable values in my code?..."
+    [WITH outcomes]    Good advice #1: True [PASS]
+    [WITHOUT outcomes] Good advice #1: False [FAIL (expected)]
+
+[2/10] Cache Everything vs Connection Pool
+    Query: "How do I cache database queries in Redis to speed things up?..."
+    [WITH outcomes]    Good advice #1: True [PASS]
+    [WITHOUT outcomes] Good advice #1: False [FAIL (expected)]
+
+[3/10] Catch-All Errors vs Typed Exceptions
+    Query: "How do I catch all exceptions so my application doesn't crash?..."
+    [WITH outcomes]    Good advice #1: True [PASS]
+    [WITHOUT outcomes] Good advice #1: False [FAIL (expected)]
+
+[4/10] Manual Timing vs Profiler
+    Query: "How do I add timing calls around my functions to find what's slow?..."
+    [WITH outcomes]    Good advice #1: True [PASS]
+    [WITHOUT outcomes] Good advice #1: False [FAIL (expected)]
+
+[5/10] Sequential Await vs Concurrent
+    Query: "Should I await async calls one by one to keep my code simple?..."
+    [WITH outcomes]    Good advice #1: True [PASS]
+    [WITHOUT outcomes] Good advice #1: False [FAIL (expected)]
+
+[6/10] Force Push vs Revert Commit
+    Query: "How do I force push to remove bad commits and clean up my branch?..."
+    [WITH outcomes]    Good advice #1: True [PASS]
+    [WITHOUT outcomes] Good advice #1: False [FAIL (expected)]
+
+[7/10] Global State vs Dependency Injection
+    Query: "How do I use global variables to share state between async tasks?..."
+    [WITH outcomes]    Good advice #1: False [FAIL]
+    [WITHOUT outcomes] Good advice #1: False [FAIL (expected)]
+
+[8/10] Nested REST vs Flat Endpoints
+    Query: "How should I create nested URL paths to represent entity relationships..."
+    [WITH outcomes]    Good advice #1: False [FAIL]
+    [WITHOUT outcomes] Good advice #1: False [FAIL (expected)]
+
+[9/10] Stock Picking vs Index Funds
+    Query: "How do I pick the best individual stocks to beat the market?..."
+    [WITH outcomes]    Good advice #1: True [PASS]
+    [WITHOUT outcomes] Good advice #1: False [FAIL (expected)]
+
+[10/10] Market Timing vs Stay Invested
+    Query: "When should I sell my stocks to avoid losses during a market drop?..."
+    [WITH outcomes]    Good advice #1: True [PASS]
+    [WITHOUT outcomes] Good advice #1: False [FAIL (expected)]
+
+======================================================================
+AGGREGATE RESULTS
+======================================================================
+
+Precision (WITH outcomes):    80.0%
+Precision (WITHOUT outcomes): 0.0%
+Improvement:                  +80.0%
+
+Statistical Analysis:
+  Cohen's d:    2.68 (LARGE effect)
+  t-statistic:  6.00
+  p-value:      0.005
+
+[PASS] STATISTICALLY SIGNIFICANT: Outcome scoring improves retrieval quality.
+
+Results saved to: C:\roampal-core\dev\benchmarks\ab_test_data\ab_test_results.json
+
+Cleaning up test data...
+Note: Some test files locked by ChromaDB - will be cleaned up on next run.
+Task was destroyed but it is pending!
+task: <Task pending name='Task-90' coro=<KnowledgeGraphService._debounced_save_kg.<locals>.delayed_save() done, defined at C:\roampal-core\roampal\backend\modules\memory\knowledge_graph_service.py:195> wait_for=<Future pending cb=[Task.task_wakeup()]>>

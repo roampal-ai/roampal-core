@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0d1117"/>
+      <stop offset="100%" style="stop-color:#161b22"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#3b82f6"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="green" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#22c55e"/>
+      <stop offset="100%" style="stop-color:#10b981"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="400" fill="url(#bg)" rx="12"/>
+
+  <!-- Title -->
+  <text x="450" y="60" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="36" font-weight="700" fill="#e6edf3">Roampal</text>
+  <text x="450" y="90" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="16" fill="#8b949e">Persistent Memory for AI Coding Tools</text>
+
+  <!-- Left panel: "You type" -->
+  <rect x="40" y="120" width="380" height="240" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="60" y="150" font-family="'SF Mono', 'Fira Code', Consolas, monospace" font-size="12" fill="#8b949e">You type:</text>
+  <rect x="60" y="165" width="340" height="35" rx="4" fill="#161b22"/>
+  <text x="75" y="188" font-family="'SF Mono', 'Fira Code', Consolas, monospace" font-size="13" fill="#e6edf3">fix the auth bug</text>
+
+  <!-- Arrow -->
+  <text x="60" y="228" font-family="'SF Mono', 'Fira Code', Consolas, monospace" font-size="12" fill="#8b949e">Your AI sees:</text>
+
+  <!-- Context block -->
+  <rect x="60" y="240" width="340" height="100" rx="4" fill="#161b22"/>
+  <line x1="63" y1="243" x2="63" y2="337" stroke="#22c55e" stroke-width="3"/>
+  <text x="75" y="260" font-family="'SF Mono', 'Fira Code', Consolas, monospace" font-size="11" fill="#22c55e">═══ KNOWN CONTEXT ═══</text>
+  <text x="75" y="282" font-family="'SF Mono', 'Fira Code', Consolas, monospace" font-size="11" fill="#a5d6ff">[patterns]</text>
+  <text x="155" y="282" font-family="'SF Mono', 'Fira Code', Consolas, monospace" font-size="10" fill="#8b949e">(3d, s:0.9, [YYY])</text>
+  <text x="75" y="300" font-family="'SF Mono', 'Fira Code', Consolas, monospace" font-size="11" fill="#e6edf3">JWT refresh fixed auth loop</text>
+  <text x="75" y="318" font-family="'SF Mono', 'Fira Code', Consolas, monospace" font-size="11" fill="#a5d6ff">[memory_bank]</text>
+  <text x="175" y="318" font-family="'SF Mono', 'Fira Code', Consolas, monospace" font-size="11" fill="#e6edf3">Prefers: no git staging</text>
+  <text x="75" y="336" font-family="'SF Mono', 'Fira Code', Consolas, monospace" font-size="11" fill="#22c55e">═══ END CONTEXT ═══</text>
+
+  <!-- Right panel: How it works -->
+  <rect x="460" y="120" width="400" height="240" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="480" y="150" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="14" font-weight="600" fill="#e6edf3">How it works</text>
+
+  <!-- Step 1 -->
+  <circle cx="490" cy="182" r="10" fill="none" stroke="#3b82f6" stroke-width="2"/>
+  <text x="490" y="186" text-anchor="middle" font-family="'Segoe UI', Arial, sans-serif" font-size="11" font-weight="600" fill="#3b82f6">1</text>
+  <text x="510" y="186" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="13" fill="#e6edf3">You type a message</text>
+
+  <!-- Step 2 -->
+  <circle cx="490" cy="218" r="10" fill="none" stroke="#8b5cf6" stroke-width="2"/>
+  <text x="490" y="222" text-anchor="middle" font-family="'Segoe UI', Arial, sans-serif" font-size="11" font-weight="600" fill="#8b5cf6">2</text>
+  <text x="510" y="215" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="13" fill="#e6edf3">Roampal injects context</text>
+  <text x="510" y="232" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#8b949e">automatically, before the AI sees it</text>
+
+  <!-- Step 3 -->
+  <circle cx="490" cy="262" r="10" fill="none" stroke="#22c55e" stroke-width="2"/>
+  <text x="490" y="266" text-anchor="middle" font-family="'Segoe UI', Arial, sans-serif" font-size="11" font-weight="600" fill="#22c55e">3</text>
+  <text x="510" y="259" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="13" fill="#e6edf3">AI responds with full context</text>
+  <text x="510" y="276" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#8b949e">knows your prefs, what worked before</text>
+
+  <!-- Step 4 -->
+  <circle cx="490" cy="306" r="10" fill="none" stroke="#f59e0b" stroke-width="2"/>
+  <text x="490" y="310" text-anchor="middle" font-family="'Segoe UI', Arial, sans-serif" font-size="11" font-weight="600" fill="#f59e0b">4</text>
+  <text x="510" y="303" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="13" fill="#e6edf3">Outcome scored automatically</text>
+  <text x="510" y="320" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#8b949e">good advice promoted, bad demoted</text>
+
+  <!-- Bottom bar -->
+  <rect x="460" y="340" width="400" height="1" fill="#30363d"/>
+  <text x="480" y="360" font-family="'SF Mono', 'Fira Code', Consolas, monospace" font-size="12" fill="#7ee787">$ pip install roampal &amp;&amp; roampal init</text>
+
+  <!-- Bottom badges area -->
+  <text x="450" y="390" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#8b949e">Claude Code  ·  OpenCode  ·  Apache 2.0  ·  100% Local</text>
+</svg>

@@ -229,6 +229,9 @@ class OutcomeService:
                 cleaned = await self.promotion_service.cleanup_old_working_memory(max_age_hours=24.0)
                 if cleaned > 0:
                     logger.info(f"Batch cleanup triggered: removed {cleaned} old working memories")
+                cleaned_history = await self.promotion_service.cleanup_old_history(max_age_hours=720.0)
+                if cleaned_history > 0:
+                    logger.info(f"Batch cleanup triggered: removed {cleaned_history} old history items")
 
             logger.info(f"[Background] Deferred learning completed for {doc_id}")
 

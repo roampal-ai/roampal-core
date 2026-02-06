@@ -484,3 +484,47 @@ class PromotionService:
         except Exception as e:
             logger.error(f"Error in working memory cleanup: {e}")
             return 0
+
+    async def cleanup_old_history(self, max_age_hours: float = 720.0) -> int:
+        """
+        Clean up history items older than specified age (default 30 days).
+
+        History has a 30-day lifecycle: items older than 30 days are removed
+        unless they've been promoted to patterns.
+
+        Args:
+            max_age_hours: Maximum age in hours (default 720 = 30 days)
+
+        Returns:
+            Number of items cleaned up
+        """
+        try:
+            history_adapter = self.collections.get("history")
+            if not history_adapter or not history_adapter.collection:
+                return 0
+
+            cleaned_count = 0
+            all_ids = history_adapter.list_all_ids()
+
+            for doc_id in all_ids:
+                doc = history_adapter.get_fragment(doc_id)
+                if not doc:
+                    continue
+
+                metadata = doc.get("metadata", {})
+                timestamp_str = metadata.get("timestamp") or metadata.get("created_at", "")
+                age_hours = self._calculate_age_hours(timestamp_str)
+
+                if age_hours > max_age_hours:
+                    history_adapter.delete_vectors([doc_id])
+                    cleaned_count += 1
+                    logger.debug(f"Cleaned up old history {doc_id} (age: {age_hours:.1f}h)")
+
+            if cleaned_count > 0:
+                logger.info(f"History cleanup: removed {cleaned_count} items older than {max_age_hours/24:.0f} days")
+
+            return cleaned_count
+
+        except Exception as e:
+            logger.error(f"Error in history cleanup: {e}")
+            return 0
