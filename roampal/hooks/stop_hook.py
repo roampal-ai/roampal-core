@@ -40,8 +40,82 @@ Exit codes:
 import sys
 import json
 import os
+import subprocess
+import time
 import urllib.request
 import urllib.error
+
+
+def _restart_server(server_url: str, port: int, timeout: float = 15.0) -> bool:
+    """
+    v0.3.2: Self-healing server restart for hooks.
+
+    If FastAPI is down or unhealthy (503), kill the old process and start fresh.
+    Same pattern as _ensure_server_running() in server.py but standalone (no roampal imports).
+    """
+    # 1. Kill whatever is on the port
+    try:
+        if sys.platform == "win32":
+            result = subprocess.run(
+                ["netstat", "-ano"], capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.splitlines():
+                if f"127.0.0.1:{port}" in line and "LISTENING" in line:
+                    pid = line.strip().split()[-1]
+                    subprocess.run(
+                        ["taskkill", "/pid", pid, "/f"],
+                        capture_output=True, timeout=5
+                    )
+                    print(f"Roampal: killed stale server process {pid}", file=sys.stderr)
+                    break
+        else:
+            result = subprocess.run(
+                ["lsof", "-ti", f":{port}"], capture_output=True, text=True, timeout=5
+            )
+            if result.stdout.strip():
+                pid = result.stdout.strip().split('\n')[0]
+                subprocess.run(["kill", "-9", pid], capture_output=True, timeout=5)
+                print(f"Roampal: killed stale server process {pid}", file=sys.stderr)
+    except Exception:
+        pass
+
+    time.sleep(1)
+
+    # 2. Start fresh server
+    try:
+        env = os.environ.copy()
+        dev_mode = env.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")
+
+        cmd = [sys.executable, "-m", "roampal.server.main", "--port", str(port)]
+        if dev_mode:
+            cmd.append("--dev")
+
+        subprocess.Popen(
+            cmd, env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        )
+        print(f"Roampal: starting fresh server on port {port}", file=sys.stderr)
+    except Exception as e:
+        print(f"Roampal: failed to start server: {e}", file=sys.stderr)
+        return False
+
+    # 3. Poll for health
+    health_url = f"http://127.0.0.1:{port}/api/health"
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            req = urllib.request.Request(health_url, method="GET")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                if resp.status == 200:
+                    print("Roampal: server restarted successfully", file=sys.stderr)
+                    return True
+        except Exception:
+            pass
+        time.sleep(1)
+
+    print("Roampal: server restart timed out", file=sys.stderr)
+    return False
 
 
 def read_transcript(transcript_path: str) -> tuple[str, str, str]:
@@ -174,12 +248,41 @@ def main():
         # Success - exchange stored
         sys.exit(0)
 
-    except urllib.error.URLError as e:
-        # Server not running - log but don't block
-        print(f"Roampal server unavailable: {e}", file=sys.stderr)
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        # v0.3.2: Self-healing — restart server and retry once
+        is_503 = isinstance(e, urllib.error.HTTPError) and e.code == 503
+        is_down = isinstance(e, urllib.error.URLError)
+
+        if is_503 or is_down:
+            reason = "unhealthy (embedding corruption)" if is_503 else "unavailable"
+            print(f"Roampal server {reason}, attempting restart...", file=sys.stderr)
+
+            if _restart_server(server_url, default_port):
+                try:
+                    retry_req = urllib.request.Request(
+                        f"{server_url}/api/hooks/stop",
+                        data=request_data,
+                        headers={"Content-Type": "application/json"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(retry_req, timeout=5) as response:
+                        result = json.loads(response.read().decode("utf-8"))
+
+                    if result.get("should_block"):
+                        block_message = result.get("block_message", "")
+                        if block_message:
+                            print(block_message, file=sys.stderr)
+                        sys.exit(2)
+                    sys.exit(0)
+                except Exception as retry_err:
+                    print(f"Roampal: retry failed after restart: {retry_err}", file=sys.stderr)
+
+        elif isinstance(e, urllib.error.HTTPError):
+            print(f"Roampal server error: HTTP {e.code}", file=sys.stderr)
+
+        # Stop hook never blocks on error — don't break the user's flow
         sys.exit(0)
     except Exception as e:
-        # Other error - log but don't block
         print(f"Roampal hook error: {e}", file=sys.stderr)
         sys.exit(0)
 

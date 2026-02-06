@@ -277,10 +277,14 @@ class ScoringService:
             raw_score, uses, outcome_history, success_count
         )
 
-        # Special case: memory_bank uses quality as learned score
+        # Special case: memory_bank blends quality with Wilson after 3 uses (v0.2.9)
         if collection == "memory_bank":
             quality = importance * confidence
-            learned_score = quality
+            if uses >= 3:
+                # 80% quality + 20% Wilson (cold start protection: quality only below 3 uses)
+                learned_score = 0.8 * quality + 0.2 * wilson_score
+            else:
+                learned_score = quality
 
         # Convert distance to similarity
         embedding_similarity = 1.0 / (1.0 + distance)

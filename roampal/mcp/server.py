@@ -34,25 +34,29 @@ HOW IT WORKS:
 - Scoring: record_response scores cached memories based on outcome
 - Learning: Good memories get promoted, bad ones get demoted/deleted
 - 5 collections: books (docs), memory_bank (facts), patterns (proven), history (past), working (session)
+
+v0.3.2 ARCHITECTURE:
+- MCP server is a thin HTTP client — all tool calls proxy through FastAPI
+- No direct ChromaDB/UnifiedMemorySystem access from MCP process
+- This enables multiple clients (Claude Code, Cursor, OpenCode) to share
+  one FastAPI server with one ChromaDB connection (single-writer pattern)
 """
 
 import logging
 import json
 import asyncio
-import threading
 import socket
 import os
 import sys
 import atexit
 import subprocess
+import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
-
-from roampal.backend.modules.memory import UnifiedMemorySystem
 
 logger = logging.getLogger(__name__)
 
@@ -129,14 +133,17 @@ def _sort_results(results: list, sort_by: str) -> list:
 
 
 # Port configuration - DEV and PROD use different ports
+# All clients (Claude Code, Cursor, OpenCode) share the same server
+# 27182 (prod), 27183 (dev)
 PROD_PORT = 27182
 DEV_PORT = 27183
 
-# Global memory system
-_memory: Optional[UnifiedMemorySystem] = None
-
-# Session cache for outcome tracking
-_mcp_search_cache: Dict[str, Dict[str, Any]] = {}
+# v0.3.2: MCP session ID - changed from random UUID to "default"
+# Random UUIDs caused session ID mismatch: hooks stored under "ses_xxx" (from platform),
+# MCP scored under "mcp_xxx" (random). The injection_map in main.py now resolves the
+# correct conversation by looking up which doc_ids were injected where.
+# Using "default" triggers the injection_map lookup path in record_outcome.
+_mcp_session_id = "default"
 
 # Flag to track if FastAPI server is running
 _fastapi_started = False
@@ -209,6 +216,14 @@ def _is_port_in_use(port: int) -> bool:
             return True
 
 
+def _get_port() -> int:
+    """Get the FastAPI server port based on dev mode and env overrides."""
+    port_override = os.environ.get("ROAMPAL_PORT")
+    if port_override:
+        return int(port_override)
+    return DEV_PORT if _dev_mode else PROD_PORT
+
+
 def _start_fastapi_server():
     """
     Start FastAPI hook server in background subprocess.
@@ -229,8 +244,7 @@ def _start_fastapi_server():
     if _fastapi_started:
         return
 
-    # Use correct port based on dev mode
-    port = DEV_PORT if _dev_mode else PROD_PORT
+    port = _get_port()
 
     # Check if port is already in use (server already running externally)
     if _is_port_in_use(port):
@@ -318,7 +332,7 @@ def _ensure_server_running(timeout: float = 5.0) -> bool:
     import urllib.request
     import urllib.error
 
-    port = DEV_PORT if _dev_mode else PROD_PORT
+    port = _get_port()
     health_url = f"http://127.0.0.1:{port}/api/health"
 
     # Try health check first
@@ -352,20 +366,23 @@ def _ensure_server_running(timeout: float = 5.0) -> bool:
     return False
 
 
-def _detect_mcp_client() -> str:
-    """Detect MCP client for session tracking."""
-    # Use "default" to match the hook's fallback conversation_id
-    # This ensures MCP tool calls and hook injections share the same cache
-    return "default"
+async def _api_call(method: str, path: str, payload: dict = None, timeout: float = 15.0) -> dict:
+    """
+    v0.3.2: Make an HTTP call to the shared FastAPI server.
 
-
-async def _initialize_memory():
-    """Initialize memory system if needed."""
-    global _memory
-    if _memory is None:
-        _memory = UnifiedMemorySystem()
-        await _memory.initialize()
-        logger.info("MCP: Memory system initialized")
+    All MCP tool calls go through this helper. Single-writer pattern:
+    FastAPI owns ChromaDB, MCP is just an HTTP client.
+    """
+    import httpx
+    port = _get_port()
+    url = f"http://127.0.0.1:{port}{path}"
+    async with httpx.AsyncClient() as client:
+        if method == "GET":
+            response = await client.get(url, timeout=timeout)
+        else:
+            response = await client.post(url, json=payload or {}, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
 
 
 def run_mcp_server(dev: bool = False):
@@ -381,7 +398,7 @@ def run_mcp_server(dev: bool = False):
         os.environ["ROAMPAL_DEV"] = "1"
         logger.info("MCP Server running in DEV mode")
 
-    # Start FastAPI hook server in background thread
+    # Start FastAPI hook server in background subprocess
     _start_fastapi_server()
 
     server = Server("roampal")
@@ -637,12 +654,8 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-        """Handle MCP tool calls."""
-        await _initialize_memory()
-        session_id = _detect_mcp_client()
-
-        # v0.3.0: Ensure FastAPI hook server is healthy before any operation.
-        # This catches embedding corruption and restarts the server so hooks work.
+        """Handle MCP tool calls — all proxied through FastAPI (v0.3.2)."""
+        # Ensure FastAPI hook server is healthy before any operation
         _ensure_server_running(timeout=3.0)
 
         try:
@@ -658,12 +671,15 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                     sort_by = "recency"
 
                 try:
-                    results = await _memory.search(
-                        query=query,
-                        collections=collections,
-                        limit=limit,
-                        metadata_filters=metadata
-                    )
+                    result = await _api_call("POST", "/api/search", {
+                        "query": query,
+                        "conversation_id": _mcp_session_id,
+                        "collections": collections,
+                        "limit": limit,
+                        "metadata_filters": metadata,
+                        "sort_by": sort_by
+                    })
+                    results = result.get("results", [])
 
                     # v0.2.0: Apply sorting if requested
                     if sort_by:
@@ -672,21 +688,11 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                 except Exception as search_err:
                     return [types.TextContent(
                         type="text",
-                        text=f"Search error: {search_err}\n\nData path: {_memory.data_path}\nCollections: {list(_memory.collections.keys())}"
+                        text=f"Search error: {search_err}"
                     )]
 
-                # Cache doc_ids for outcome scoring (last call only)
-                cached_doc_ids = [r.get("id") for r in results if r.get("id")]
-                _mcp_search_cache[session_id] = {
-                    "doc_ids": cached_doc_ids,
-                    "query": query,
-                    "timestamp": datetime.now()
-                }
-
                 if not results:
-                    # Debug info
-                    coll_counts = {name: coll.collection.count() if coll.collection else 0 for name, coll in _memory.collections.items()}
-                    text = f"No results found for '{query}'.\n\nDebug: data_path={_memory.data_path}, collections={coll_counts}"
+                    text = f"No results found for '{query}'."
                 else:
                     text = f"Found {len(results)} result(s) for '{query}':\n\n"
                     for i, r in enumerate(results[:limit], 1):
@@ -731,14 +737,15 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                 confidence = arguments.get("confidence", 0.7)
                 always_inject = arguments.get("always_inject", False)
 
-                doc_id = await _memory.store_memory_bank(
-                    text=content,
-                    tags=tags,
-                    importance=importance,
-                    confidence=confidence,
-                    always_inject=always_inject
-                )
+                result = await _api_call("POST", "/api/memory-bank/add", {
+                    "content": content,
+                    "tags": tags,
+                    "importance": importance,
+                    "confidence": confidence,
+                    "always_inject": always_inject
+                })
 
+                doc_id = result.get("doc_id", "unknown")
                 return [types.TextContent(
                     type="text",
                     text=f"Added to memory bank (ID: {doc_id})"
@@ -748,15 +755,15 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                 old_content = arguments.get("old_content", "")
                 new_content = arguments.get("new_content", "")
 
-                doc_id = await _memory.update_memory_bank(
-                    old_content=old_content,
-                    new_content=new_content
-                )
+                result = await _api_call("POST", "/api/memory-bank/update", {
+                    "old_content": old_content,
+                    "new_content": new_content
+                })
 
-                if doc_id:
+                if result.get("success"):
                     return [types.TextContent(
                         type="text",
-                        text=f"Updated memory (ID: {doc_id})"
+                        text=f"Updated memory (ID: {result.get('doc_id')})"
                     )]
                 else:
                     return [types.TextContent(
@@ -767,9 +774,11 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
             elif name == "delete_memory":
                 content = arguments.get("content", "")
 
-                success = await _memory.delete_memory_bank(content)
+                result = await _api_call("POST", "/api/memory-bank/archive", {
+                    "content": content
+                })
 
-                if success:
+                if result.get("success"):
                     return [types.TextContent(
                         type="text",
                         text="Memory deleted successfully"
@@ -785,64 +794,23 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                 memory_scores = arguments.get("memory_scores", {})  # v0.2.8: Per-memory scoring
                 related = arguments.get("related")  # Deprecated, backward compat
 
-                # v0.2.0: Ensure FastAPI server is running before calling it
-                if not _ensure_server_running(timeout=3.0):
-                    logger.warning("FastAPI server not available, falling back to MCP cache")
+                payload = {
+                    "conversation_id": _mcp_session_id,
+                    "outcome": outcome
+                }
+                # v0.2.8: Include memory_scores for per-memory scoring
+                if memory_scores:
+                    payload["memory_scores"] = memory_scores
+                # Backward compat: related still works (deprecated)
+                elif related is not None:
+                    payload["related"] = related
 
-                # Score via FastAPI endpoint (has access to hook-injected doc_ids cache)
-                # Use correct port based on dev mode
-                port = DEV_PORT if _dev_mode else PROD_PORT
                 scored_count = 0
                 try:
-                    import httpx
-                    payload = {
-                        "conversation_id": session_id,
-                        "outcome": outcome
-                    }
-                    # v0.2.8: Include memory_scores for per-memory scoring
-                    if memory_scores:
-                        payload["memory_scores"] = memory_scores
-                    # Backward compat: related still works (deprecated)
-                    elif related is not None:
-                        payload["related"] = related
-
-                    async with httpx.AsyncClient() as client:
-                        response = await client.post(
-                            f"http://127.0.0.1:{port}/api/record-outcome",
-                            json=payload,
-                            timeout=15.0  # v0.2.3: increased from 5s for safety margin
-                        )
-                        if response.status_code == 200:
-                            result = response.json()
-                            scored_count = result.get("documents_scored", 0)
+                    result = await _api_call("POST", "/api/record-outcome", payload)
+                    scored_count = result.get("documents_scored", 0)
                 except Exception as e:
                     logger.warning(f"Failed to call FastAPI record-outcome: {e}")
-
-                # Fall back to MCP cache if FastAPI returned 0 or failed
-                if scored_count == 0:
-                    # v0.2.8: Per-memory scoring - process each memory individually
-                    if memory_scores:
-                        for doc_id, mem_outcome in memory_scores.items():
-                            # v0.2.8.1: Skip unknowns - they mean "didn't use this memory"
-                            if mem_outcome == "unknown":
-                                continue
-                            result = await _memory.record_outcome([doc_id], mem_outcome)
-                            scored_count += result.get("documents_updated", 0)
-                    # Backward compat: related parameter (deprecated)
-                    elif related is not None:
-                        if related:  # Non-empty list
-                            result = await _memory.record_outcome(related, outcome)
-                            scored_count = result.get("documents_updated", 0)
-                        # Empty list = score none (intentional)
-                    elif session_id in _mcp_search_cache:
-                        cached = _mcp_search_cache[session_id]
-                        doc_ids = cached.get("doc_ids", [])
-                        if doc_ids:
-                            result = await _memory.record_outcome(doc_ids, outcome)
-                            scored_count = result.get("documents_updated", 0)
-
-                    if session_id in _mcp_search_cache:
-                        del _mcp_search_cache[session_id]
 
                 logger.info(f"Scored response: outcome={outcome}, memory_scores={len(memory_scores)} entries, scored={scored_count}")
                 return [types.TextContent(
@@ -859,20 +827,11 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                         text="Error: 'key_takeaway' is required"
                     )]
 
-                # Key takeaways start at 0.7 (user explicitly asked to remember = higher confidence)
-                # Scoring happens via score_response: +0.2 worked, +0.05 partial, -0.3 failed
-                starting_score = 0.7
+                result = await _api_call("POST", "/api/record-response", {
+                    "key_takeaway": key_takeaway,
+                    "conversation_id": _mcp_session_id
+                })
 
-                # Store the takeaway in working memory
-                doc_id = await _memory.store_working(
-                    content=f"Key takeaway: {key_takeaway}",
-                    conversation_id=session_id,
-                    metadata={
-                        "type": "key_takeaway",
-                        "timestamp": datetime.now().isoformat()
-                    },
-                    initial_score=starting_score
-                )
                 logger.info(f"Recorded takeaway (score=0.7): {key_takeaway[:50]}...")
                 return [types.TextContent(
                     type="text",
@@ -888,22 +847,15 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                         text="Error: 'query' is required"
                     )]
 
-                # Get context from memory system
-                context = await _memory.get_context_for_injection(query)
-
-                # Cache doc_ids for scoring (last call only)
-                cached_doc_ids = context.get("doc_ids", [])
-                if cached_doc_ids:
-                    _mcp_search_cache[session_id] = {
-                        "doc_ids": cached_doc_ids,
-                        "query": query,
-                        "source": "get_context_insights",
-                        "timestamp": datetime.now()
-                    }
+                result = await _api_call("POST", "/api/context-insights", {
+                    "query": query,
+                    "conversation_id": _mcp_session_id
+                })
 
                 # Format response
-                user_facts = context.get("user_facts", [])
-                memories = context.get("relevant_memories", [])
+                user_facts = result.get("user_facts", [])
+                memories = result.get("relevant_memories", [])
+                doc_ids = result.get("doc_ids", [])
 
                 text = f"Known Context for '{query}':\n\n"
 
@@ -925,7 +877,7 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                 if not user_facts and not memories:
                     text += "No relevant context found. This may be a new topic or first interaction.\n"
 
-                text += f"\n_Cached {len(cached_doc_ids)} doc_ids for outcome scoring._"
+                text += f"\n_Cached {len(doc_ids)} doc_ids for outcome scoring._"
 
                 # Add update notice if available (checked once per session)
                 text += _get_update_notice()

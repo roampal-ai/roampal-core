@@ -1,153 +1,208 @@
-# Roampal
+<p align="center">
+  <img src="assets/banner.svg" alt="Roampal - Persistent Memory for AI Coding Tools" width="900">
+</p>
 
-**Persistent Memory for AI Coding Tools**
+<p align="center">
+  <a href="https://pypi.org/project/roampal/"><img src="https://img.shields.io/pypi/v/roampal?color=blue&style=flat-square" alt="PyPI"></a>
+  <a href="https://pypi.org/project/roampal/"><img src="https://img.shields.io/pypi/dm/roampal?color=blue&style=flat-square" alt="Downloads"></a>
+  <a href="https://github.com/roampal-ai/roampal-core/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue?style=flat-square" alt="Python"></a>
+</p>
 
-Two commands. Claude Code gets persistent memory.
+<p align="center">
+  <strong>Two commands. Your AI coding assistant gets persistent memory.</strong><br>
+  Works with <strong>Claude Code</strong> and <strong>OpenCode</strong>.
+</p>
 
-## Installation
+---
+
+## Quick Start
 
 ```bash
 pip install roampal
 roampal init
 ```
 
-That's it. Restart Claude Code and your AI remembers everything.
+Auto-detects installed tools. Restart your editor and start chatting.
 
-> **Note:** No `roampal start` needed! The MCP server auto-starts the hook server when Claude Code launches.
+> Target a specific tool: `roampal init --claude-code` or `roampal init --opencode`
+
+<p align="center">
+  <img src="assets/init-demo.svg" alt="roampal init demo" width="720">
+</p>
+
+### Platform Differences
+
+The core loop is identical — both platforms inject context, capture exchanges, and score outcomes. The difference is *how* scoring gets enforced:
+
+| | Claude Code | OpenCode |
+|--|-------------|----------|
+| Context injection | Hooks (stdout) | Plugin (system prompt) |
+| Exchange capture | Stop hook | Plugin `session.idle` event |
+| Scoring | Main LLM prompted, **enforced** — hook blocks if not scored | Main LLM prompted + independent sidecar call as fallback |
+| Self-healing | Hooks auto-restart server on failure | Plugin logs error, MCP tools recover on next call |
+
+**Claude Code** has tighter enforcement — the stop hook can block the conversation if `score_response` wasn't called, forcing the AI to score every exchange.
+
+**OpenCode** can't block (plugin API limitation), so it uses a two-layer approach: prompt the main LLM to score, and if it doesn't, an independent API call scores the exchange automatically. Scoring still happens on every exchange — it's just not enforced at the platform level.
 
 ## How It Works
 
-### The Magic: Automatic Context Injection
+When you type a message, Roampal automatically injects relevant context before your AI sees it:
 
-When you type a message:
-
-**You see:**
+**You type:**
 ```
-Help me fix this auth bug
+fix the auth bug
 ```
 
-**The AI sees:**
+**Your AI sees:**
 ```
-<roampal-score-required>
-Score the previous exchange before responding.
-Previous: User asked "How do I configure TypeScript?" You answered "..."
-Call score_response(outcome="worked|failed|partial|unknown") FIRST.
-</roampal-score-required>
-
 ═══ KNOWN CONTEXT ═══
-• Alex, backend engineer at StartupCo (memory_bank)
-• JWT refresh token pattern worked for auth issues (92% proven, patterns)
+• [patterns] (3d, s:0.9, [YYY]) JWT refresh fixed auth loop
+• [memory_bank] Alex, backend engineer — prefers: no git staging
 ═══ END CONTEXT ═══
 
-Help me fix this auth bug
+fix the auth bug
 ```
 
-You never have to ask "remember when..." - it's automatic.
+No manual calls. No workflow changes. It just works.
 
-### How?
+### The Loop
 
-1. **UserPromptSubmit Hook**: Before Claude sees your message, Roampal injects relevant context + scoring prompt
-2. **Outcome Learning**: When things work (`score_response(worked)`), memories get promoted. When they fail, they get demoted.
-3. **Five Memory Collections**:
-   - `memory_bank`: Your identity, preferences, goals (never decays)
-   - `patterns`: Proven solutions (auto-promoted from history)
-   - `history`: Past conversations
-   - `working`: Current session context
-   - `books`: Uploaded reference docs
+1. **You type** a message
+2. **Roampal injects** relevant context automatically (hooks in Claude Code, plugin in OpenCode)
+3. **AI responds** with full awareness of your history, preferences, and what worked before
+4. **Outcome scored** — good advice gets promoted, bad advice gets demoted
+5. **Repeat** — the system gets smarter every exchange
+
+### Five Memory Collections
+
+| Collection | Purpose | Lifetime |
+|------------|---------|----------|
+| `working` | Current session context | 24h, then auto-promotes |
+| `history` | Past conversations | 30 days, outcome-scored |
+| `patterns` | Proven solutions | Permanent, promoted from history |
+| `memory_bank` | Identity, preferences, goals | Permanent |
+| `books` | Uploaded reference docs | Permanent |
 
 ## Commands
 
 ```bash
-roampal init      # Configure Claude Code (one-time)
-roampal ingest    # Add documents (.txt, .md, .pdf) to books collection
-roampal books     # List all ingested books
-roampal remove    # Remove a book by title
-roampal status    # Check if server is running
-roampal stats     # View memory statistics
+roampal init                # Auto-detect and configure installed tools
+roampal init --claude-code  # Configure Claude Code explicitly
+roampal init --opencode     # Configure OpenCode explicitly
+roampal start               # Start the HTTP server manually
+roampal stop                # Stop the HTTP server
+roampal status              # Check if server is running
+roampal stats               # View memory statistics
+roampal doctor              # Diagnose installation issues
+roampal ingest <file>       # Add documents to books collection
+roampal books               # List all ingested books
+roampal remove <title>      # Remove a book by title
 ```
 
 ## MCP Tools
 
-The AI has these tools for memory access:
+Your AI gets 7 memory tools:
 
 | Tool | Description |
 |------|-------------|
-| `get_context_insights` | Get user profile + relevant memories |
-| `search_memory` | Search across collections |
-| `add_to_memory_bank` | Store permanent facts |
-| `update_memory` | Update existing memories |
-| `delete_memory` | Delete outdated info |
-| `score_response` | Score previous exchange (prompted by hook) |
-| `record_response` | Store key takeaways (optional) |
+| `get_context_insights` | Quick topic lookup — user profile + relevant memories |
+| `search_memory` | Deep search across all collections |
+| `add_to_memory_bank` | Store permanent facts (identity, preferences, goals) |
+| `update_memory` | Correct or update existing memories |
+| `delete_memory` | Remove outdated info |
+| `score_response` | Score previous exchange — enforced automatically by hooks |
+| `record_response` | Store key takeaways from significant exchanges |
 
 ## What's Different?
 
-| Vanilla Claude Code | With Roampal |
-|---------------------|--------------|
+| Without Roampal | With Roampal |
+|-----------------|--------------|
 | Forgets everything between sessions | Remembers you, your preferences, what worked |
 | You repeat context every time | Context injected automatically |
-| No learning from mistakes | Outcomes tracked - bad advice gets demoted |
-| No document memory | Ingest docs, they're searchable forever |
-
-## Requirements
-
-- Python 3.10+
-- Claude Code (VS Code extension or CLI)
-- **Platforms:** Windows, macOS, Linux (macOS/Linux community-tested)
-
-## Troubleshooting
-
-**Hooks not working?**
-- Restart Claude Code (hooks load on startup)
-- Check HTTP server: `curl http://127.0.0.1:27182/api/health`
-
-**MCP not connecting?**
-- Verify `~/.claude/mcp.json` exists and has correct Python path
-- Check Claude Code output panel for MCP errors
-
-**Context not appearing?**
-- Make sure you ran `roampal init`
-- Restart Claude Code after init
-
-**Still stuck?** Ask Claude Code for help - it can read logs and debug Roampal issues directly.
+| No learning from mistakes | Outcomes tracked — bad advice gets demoted |
+| No document memory | Ingest docs, searchable forever |
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  pip install roampal && roampal init                    │
-│    → Configures hooks + MCP in ~/.claude/               │
+│    Claude Code: hooks + MCP → ~/.claude/                │
+│    OpenCode:    plugin + MCP → ~/.config/opencode/      │
 └─────────────────────────────────────────────────────────┘
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────┐
-│  User opens Claude Code                                 │
-│    → Claude loads MCP server (roampal.mcp.server)       │
-│    → MCP server spawns HTTP hook server (port 27182)    │
+│  HTTP Hook Server (port 27182)                          │
+│    Auto-started on first use, self-heals on failure     │
+│    Manual control: roampal start / roampal stop         │
 └─────────────────────────────────────────────────────────┘
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────┐
 │  User types message                                     │
-│    → UserPromptSubmit hook calls HTTP server            │
+│    → Hook/plugin calls HTTP server for context          │
 │    → Server returns context + scoring prompt            │
 │    → AI sees context, scores previous, responds         │
-│    → Stop hook stores exchange for next turn            │
+│    → Exchange stored for next turn                      │
+└─────────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Single-Writer Backend                                  │
+│    FastAPI → UnifiedMemorySystem → ChromaDB             │
+│    All clients share one server, isolated by session    │
 └─────────────────────────────────────────────────────────┘
 ```
 
+## Requirements
+
+- Python 3.10+
+- One of: **Claude Code** or **OpenCode**
+- **Platforms:** Windows, macOS, Linux
+
+## Troubleshooting
+
+<details>
+<summary><strong>Hooks not working? (Claude Code)</strong></summary>
+
+- Restart Claude Code (hooks load on startup)
+- Check HTTP server: `curl http://127.0.0.1:27182/api/health`
+</details>
+
+<details>
+<summary><strong>MCP not connecting? (Claude Code)</strong></summary>
+
+- Verify `~/.claude.json` has the `roampal-core` MCP entry with correct Python path
+- Check Claude Code output panel for MCP errors
+</details>
+
+<details>
+<summary><strong>Context not appearing? (OpenCode)</strong></summary>
+
+- Make sure you ran `roampal init --opencode`
+- Check that the server auto-started: `curl http://127.0.0.1:27182/api/health`
+- If not, start it manually: `roampal start`
+</details>
+
+<details>
+<summary><strong>Server crashes and recovers?</strong></summary>
+
+This is expected. Roampal has self-healing — if the HTTP server stops responding, hooks automatically restart it and retry.
+</details>
+
+**Still stuck?** Ask your AI for help — it can read logs and debug Roampal issues directly.
+
 ## Support
 
-Roampal Core is completely free.
+Roampal Core is completely free and open source.
 
-Support development: [roampal.gumroad.com](https://roampal.gumroad.com/l/aagzxv)
-
-Have feature ideas? Join the [Discord](https://discord.com/invite/F87za86R3v).
+- Support development: [roampal.gumroad.com](https://roampal.gumroad.com/l/aagzxv)
+- Feature ideas & feedback: [Discord](https://discord.com/invite/F87za86R3v)
+- Bug reports: [GitHub Issues](https://github.com/roampal-ai/roampal-core/issues)
 
 ## License
 
-Apache 2.0
-
-## Credits
-
-Built with love for the AI coding community. Based on learnings from building [Roampal Desktop](https://roampal.ai).
+[Apache 2.0](LICENSE)

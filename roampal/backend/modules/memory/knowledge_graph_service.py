@@ -227,15 +227,16 @@ class KnowledgeGraphService:
 
         # Track in routing_patterns
         if collection not in self.knowledge_graph["routing_patterns"]:
-            self.knowledge_graph["routing_patterns"][collection] = {
-                "successes": 0,
-                "failures": 0,
-                "partials": 0,
-                "total": 0,
-                "success_rate": 0.5
-            }
+            self.knowledge_graph["routing_patterns"][collection] = {}
 
         stats = self.knowledge_graph["routing_patterns"][collection]
+        # Ensure required keys exist (handles old-schema entries missing these)
+        for key in ("successes", "failures", "partials", "total"):
+            if key not in stats:
+                stats[key] = 0
+        if "success_rate" not in stats:
+            stats["success_rate"] = 0.5
+
         stats["total"] += 1
 
         if outcome == "worked":

@@ -25,6 +25,7 @@ from .context_service import ContextService
 from .promotion_service import PromotionService
 from .routing_service import RoutingService
 from .knowledge_graph_service import KnowledgeGraphService
+from .search_service import SearchService
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,7 @@ class UnifiedMemorySystem:
         self._outcome_service: Optional[OutcomeService] = None
         self._memory_bank_service: Optional[MemoryBankService] = None
         self._context_service: Optional[ContextService] = None
+        self._search_service: Optional[SearchService] = None
 
         # Collections
         self.collections: Dict[str, ChromaDBAdapter] = {}
@@ -355,6 +357,25 @@ class UnifiedMemorySystem:
             config=self.config
         )
 
+        # v0.3.2: SearchService with optional cross-encoder reranking
+        reranker = None
+        try:
+            from sentence_transformers import CrossEncoder
+            reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            logger.info("Cross-encoder loaded: ms-marco-MiniLM-L-6-v2")
+        except Exception as e:
+            logger.info(f"Cross-encoder not available, search will use vector + Wilson only: {e}")
+
+        self._search_service = SearchService(
+            collections=self.collections,
+            scoring_service=self._scoring_service,
+            routing_service=self._routing_service,
+            kg_service=self._kg_service,
+            embed_fn=self._embedding_service.embed_text,
+            config=self.config,
+            reranker=reranker,
+        )
+
         self.initialized = True
         logger.info("UnifiedMemorySystem initialized successfully")
 
@@ -407,6 +428,9 @@ class UnifiedMemorySystem:
         # Also clean old working memories (> 24 hours)
         await self._promotion_service.cleanup_old_working_memory(max_age_hours=24.0)
 
+        # Clean old history memories (> 30 days)
+        await self._promotion_service.cleanup_old_history(max_age_hours=720.0)
+
     # ==================== Core Search ====================
 
     async def search(
@@ -419,6 +443,9 @@ class UnifiedMemorySystem:
     ) -> List[Dict[str, Any]]:
         """
         Search memory with optional collection filtering.
+
+        v0.3.2: Delegates to SearchService for hybrid search (vector + BM25),
+        cross-encoder reranking, entity boost, and KG-based routing.
 
         Args:
             query: Search query
@@ -433,10 +460,47 @@ class UnifiedMemorySystem:
         if not self.initialized:
             await self.initialize()
 
+        # Delegate to SearchService (hybrid search + cross-encoder + entity boost)
+        if self._search_service:
+            try:
+                all_results = await self._search_service.search(
+                    query=query,
+                    limit=limit,
+                    collections=collections,
+                    metadata_filters=metadata_filters,
+                )
+
+                # Filter ghost IDs (deleted books)
+                all_results = [r for r in all_results if r.get("id", "") not in self.ghost_ids]
+
+                # Add legacy field aliases for Desktop compatibility
+                for r in all_results:
+                    r["quality"] = r.get("learned_score", 0.5)
+                    r["combined_score"] = r.get("final_rank_score", 0)
+                    r["similarity"] = r.get("embedding_similarity", 0)
+
+                # Apply sort_by override
+                if sort_by == "recency":
+                    def get_timestamp(x):
+                        metadata = x.get("metadata", {})
+                        ts = metadata.get("timestamp") or metadata.get("created_at") or ""
+                        return ts if ts else "0"
+                    all_results.sort(key=get_timestamp, reverse=True)
+                    return all_results[:limit]
+                elif sort_by == "score":
+                    all_results.sort(key=lambda x: x.get("metadata", {}).get("score", 0.5), reverse=True)
+                    return all_results[:limit]
+                else:
+                    # Default: already sorted by final_rank_score from SearchService
+                    return all_results[:limit * 2]
+
+            except Exception as e:
+                logger.warning(f"SearchService search failed, falling back to inline: {e}")
+
+        # Fallback: inline search (pre-initialization or SearchService failure)
         if collections is None:
             collections = list(self.collections.keys())
 
-        # Get query embedding
         query_vector = await self._embedding_service.embed_text(query)
 
         all_results = []
@@ -452,45 +516,32 @@ class UnifiedMemorySystem:
                 )
 
                 for r in results:
-                    # v0.2.2: Filter out ghost IDs (deleted books)
                     doc_id = r.get("id", "")
                     if doc_id in self.ghost_ids:
                         continue
 
-                    # Add collection info
                     r["collection"] = coll_name
-
-                    # Get metadata and calculate base similarity
                     metadata = r.get("metadata", {})
                     distance = r.get("distance", 1.0)
-                    embedding_similarity = 1.0 / (1.0 + distance)
 
-                    # Calculate quality score based on collection type
-                    if coll_name == "memory_bank":
-                        # Memory bank: use importance × confidence
-                        importance = float(metadata.get("importance", 0.7))
-                        confidence = float(metadata.get("confidence", 0.7))
-                        quality = importance * confidence
+                    if self._scoring_service:
+                        scores = self._scoring_service.calculate_final_score(
+                            metadata, distance, coll_name
+                        )
+                        embedding_similarity = scores["embedding_similarity"]
+                        final_rank_score = scores["final_rank_score"]
+                        quality = scores.get("learned_score", 0.5)
                     else:
-                        # Other collections: use learned score from outcome history
+                        embedding_similarity = 1.0 / (1.0 + distance)
                         quality = float(metadata.get("score", 0.5))
+                        quality_boost = 1.0 - (quality * 0.8)
+                        adjusted_distance = distance * quality_boost
+                        adjusted_similarity = 1.0 / (1.0 + adjusted_distance)
+                        final_rank_score = adjusted_similarity * (1.0 + quality)
 
-                    # Apply quality-weighted scoring (Desktop-compatible formula)
-                    # Distance boost: adjust distance by quality
-                    quality_boost = 1.0 - (quality * 0.8)  # High quality = lower effective distance
-                    adjusted_distance = distance * quality_boost
-                    adjusted_similarity = 1.0 / (1.0 + adjusted_distance)
-
-                    # Final score: blend embedding similarity with quality
-                    # This ensures high-quality results rank above low-quality semantic matches
-                    final_rank_score = adjusted_similarity * (1.0 + quality)
-
-                    # Store Desktop-compatible field names
                     r["embedding_similarity"] = embedding_similarity
                     r["final_rank_score"] = final_rank_score
                     r["quality"] = quality
-
-                    # Keep legacy fields for backwards compatibility
                     r["combined_score"] = final_rank_score
                     r["similarity"] = embedding_similarity
 
@@ -499,24 +550,18 @@ class UnifiedMemorySystem:
             except Exception as e:
                 logger.warning(f"Error searching {coll_name}: {e}")
 
-        # Sort based on sort_by parameter
         if sort_by == "recency":
-            # Sort by timestamp (most recent first)
             def get_timestamp(x):
                 metadata = x.get("metadata", {})
                 ts = metadata.get("timestamp") or metadata.get("created_at") or ""
                 return ts if ts else "0"
             all_results.sort(key=get_timestamp, reverse=True)
-            # Recency sort: return exactly limit items
             return all_results[:limit]
         elif sort_by == "score":
-            # Sort by outcome score
             all_results.sort(key=lambda x: x.get("metadata", {}).get("score", 0.5), reverse=True)
             return all_results[:limit]
         else:
-            # Default: sort by final_rank_score (quality-weighted relevance)
             all_results.sort(key=lambda x: x.get("final_rank_score", 0), reverse=True)
-            # Semantic search: return limit * 2 for better cross-collection coverage
             return all_results[:limit * 2]
 
     # ==================== Generic Store (Desktop-compatible wrapper) ====================
@@ -751,8 +796,13 @@ class UnifiedMemorySystem:
         """
         Get context to inject into LLM prompt via hooks.
 
-        Uses KG-routed unified search: searches ALL collections, ranks by Wilson score,
-        returns top 5 most relevant/proven memories regardless of collection.
+        4-slot allocation:
+          - 1 reserved working (current session context)
+          - 1 reserved history (breaks scoring feedback loop)
+          - 2 best matches from any collection except books, ranked by Wilson score
+
+        Always_inject memory_bank facts (identity, preferences) are fetched
+        separately and included outside the 4 scored slots.
 
         Args:
             query: The user's message
@@ -797,8 +847,18 @@ class UnifiedMemorySystem:
         reserved_working = [m for m in working_scored if m.get("content") or m.get("text")][:1]
         reserved_ids = {m.get("id") for m in reserved_working if m.get("id")}
 
-        # 4. Search remaining collections for other slots
-        other_collections = ["patterns", "history", "memory_bank"]
+        # 3b. Reserved slot: Always include 1 history memory for scoring feedback loop
+        history_results = await self.search(
+            query=query,
+            limit=1,
+            collections=["history"]
+        )
+        history_scored = self._scoring_service.apply_scoring_to_results(history_results)
+        reserved_history = [m for m in history_scored if m.get("content") or m.get("text")][:1]
+        reserved_ids.update(m.get("id") for m in reserved_history if m.get("id"))
+
+        # 4. Search all collections (except books) for best-match slots
+        other_collections = ["working", "patterns", "history", "memory_bank"]
         other_results = await self.search(
             query=query,
             limit=4,
@@ -808,14 +868,15 @@ class UnifiedMemorySystem:
         # 5. Apply Wilson scoring for proper ranking
         scored_results = self._scoring_service.apply_scoring_to_results(other_results)
 
-        # 6. Filter empty memories, exclude any duplicates from reserved
+        # 6. Filter empty memories, exclude any duplicates from reserved slots
         valid_results = [
             m for m in scored_results
             if (m.get("content") or m.get("text")) and m.get("id") not in reserved_ids
         ]
 
-        # 7. Combine: 1 reserved working + top 2 from other collections
-        top_memories = reserved_working + valid_results[:2]
+        # 7. Combine: 1 working + 1 history + top 2 best matches = 4 total
+        #    If no history match found, the slot falls through to best matches
+        top_memories = reserved_working + reserved_history + valid_results[:2]
 
         # 8. Enrich with Action KG effectiveness stats
         for mem in top_memories:
@@ -836,7 +897,7 @@ class UnifiedMemorySystem:
         """
         Format context for injection into LLM prompt.
 
-        Shows top 3 memories across all collections with effectiveness stats.
+        Shows top 4 memories across all collections with effectiveness stats.
         Extracts user name from identity-tagged memories.
         """
         import re

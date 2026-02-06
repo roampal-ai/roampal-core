@@ -32,7 +32,7 @@ Called automatically on server startup to purge existing archived memories.
 final_score = 0.8 * (importance × confidence) + 0.2 * wilson_score
 ```
 
-**Unknown outcome change (all collections):**
+**Unknown outcome change (all collections/Wilson Scoring):**
 ```
 unknown = +1 use, +0.25 success (was +0, +0)
 ```

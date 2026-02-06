@@ -55,6 +55,12 @@ _session_manager: Optional[SessionManager] = None
 # Search result cache for outcome scoring (session_id -> doc_ids)
 _search_cache: Dict[str, Dict[str, Any]] = {}
 
+# v0.3.2: Injection map - tracks which doc_ids were injected to which conversation
+# This enables robust multi-session scoring by matching doc_ids to their source conversation
+# instead of relying on "most recent unscored" heuristics
+# Format: {doc_id: {"conversation_id": str, "injected_at": str, "exchange_doc_id": str}}
+_injection_map: Dict[str, Dict[str, Any]] = {}
+
 # Port constants for dev/prod isolation
 PROD_PORT = 27182
 DEV_PORT = 27183
@@ -64,69 +70,6 @@ _update_check_cache: Optional[tuple] = None
 
 # Cold start tag priorities - one fact per category (v0.2.7)
 TAG_PRIORITIES = ["identity", "preference", "goal", "project", "system_mastery", "agent_growth"]
-
-# v0.2.8: Parent process monitoring for lifecycle management
-_parent_monitor_task: Optional[asyncio.Task] = None
-
-
-def _is_parent_alive(parent_pid: int) -> bool:
-    """
-    v0.2.8: Check if parent process is still alive. Cross-platform, no dependencies.
-
-    Uses OS-native APIs:
-    - Windows: ctypes + kernel32 OpenProcess/GetExitCodeProcess
-    - Unix: os.kill with signal 0
-    """
-    if sys.platform == "win32":
-        # Windows: Use ctypes to check process
-        import ctypes
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-
-        try:
-            kernel32 = ctypes.windll.kernel32
-            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, parent_pid)
-            if not handle:
-                return False  # Can't open = doesn't exist
-
-            exit_code = ctypes.c_ulong()
-            result = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-            kernel32.CloseHandle(handle)
-
-            if not result:
-                return False
-            return exit_code.value == STILL_ACTIVE
-        except Exception:
-            # If ctypes fails, assume parent is alive (fail open)
-            return True
-    else:
-        # Unix: signal 0 checks if process exists without actually sending a signal
-        try:
-            os.kill(parent_pid, 0)
-            return True
-        except OSError:
-            return False
-
-
-async def _monitor_parent_process():
-    """
-    v0.2.8: Exit if parent MCP process dies.
-
-    Runs every 2 seconds. If parent PID no longer exists, FastAPI exits.
-    This catches SIGKILL and crashes that bypass atexit handlers.
-
-    No external dependencies - uses ctypes (Windows) or os.kill (Unix).
-    """
-    parent_pid = os.getppid()
-    logger.info(f"v0.2.8: Monitoring parent process {parent_pid} for lifecycle management")
-
-    while True:
-        await asyncio.sleep(2)  # Check every 2 seconds
-
-        if not _is_parent_alive(parent_pid):
-            logger.info(f"Parent process {parent_pid} died. Shutting down FastAPI server.")
-            # Use os._exit for immediate termination (no cleanup needed for zombie prevention)
-            os._exit(0)
 
 
 def _first_sentence(text: str, max_chars: int = 300) -> str:
@@ -290,10 +233,8 @@ async def _build_cold_start_profile() -> Optional[str]:
                 return """<roampal-identity-missing>
 You've been working with this user but don't have their identity stored yet.
 
-When natural, consider asking their name to personalize future sessions. Store with:
+When natural, ask their name to personalize future sessions. Store with:
   add_to_memory_bank(content="User's name is [NAME]", tags=["identity"])
-
-No rush - just when it fits the conversation.
 </roampal-identity-missing>
 """
             else:
@@ -367,6 +308,13 @@ class GetContextResponse(BaseModel):
     relevant_memories: List[Dict[str, Any]]
     context_summary: str
     scoring_required: bool = False  # True if previous exchange needs scoring
+    # v0.3.2: Split fields for OpenCode plugin — scoring in user message, context in system prompt
+    scoring_prompt: str = ""  # Just the scoring block (for prepending to user message)
+    scoring_prompt_simple: str = ""  # Simplified scoring prompt for non-Claude models (no XML tags, plain language)
+    context_only: str = ""  # Just the memory context without scoring (for system prompt)
+    # v0.3.2: Raw scoring data for independent LLM scoring call (OpenCode plugin)
+    scoring_exchange: Optional[Dict[str, str]] = None  # {"user": "...", "assistant": "..."} previous exchange
+    scoring_memories: Optional[List[Dict[str, str]]] = None  # [{"id": "doc_id", "content": "full memory content"}, ...]
 
 
 class StopHookRequest(BaseModel):
@@ -392,6 +340,8 @@ class SearchRequest(BaseModel):
     conversation_id: Optional[str] = None
     collections: Optional[List[str]] = None
     limit: int = 10
+    metadata_filters: Optional[Dict[str, Any]] = None
+    sort_by: Optional[str] = None
 
 
 class MemoryBankAddRequest(BaseModel):
@@ -400,6 +350,7 @@ class MemoryBankAddRequest(BaseModel):
     tags: Optional[List[str]] = None
     importance: float = 0.7
     confidence: float = 0.7
+    always_inject: bool = False
 
 
 class MemoryBankUpdateRequest(BaseModel):
@@ -416,12 +367,24 @@ class RecordOutcomeRequest(BaseModel):
     memory_scores: Optional[Dict[str, str]] = None  # v0.2.8: Per-memory scoring (doc_id -> outcome)
 
 
+class RecordResponseRequest(BaseModel):
+    """Request to record a key takeaway (MCP tool proxy)."""
+    key_takeaway: str
+    conversation_id: str
+
+
+class ContextInsightsRequest(BaseModel):
+    """Request for context insights (MCP tool proxy)."""
+    query: str
+    conversation_id: Optional[str] = None
+
+
 # ==================== Lifecycle ====================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage memory system lifecycle."""
-    global _memory, _session_manager, _parent_monitor_task
+    global _memory, _session_manager
     logger.info("Starting Roampal server...")
 
     # Check for dev mode or custom data path
@@ -456,19 +419,14 @@ async def lifespan(app: FastAPI):
     _session_manager = SessionManager(_memory.data_path)
     logger.info("Session manager initialized")
 
-    # v0.2.8: Start parent process monitor (kills FastAPI when MCP dies)
-    _parent_monitor_task = asyncio.create_task(_monitor_parent_process())
+    # v0.3.2: Parent process monitoring removed. FastAPI now outlives any single
+    # MCP client so multiple clients (Claude Code, Cursor, OpenCode) can share it.
+    # First MCP to start auto-starts FastAPI; others detect port in use and skip.
 
     yield
 
     # Cleanup
     logger.info("Shutting down Roampal server...")
-    if _parent_monitor_task:
-        _parent_monitor_task.cancel()
-        try:
-            await _parent_monitor_task
-        except asyncio.CancelledError:
-            pass
 
 
 def create_app() -> FastAPI:
@@ -476,7 +434,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Roampal",
         description="Persistent memory for AI coding tools",
-        version="0.1.0",
+        version="0.3.2",
         lifespan=lifespan
     )
 
@@ -508,6 +466,11 @@ def create_app() -> FastAPI:
         try:
             formatted_parts = []
             scoring_required = False
+            scoring_prompt_text = ""  # v0.3.2: track separately for OpenCode split delivery
+            scoring_exchange_data = None  # v0.3.2: raw exchange data for independent LLM scoring
+            scoring_memories_data = None  # v0.3.2: raw surfaced memory data for independent LLM scoring
+            scoring_prompt_simple_text = ""  # v0.3.2: simplified scoring for non-Claude models
+            context_parts = []  # v0.3.2: non-scoring context parts for split delivery
             conversation_id = request.conversation_id or "default"
 
             # 0. Check for cold start (first message of session)
@@ -518,11 +481,13 @@ def create_app() -> FastAPI:
                 update_injection = _get_update_injection()
                 if update_injection:
                     formatted_parts.append(update_injection)
+                    context_parts.append(update_injection)
 
                 # Dump full user profile on first message
                 cold_start_profile = await _build_cold_start_profile()
                 if cold_start_profile:
                     formatted_parts.append(cold_start_profile)
+                    context_parts.append(cold_start_profile)
                     logger.info(f"Cold start: injected user profile for {conversation_id}")
 
                 # Mark first message as seen
@@ -539,6 +504,7 @@ def create_app() -> FastAPI:
             # v0.2.7: On cold start, append KNOWN CONTEXT after profile (recent work context)
             if is_cold_start and context.get("formatted_injection"):
                 formatted_parts.append(context["formatted_injection"])
+                context_parts.append(context["formatted_injection"])
                 logger.info(f"Cold start: added KNOWN CONTEXT for {conversation_id}")
 
             # 2. Check if assistant completed a response (vs user interrupting mid-work)
@@ -561,8 +527,29 @@ def create_app() -> FastAPI:
                         current_user_message=request.query,
                         surfaced_memories=surfaced_memories if surfaced_memories else None
                     )
+                    scoring_prompt_simple = _session_manager.build_scoring_prompt_simple(
+                        previous_exchange=previous,
+                        current_user_message=request.query,
+                        surfaced_memories=surfaced_memories if surfaced_memories else None
+                    )
                     formatted_parts.append(scoring_prompt)
+                    scoring_prompt_text = scoring_prompt  # v0.3.2: track for split delivery
+                    scoring_prompt_simple_text = scoring_prompt_simple  # v0.3.2: simplified for non-Claude
                     scoring_required = True
+                    # v0.3.2: Raw data for independent LLM scoring (OpenCode plugin)
+                    scoring_exchange_data = {
+                        "user": previous.get("user", ""),
+                        "assistant": previous.get("assistant", "")
+                    }
+                    scoring_memories_data = []
+                    if surfaced_memories:
+                        for mem in surfaced_memories:
+                            mem_id = mem.get("id", mem.get("doc_id", "unknown"))
+                            content = mem.get("content", mem.get("text", ""))
+                            scoring_memories_data.append({
+                                "id": mem_id,
+                                "content": content
+                            })
                     # Track that we injected scoring prompt (for Stop hook to check)
                     _session_manager.set_scoring_required(conversation_id, True)
                     logger.info(f"Injecting scoring prompt for conversation {conversation_id} with {len(surfaced_memories)} memories")
@@ -579,25 +566,44 @@ def create_app() -> FastAPI:
             # v0.2.7: Cold start already added KNOWN CONTEXT above, don't duplicate
             if not is_cold_start and context.get("formatted_injection"):
                 formatted_parts.append(context["formatted_injection"])
+                context_parts.append(context["formatted_injection"])
 
             # 4. Cache doc_ids for outcome scoring via record_response
             # This ensures hook-injected memories can be scored later
             injected_doc_ids = context.get("doc_ids", [])
+            timestamp = datetime.now().isoformat()
             if injected_doc_ids:
                 _search_cache[conversation_id] = {
                     "doc_ids": injected_doc_ids,
                     "query": request.query,
                     "source": "hook_injection",
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": timestamp
                 }
                 logger.info(f"Cached {len(injected_doc_ids)} doc_ids from hook injection for {conversation_id}")
+
+                # v0.3.2: Populate injection map for robust multi-session scoring
+                # Each doc_id maps back to the conversation that received it
+                # This enables matching by doc_id instead of "most recent unscored" heuristics
+                for doc_id in injected_doc_ids:
+                    _injection_map[doc_id] = {
+                        "conversation_id": conversation_id,
+                        "injected_at": timestamp,
+                        "query": request.query
+                    }
+                logger.info(f"Added {len(injected_doc_ids)} doc_ids to injection map for {conversation_id}")
 
             return GetContextResponse(
                 formatted_injection="\n".join(formatted_parts),
                 user_facts=context.get("user_facts", []),
                 relevant_memories=context.get("relevant_memories", []),
                 context_summary=context.get("context_summary", ""),
-                scoring_required=scoring_required
+                scoring_required=scoring_required,
+                # v0.3.2: Split fields for OpenCode — scoring in user message, context in system prompt
+                scoring_prompt=scoring_prompt_text,
+                scoring_prompt_simple=scoring_prompt_simple_text,
+                context_only="\n".join(context_parts) if context_parts else "",
+                scoring_exchange=scoring_exchange_data,
+                scoring_memories=scoring_memories_data
             )
 
         except Exception as e:
@@ -627,8 +633,10 @@ def create_app() -> FastAPI:
             if not user_msg or not assistant_msg:
                 logger.warning(f"Skipping empty exchange storage: user={bool(user_msg)}, assistant={bool(assistant_msg)}")
                 return StopHookResponse(
-                    status="skipped",
-                    message="Empty exchange not stored"
+                    stored=False,
+                    doc_id="",
+                    scoring_complete=False,
+                    should_block=False
                 )
 
             # Store the exchange in working memory
@@ -664,6 +672,18 @@ def create_app() -> FastAPI:
                     scored_this_turn = _session_manager.was_scored_this_turn(conversation_id)
                     if scored_this_turn:
                         logger.info(f"Race condition resolved: record_response completed after {(_ + 1) * 50}ms")
+                        break
+
+            # v0.3.2: Session ID mismatch fallback - OpenCode plugin hooks use ses_xxx
+            # but MCP tools use mcp_xxx. Check if any MCP session was scored this turn.
+            if scoring_was_required and not scored_this_turn:
+                state = _session_manager._load_completion_state()
+                for sid, sdata in state.items():
+                    if sid.startswith("mcp_") and sdata.get("scored_this_turn"):
+                        scored_this_turn = True
+                        # Clear the MCP session's flag so it doesn't persist
+                        _session_manager.set_scored_this_turn(sid, False)
+                        logger.info(f"Session ID mismatch resolved: MCP {sid} scored for plugin {conversation_id}")
                         break
 
             # Mark assistant as completed - this signals UserPromptSubmit that
@@ -715,7 +735,9 @@ def create_app() -> FastAPI:
             results = await _memory.search(
                 query=request.query,
                 collections=request.collections,
-                limit=request.limit
+                limit=request.limit,
+                metadata_filters=request.metadata_filters,
+                sort_by=request.sort_by
             )
 
             # Cache doc_ids for outcome scoring
@@ -748,7 +770,8 @@ def create_app() -> FastAPI:
                 text=request.content,
                 tags=request.tags,
                 importance=request.importance,
-                confidence=request.confidence
+                confidence=request.confidence,
+                always_inject=request.always_inject
             )
 
             return {"success": True, "doc_id": doc_id}
@@ -880,6 +903,60 @@ def create_app() -> FastAPI:
             logger.error(f"Error removing book: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
+    # ==================== MCP Tool Proxy Endpoints ====================
+
+    @app.post("/api/record-response")
+    async def record_response_endpoint(request: RecordResponseRequest):
+        """Record a key takeaway in working memory (MCP tool proxy)."""
+        if not _memory:
+            raise HTTPException(status_code=503, detail="Memory system not ready")
+
+        try:
+            doc_id = await _memory.store_working(
+                content=f"Key takeaway: {request.key_takeaway}",
+                conversation_id=request.conversation_id,
+                metadata={
+                    "type": "key_takeaway",
+                    "timestamp": datetime.now().isoformat()
+                },
+                initial_score=0.7
+            )
+            logger.info(f"Recorded takeaway (score=0.7): {request.key_takeaway[:50]}...")
+            return {"success": True, "doc_id": doc_id}
+
+        except Exception as e:
+            logger.error(f"Error recording response: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/context-insights")
+    async def context_insights_endpoint(request: ContextInsightsRequest):
+        """Get context insights for MCP tool proxy."""
+        if not _memory:
+            raise HTTPException(status_code=503, detail="Memory system not ready")
+
+        try:
+            context = await _memory.get_context_for_injection(request.query)
+            doc_ids = context.get("doc_ids", [])
+
+            # Cache doc_ids for scoring (like hook injection does)
+            if request.conversation_id and doc_ids:
+                _search_cache[request.conversation_id] = {
+                    "doc_ids": doc_ids,
+                    "query": request.query,
+                    "source": "context_insights",
+                    "timestamp": datetime.now().isoformat()
+                }
+
+            return {
+                "user_facts": context.get("user_facts", []),
+                "relevant_memories": context.get("relevant_memories", []),
+                "doc_ids": doc_ids
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting context insights: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     # v0.2.3: Deferred background task for Action KG updates
     async def _deferred_action_kg_updates(
         doc_ids: List[str],
@@ -952,15 +1029,39 @@ def create_app() -> FastAPI:
             exchange_doc_id = None
             exchange_conv_id = conversation_id  # Track which session the exchange came from
             if request.outcome in ["worked", "failed", "partial"]:
+                # v0.3.2: Try to find the correct conversation via injection_map first
+                # This is the most robust approach for multi-session scoring
+                # Look up any memory being scored to find which conversation received it
+                if request.memory_scores and _injection_map:
+                    for doc_id in request.memory_scores.keys():
+                        injection = _injection_map.get(doc_id)
+                        if injection:
+                            exchange_conv_id = injection["conversation_id"]
+                            logger.info(f"Resolved conversation {exchange_conv_id} via injection_map (doc_id={doc_id})")
+                            break
+
                 # Get exchange doc_id from session manager's cache (O(1) lookup)
-                previous = _session_manager._last_exchange_cache.get(conversation_id)
+                previous = _session_manager._last_exchange_cache.get(exchange_conv_id)
                 if not previous:
-                    # Try most recent cache entry (handles session ID mismatch)
+                    # Try the original conversation_id as fallback
+                    previous = _session_manager._last_exchange_cache.get(conversation_id)
+                    if previous:
+                        exchange_conv_id = conversation_id
+
+                if not previous:
+                    # Last resort: Find the MOST RECENT unscored exchange across all sessions
+                    # This handles edge cases where injection_map doesn't have the doc_id
+                    best_ts = ""
                     for cid, exc in _session_manager._last_exchange_cache.items():
                         if not exc.get("scored", False):
-                            previous = exc
-                            exchange_conv_id = cid  # Use the actual conversation_id
-                            break
+                            exc_ts = exc.get("timestamp", "")
+                            if exc_ts > best_ts:
+                                best_ts = exc_ts
+                                previous = exc
+                                exchange_conv_id = cid
+                    if previous:
+                        logger.warning(f"Used 'most recent unscored' fallback - resolved to {exchange_conv_id}")
+
                 if previous and previous.get("doc_id") and not previous.get("scored", False):
                     exchange_doc_id = previous["doc_id"]
                     await _memory.record_outcome(doc_ids=[exchange_doc_id], outcome=request.outcome)
@@ -972,10 +1073,16 @@ def create_app() -> FastAPI:
             # Old approach scanned ALL session files (O(n×m) I/O) - now O(1) cache lookup
 
             # Score cached search results
-            # First try exact conversation_id match
-            cached = _search_cache.get(conversation_id, {})
+            # v0.3.2: Try resolved exchange_conv_id first (from injection_map), then original conversation_id
+            cached = _search_cache.get(exchange_conv_id, {})
             cached_doc_ids = cached.get("doc_ids", [])
-            cache_key_used = conversation_id
+            cache_key_used = exchange_conv_id
+
+            # Fallback to original conversation_id if exchange_conv_id didn't have cache
+            if not cached_doc_ids and exchange_conv_id != conversation_id:
+                cached = _search_cache.get(conversation_id, {})
+                cached_doc_ids = cached.get("doc_ids", [])
+                cache_key_used = conversation_id
 
             # If no cache for this ID, find the most recent cache entry
             # This handles MCP using "default" while hook caches under real session_id
@@ -1028,6 +1135,12 @@ def create_app() -> FastAPI:
             # Clear search cache for the key we used
             if cache_key_used in _search_cache:
                 del _search_cache[cache_key_used]
+
+            # v0.3.2: Clean up injection_map for scored doc_ids
+            # This prevents the map from growing indefinitely
+            for doc_id in doc_ids_scored:
+                if doc_id in _injection_map:
+                    del _injection_map[doc_id]
 
             return {
                 "success": True,
@@ -1104,13 +1217,7 @@ def start_server(host: str = "127.0.0.1", port: int = None, dev: bool = False):
 
     if port is None:
         port = DEV_PORT if dev_mode else PROD_PORT
-    
-    # Validate port matches mode
-    if dev_mode and port != DEV_PORT:
-        raise ValueError(f"DEV mode requires port {DEV_PORT}, got {port}")
-    if not dev_mode and port != PROD_PORT:
-        raise ValueError(f"PROD mode requires port {PROD_PORT}, got {port}")
-    
+
     # Startup banner (ASCII-safe for Windows cp1252)
     mode_str = "DEV" if dev_mode else "PROD"
     data_hint = "Roampal_DEV" if dev_mode else "Roampal"

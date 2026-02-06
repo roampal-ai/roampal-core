@@ -26,7 +26,7 @@ Context injection quality fix - guarantees working memory always surfaces in aut
 
 **Why this matters:**
 Working memories contain recent session context - what you just did, what worked, what failed. Without a reserved slot, this context was being displaced by:
-- memory_bank items with high importance (e.g., Obol strategy doc at 0.9)
+- memory_bank items with high importance
 - Pattern matches on keywords (e.g., "memory" matching unrelated patterns)
 
 Now you'll always see recent session context in the injected memories.

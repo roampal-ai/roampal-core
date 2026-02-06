@@ -495,11 +495,13 @@ async def test_full_roampal(
 
     system = UnifiedMemorySystem(
         data_path=data_dir,
-        
-        llm_service=MockLLMService()
     )
     await system.initialize()
-    system.embedding_service = embedding_service
+    # Replace UMS's internal embedder with benchmark's token-counting embedder
+    # so token usage is tracked consistently across all 4 conditions
+    system._embedding_service = embedding_service
+    if system._search_service:
+        system._search_service.embed_fn = embedding_service.embed_text
 
     # Store both pieces of advice
     good_id = await system.store(
@@ -532,6 +534,7 @@ async def test_full_roampal(
                 meta = result["metadatas"][0]
                 meta["uses"] = maturity["uses"]
                 meta["score"] = good_success_rate
+                meta["success_count"] = float(maturity["worked"])
                 meta["outcome_history"] = json.dumps(good_outcome_history)
                 meta["last_outcome"] = "worked"
                 adapter.collection.update(ids=[good_id], metadatas=[meta])
@@ -554,6 +557,7 @@ async def test_full_roampal(
                 meta = result["metadatas"][0]
                 meta["uses"] = maturity["uses"]
                 meta["score"] = bad_success_rate
+                meta["success_count"] = float(bad_worked)
                 meta["outcome_history"] = json.dumps(bad_outcome_history)
                 meta["last_outcome"] = "failed"
                 adapter.collection.update(ids=[bad_id], metadatas=[meta])
@@ -842,7 +846,7 @@ async def main():
         n = b + c
         if n == 0:
             return 1.0  # No difference
-        p_value = stats.binom_test(b, n, 0.5, alternative='two-sided') if n > 0 else 1.0
+        p_value = stats.binomtest(b, n, 0.5, alternative='two-sided').pvalue if n > 0 else 1.0
         return p_value
 
     # Paired t-test for MRR (continuous metric)

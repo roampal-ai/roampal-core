@@ -4,12 +4,12 @@
 
 **One command install. AI coding tools get persistent memory.**
 
-Roampal Core provides hook-based memory injection and outcome learning for AI coding tools like Claude Code and Cursor. The external LLM (Claude, GPT, etc.) sits in the driver seat - using the same memory system as Roampal's internal LLM, but without local model limitations.
+Roampal Core provides hook-based memory injection and outcome learning for AI coding tools. Works with **Claude Code** and **OpenCode**. The external LLM (Claude, GPT, etc.) sits in the driver seat — using the same memory system as Roampal's internal LLM, but without local model limitations.
 
 ```bash
 pip install roampal
-roampal init
-# That's it! MCP server auto-starts FastAPI hook server when Claude Code launches
+roampal init          # Auto-detects installed tools
+roampal init --opencode   # Or configure explicitly
 ```
 
 ---
@@ -17,25 +17,26 @@ roampal init
 ## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                   MCP SERVER PROCESS                         │
-│  (launched by Claude Code when it starts)                    │
-│                                                              │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │  MCP Server (stdio)          │  FastAPI Server      │    │
-│  │  - 7 memory tools            │  - Hook endpoints    │    │
-│  │  - search, add, score, etc.  │  - Port 27182        │    │
-│  │                              │  (background thread) │    │
-│  └─────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                    SHARED FastAPI SERVER                          │
+│                    (port 27182, single instance)                  │
+│                                                                   │
+│  UnifiedMemorySystem → ChromaDB    Hook endpoints                │
+│  ScoringService, SearchService     /api/hooks/get-context        │
+│  KnowledgeGraphService             /api/hooks/stop               │
+│  Cross-encoder (optional)          /api/record-outcome           │
+│                                    /api/search, etc.             │
+└──────────────────────────────────────────────────────────────────┘
         ▲                    ▲                    ▲
         │                    │                    │
-   MCP tool calls       Hook HTTP calls      Future: Dashboard
-   from Claude          from hooks
+  MCP (HTTP client)    Hook HTTP calls     Plugin HTTP calls
+  Claude Code /        from Claude Code    from OpenCode
+  OpenCode MCP         hook subprocesses   TypeScript plugin
 ```
 
-**Key change:** The MCP server now auto-starts the FastAPI hook server in a background thread.
-No separate `roampal start` command needed - when Claude Code launches the MCP server, hooks work automatically.
+**Architecture (v0.3.2):** MCP servers are thin HTTP clients — no ChromaDB, PyTorch, or sentence-transformers in the MCP process. All access is serialized through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running.
+
+`roampal start` is available for standalone use (e.g., OpenCode-only setups where no MCP auto-starts the server).
 
 ---
 
@@ -65,9 +66,9 @@ This distinction prevents forcing the LLM to score when the user is just providi
 │    - If interrupted mid-work: skip scoring                   │
 │    - KG-ROUTED UNIFIED SEARCH:                               │
 │      → Extract concepts from user message                    │
-│      → Search ALL 5 collections                              │
-│      → Wilson-rank results                                   │
-│      → Return top 5 regardless of collection                 │
+│      → Hybrid search (vector + BM25) + cross-encoder rerank │
+│      → 4 slots: reserved working + reserved history          │
+│        + 2 best from all collections (Wilson-ranked)         │
 │      → Cache doc_ids for scoring                             │
 │    ↓                                                         │
 │ 3. LLM SEES (only if scoring required):                      │
@@ -172,7 +173,10 @@ roampal-core/
 │   │           ├── unified_memory_system.py # Main orchestrator
 │   │           ├── chromadb_adapter.py      # Vector storage
 │   │           ├── embedding_service.py     # sentence-transformers
+│   │           ├── search_service.py        # Hybrid search + cross-encoder reranking
 │   │           ├── scoring_service.py       # Wilson score calculation
+│   │           ├── routing_service.py       # KG-based collection routing
+│   │           ├── knowledge_graph_service.py # Dual KG system
 │   │           ├── outcome_service.py       # Score updates from outcomes
 │   │           ├── promotion_service.py     # Promotion/demotion/cleanup
 │   │           ├── memory_bank_service.py   # Permanent user facts
@@ -186,13 +190,17 @@ roampal-core/
 │   │
 │   ├── mcp/
 │   │   ├── __init__.py
-│   │   └── server.py         # MCP server (7 tools)
+│   │   └── server.py         # MCP server — thin HTTP client (7 tools)
 │   │
-│   └── hooks/
-│       ├── __init__.py
-│       ├── session_manager.py          # Exchange tracking (JSONL)
-│       ├── user_prompt_submit_hook.py  # Context injection
-│       └── stop_hook.py                # Enforcement + storage
+│   ├── hooks/
+│   │   ├── __init__.py
+│   │   ├── session_manager.py          # Exchange tracking (JSONL)
+│   │   ├── user_prompt_submit_hook.py  # Context injection + self-healing
+│   │   └── stop_hook.py                # Enforcement + storage + self-healing
+│   │
+│   └── plugins/
+│       └── opencode/
+│           └── roampal.ts    # OpenCode TypeScript plugin (hooks + events)
 ```
 
 ---
@@ -203,7 +211,7 @@ roampal-core/
 |------------|---------|----------|-------|
 | `books` | Uploaded reference docs | No | Never |
 | `working` | Current session context | Yes | Session |
-| `history` | Past conversations | Yes | Score-based |
+| `history` | Past conversations | Yes | 30d + Score-based |
 | `patterns` | Proven solutions (promoted from history) | Yes | Never |
 | `memory_bank` | Permanent user facts (LLM-controlled) | No | Never |
 
@@ -231,12 +239,13 @@ roampal-core/
 working → history → patterns
    ↓         ↓         ↓
  score     score     score ≥ 0.8
- < 0.2:    ≥ 0.7     AND uses ≥ 3
+ < 0.2:    ≥ 0.7     AND success_count ≥ 5
  deleted   AND       = PATTERN
            uses ≥ 2
            = promote
 
- Age > 24h without promotion = deleted
+ working: Age > 24h without promotion = deleted
+ history: Age > 30d = deleted (cleanup_old_history)
 ```
 
 ---
@@ -247,7 +256,7 @@ working → history → patterns
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/hooks/get-context` | POST | KG-routed unified search → top 5 memories across all collections |
+| `/api/hooks/get-context` | POST | 4-slot context injection: reserved working + reserved history + 2 best matches (Wilson-ranked). Returns `scoring_prompt`, `context_only`, and backward-compatible `formatted_injection`. |
 | `/api/hooks/stop` | POST | Stores exchange, logs if score_response not called |
 | `/api/record-outcome` | POST | Records outcome, updates scores |
 
@@ -255,10 +264,12 @@ working → history → patterns
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/search` | POST | Search across collections |
-| `/api/memory-bank/add` | POST | Add to memory bank |
+| `/api/search` | POST | Hybrid search (vector + BM25 + cross-encoder reranking) across collections. Supports `metadata_filters` and `sort_by`. |
+| `/api/memory-bank/add` | POST | Add to memory bank (supports `always_inject` flag) |
 | `/api/memory-bank/update` | POST | Update memory bank entry |
 | `/api/memory-bank/archive` | POST | Archive memory bank entry |
+| `/api/record-response` | POST | Store key takeaway in working memory (MCP tool proxy) |
+| `/api/context-insights` | POST | Get user profile + relevant memories (MCP tool proxy) |
 | `/api/health` | GET | Health check |
 | `/api/stats` | GET | Memory statistics |
 
@@ -292,28 +303,40 @@ The MCP server provides 7 tools for deep memory access:
 ```json
 {
   "outcome": "worked" | "failed" | "partial" | "unknown",
-  "related": ["doc_id_1", "doc_id_3"]  // optional
+  "memory_scores": {
+    "doc_id_1": "worked",
+    "doc_id_2": "unknown",
+    "doc_id_3": "failed"
+  }
 }
 ```
 
-The hook presents the previous exchange and current user message. Based on the user's reaction, score whether your previous answer helped.
+The hook presents the previous exchange, cached memories, and current user message. Based on the user's reaction, score the exchange outcome and each memory individually.
 
-**Outcome Detection:**
+**Exchange Outcome Detection:**
 - `worked` = user satisfied, says thanks, moves on to new topic
 - `failed` = user corrects you, says "no", "that's wrong"
 - `partial` = lukewarm response, "kind of", "I guess"
 - `unknown` = no clear signal
 
-**Selective Scoring (optional `related` param):**
-- If `related` omitted → all cached memories get scored (current behavior)
-- If `related` provided → only those doc_ids get scored, others get 0
-- Enables surgical scoring: relevant memories inherit outcome, noise stays neutral
+**Per-Memory Scoring (`memory_scores` dict):**
+- Each cached memory gets its own score: `worked`, `failed`, `partial`, or `unknown`
+- `worked` = this memory was helpful for the response
+- `failed` = this memory was **misleading** (gave bad advice that led you astray)
+- `unknown` = didn't use this memory (neutral, not penalized)
+- All cached memories MUST be scored; additional memories from context MAY be scored
 
-Example: 6 memories surfaced, only 2 were actually used:
+Example: 4 memories surfaced, 2 were helpful, 1 was misleading, 1 unused:
 ```
-score_response(outcome="worked", related=["mem_abc123", "mem_def456"])
-→ mem_abc123, mem_def456 get +0.20
-→ other 4 memories get 0 (skipped, not demoted)
+score_response(
+  outcome="worked",
+  memory_scores={
+    "mem_abc123": "worked",    // +0.20
+    "mem_def456": "worked",    // +0.20
+    "mem_ghi789": "failed",    // -0.30
+    "mem_jkl012": "unknown"    // 0 (skipped)
+  }
+)
 ```
 
 **Critical:** Failed outcomes are how bad memories get deleted. Without them, wrong info persists forever.
@@ -344,44 +367,30 @@ Most routine exchanges don't need this - the transcript is enough.
 ### Doc ID Caching
 
 Both hook injection and `search_memory` cache doc_ids by session_id. When `score_response` is called, it:
-1. Scores the most recent unscored exchange (from any session)
-2. Uses `related` doc_ids directly if provided (bypasses cache)
-3. Falls back to cached doc_ids if `related` omitted
-4. Applies outcome to memories
+1. Scores the most recent unscored exchange
+2. Uses `memory_scores` dict to score each cached memory individually
+3. Applies per-memory outcomes (+0.20 for worked, -0.30 for failed, 0 for unknown)
 
-**How `related` parameter works:**
+**How `memory_scores` works:**
 
-| `related` param | What happens |
-|-----------------|--------------|
-| `related=["id1", "id2"]` | Score those specific memories (+ exchange) |
-| `related=[]` | Score NO context memories, just the exchange |
-| `related` omitted | Score ALL cached memories (+ exchange) |
-
-This ensures that:
-- Hook-injected memories get scored (cached under Claude Code's session_id)
-- MCP search results get scored (cached under "default")
-- Cold start profile dumps get scored
-- Session ID mismatches are handled gracefully
-- Noise can be filtered out without being penalized
-- **Direct doc_id scoring avoids cache timing issues** (Dec 2025 fix)
-
-#### Cache Timing Fix (Dec 2025)
-
-**Problem:** When the LLM searches for additional context (via `search_memory`) before scoring, the cache gets overwritten with new search results. By the time `score_response` is called with `related=["prev_turn_id"]`, those doc_ids no longer exist in the cache.
-
-**Solution:** When `related` is provided, use those doc_ids directly instead of filtering against the (potentially stale) cache:
+The hook prompt lists all cached memories with their doc_ids. The LLM scores each one:
 
 ```python
-# Before (broken): filter related against stale cache
-if request.related is not None:
-    filtered_doc_ids = [d for d in cached_doc_ids if d in related_set]
-
-# After (fixed): use related directly
-if request.related is not None and len(request.related) > 0:
-    doc_ids_scored.extend(request.related)
+score_response(
+    outcome="worked",
+    memory_scores={
+        "doc_id_1": "worked",   # +0.20 — was helpful
+        "doc_id_2": "failed",   # -0.30 — was misleading
+        "doc_id_3": "unknown"   #  0    — didn't use
+    }
+)
 ```
 
-This makes selective scoring reliable regardless of what searches happen between context injection and scoring.
+This ensures:
+- Hook-injected memories get scored (cached under client's session_id)
+- MCP search results get scored (cached under MCP session_id)
+- Per-memory granularity: helpful memories are boosted, misleading ones are demoted, unused ones are neutral
+- Each MCP client gets a unique `mcp_{uuid}` session_id for cache isolation
 
 ---
 
@@ -493,12 +502,16 @@ Patterns learned in Desktop are available to roampal-core and vice versa.
 ## CLI Commands
 
 ```bash
-roampal init           # Configure hooks + MCP + permissions
-roampal status         # Check server status
-roampal stats          # Show memory statistics
-roampal ingest <file>  # Ingest .txt/.md/.pdf into books collection
-roampal books          # List all ingested books
-roampal remove <title> # Remove a book by title
+roampal init                # Auto-detect and configure installed tools
+roampal init --claude-code  # Configure Claude Code explicitly
+roampal init --opencode     # Configure OpenCode explicitly
+roampal start               # Start the HTTP server manually
+roampal stop                # Stop the HTTP server
+roampal status              # Check server status
+roampal stats               # Show memory statistics
+roampal ingest <file>       # Ingest .txt/.md/.pdf into books collection
+roampal books               # List all ingested books
+roampal remove <title>      # Remove a book by title
 ```
 
 ### Book Management
@@ -519,9 +532,7 @@ Books are stored in the `books` ChromaDB collection with these operations:
 
 **Note:** Removal is by title (not UUID) - simpler for CLI. Duplicate titles get removed together.
 
-**Note:** `roampal start` is no longer required! The MCP server auto-starts the FastAPI hook server
-when Claude Code launches. If you need to run the server standalone (e.g., for debugging), you can
-still use `roampal start` or `roampal start --dev`.
+**Note:** The first MCP client to start auto-launches the FastAPI server. For standalone use (e.g., OpenCode-only setups or debugging), use `roampal start` or `roampal start --dev`.
 
 ### Dev Mode
 
@@ -585,7 +596,7 @@ def get_port(args=None) -> int:
 
 ### What `roampal init` Does
 
-Automatically detects and configures Claude Code and/or Cursor:
+Automatically detects and configures installed tools. Use `--claude-code` or `--opencode` to configure explicitly.
 
 **Claude Code** (`~/.claude/` detected):
 
@@ -596,11 +607,12 @@ Automatically detects and configures Claude Code and/or Cursor:
 
 2. Creates `~/.claude/.mcp.json` with roampal-core MCP server
 
-**Cursor** (`~/.cursor/` detected):
-1. Creates `~/.cursor/mcp.json` with roampal-core MCP server
-2. Note: Cursor doesn't support hooks, but MCP tools provide full memory access
+**OpenCode** (`~/.config/opencode/` detected):
+1. Creates `opencode.json` with roampal-core MCP server + `PYTHONPATH` env
+2. Installs TypeScript plugin to `~/.config/opencode/plugin/roampal.ts`
+3. Plugin handles context injection (via `chat.message` + `system.transform` hooks) and exchange capture (via `event` hook)
 
-**Both:**
+**All:**
 
 - Creates data directory at `%APPDATA%/Roampal/data` (Windows) or platform equivalent
 - Supports `--dev` flag for isolated development environment
@@ -631,7 +643,7 @@ Automatically detects and configures Claude Code and/or Cursor:
 }
 ```
 
-### MCP Server Config (auto-generated)
+### MCP Server Config (auto-generated, all clients use the same server.py)
 
 ```json
 {
@@ -644,6 +656,24 @@ Automatically detects and configures Claude Code and/or Cursor:
   }
 }
 ```
+
+### OpenCode Config (`opencode.json`, auto-generated by `roampal init --opencode`)
+
+```json
+{
+  "mcp": {
+    "roampal-core": {
+      "command": "python",
+      "args": ["-m", "roampal.mcp.server"],
+      "env": {
+        "PYTHONPATH": "<roampal-core-dir>"
+      }
+    }
+  }
+}
+```
+
+Plugin installed to `~/.config/opencode/plugin/roampal.ts`. Context injection is handled by the plugin (not hooks), using `chat.message` + `experimental.chat.system.transform` for split delivery (scoring prompt at top, memory context at end of system prompt).
 
 ---
 
@@ -708,13 +738,43 @@ dependencies = [
 
 ---
 
+## Self-Healing
+
+All three entry points (hooks, MCP, plugin) auto-recover if the FastAPI server goes down:
+
+| Entry Point | Recovery Method |
+|-------------|----------------|
+| Python hooks (`user_prompt_submit_hook`, `stop_hook`) | `_restart_server()` — kills stale port process, spawns fresh server, polls `/api/health` for 15s, retries |
+| MCP server (`server.py`) | `_ensure_server_running()` — health check before every tool call, auto-restart with 3s timeout |
+| OpenCode plugin (`roampal.ts`) | `restartServer()` — same kill/spawn/poll pattern, `_restartInProgress` guard prevents concurrent restarts |
+
+The `user_prompt_submit_hook` / `chat.message` fires first every turn — if the server is down, it recovers before context injection.
+
+---
+
+## Search Pipeline
+
+The `search()` method delegates to `SearchService` which provides a full retrieval pipeline:
+
+1. **Hybrid search**: Vector similarity + BM25 keyword matching with Reciprocal Rank Fusion
+2. **Cross-encoder reranking**: Top-30 candidates re-scored by `ms-marco-MiniLM-L-6-v2` (optional — graceful fallback if unavailable)
+3. **Wilson scoring**: Confidence intervals with dynamic weight shifts (NEW → EMERGING → ESTABLISHED → PROVEN)
+4. **Collection-specific boosts**: patterns priority, memory_bank 80/20 quality+Wilson blend (after 3 uses), books recency
+5. **Entity boost**: Content KG quality-weighted entity matching
+6. **KG routing**: Intelligent collection selection when no collections specified
+
+Falls back to inline vector + Wilson scoring if SearchService fails or isn't initialized.
+
+---
+
 ## Future Considerations
 
-1. **Cursor Support**: ✅ MCP support added in v0.2.2 (hooks not supported by Cursor)
-2. **Dashboard**: Web UI for memory management
-3. **Multi-User**: Currently single-user design
-4. **Encryption**: Data at rest is not encrypted
-5. **KG Service**: ✅ Knowledge Graphs now shared with Roampal Desktop (v0.2.8)
+1. **Cursor Support**: Implemented but blocked by Cursor v2.4.7 bug — context injection doesn't reach the AI. Will go live when Cursor fixes `agent_message`.
+2. **OpenCode Support**: ✅ Full support via TypeScript plugin (v0.3.2)
+3. **Dashboard**: Web UI for memory management
+4. **Multi-User**: Currently single-user design
+5. **Encryption**: Data at rest is not encrypted
+6. **KG Service**: ✅ Knowledge Graphs shared with Roampal Desktop (v0.2.8)
 
 ---
 
@@ -725,3 +785,4 @@ dependencies = [
 - [roampal/server/main.py](roampal/server/main.py) - FastAPI server
 - [roampal/mcp/server.py](roampal/mcp/server.py) - MCP server
 - [roampal/hooks/session_manager.py](roampal/hooks/session_manager.py) - Exchange tracking
+- [roampal/plugins/opencode/roampal.ts](roampal/plugins/opencode/roampal.ts) - OpenCode plugin

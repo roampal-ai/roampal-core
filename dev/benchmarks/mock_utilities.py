@@ -33,6 +33,14 @@ class MockEmbeddingService:
 
         return embedding
 
+    async def embed_texts(self, texts: List[str]) -> List[List[float]]:
+        """Batch embed multiple texts."""
+        return [await self.embed_text(text) for text in texts]
+
+    async def prewarm(self):
+        """No-op prewarm for mock."""
+        pass
+
     def cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
         """Calculate cosine similarity between two vectors"""
         dot_product = sum(a * b for a, b in zip(vec1, vec2))

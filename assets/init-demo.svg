@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 520">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#0c0c0c"/>
+      <stop offset="100%" style="stop-color:#0c0c0c"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Terminal window -->
+  <rect width="720" height="520" rx="8" fill="url(#bg)"/>
+
+  <!-- Windows title bar -->
+  <rect width="720" height="32" rx="8" fill="#1f1f1f"/>
+  <rect y="8" width="720" height="24" fill="#1f1f1f"/>
+  <!-- Window title -->
+  <text x="16" y="21" font-family="'Segoe UI', Arial, sans-serif" font-size="12" fill="#cccccc">Windows PowerShell</text>
+  <!-- Window controls (minimize, maximize, close) -->
+  <text x="640" y="21" font-family="'Segoe UI', Arial, sans-serif" font-size="14" fill="#888888">&#x2500;</text>
+  <text x="665" y="21" font-family="'Segoe UI', Arial, sans-serif" font-size="14" fill="#888888">&#x25A1;</text>
+  <text x="693" y="21" font-family="'Segoe UI', Arial, sans-serif" font-size="14" fill="#888888">&#x2715;</text>
+
+  <!-- Command prompt -->
+  <text x="16" y="60" font-family="Consolas, 'Courier New', monospace" font-size="13">
+    <tspan fill="#cccccc">PS C:\&gt;</tspan>
+    <tspan fill="#f9f9f9"> roampal init</tspan>
+  </text>
+
+  <!-- Banner -->
+  <text x="16" y="88" font-family="Consolas, 'Courier New', monospace" font-size="12" fill="#5c90d2">+---------------------------------------------------+</text>
+  <text x="16" y="104" font-family="Consolas, 'Courier New', monospace" font-size="12" fill="#5c90d2">|                   ROAMPAL                         |</text>
+  <text x="16" y="120" font-family="Consolas, 'Courier New', monospace" font-size="12" fill="#5c90d2">|     Persistent Memory for AI Coding Tools         |</text>
+  <text x="16" y="136" font-family="Consolas, 'Courier New', monospace" font-size="12" fill="#5c90d2">+---------------------------------------------------+</text>
+
+  <!-- Initializing -->
+  <text x="16" y="164" font-family="Consolas, 'Courier New', monospace" font-size="12" font-weight="bold" fill="#cccccc">Initializing Roampal...</text>
+
+  <!-- Configuring -->
+  <text x="16" y="188" font-family="Consolas, 'Courier New', monospace" font-size="12" fill="#3cb371">Configuring: claude-code, opencode</text>
+
+  <!-- Claude Code -->
+  <text x="16" y="214" font-family="Consolas, 'Courier New', monospace" font-size="12" font-weight="bold" fill="#cccccc">Configuring Claude Code...</text>
+  <text x="24" y="232" font-family="Consolas, 'Courier New', monospace" font-size="11" fill="#3cb371">  Created settings: C:\Users\you\.claude\settings.json</text>
+  <text x="24" y="248" font-family="Consolas, 'Courier New', monospace" font-size="11" fill="#3cb371">    - UserPromptSubmit hook (injects scoring + memories)</text>
+  <text x="24" y="264" font-family="Consolas, 'Courier New', monospace" font-size="11" fill="#3cb371">    - Stop hook (enforces record_response)</text>
+  <text x="24" y="280" font-family="Consolas, 'Courier New', monospace" font-size="11" fill="#3cb371">    - Auto-allowed MCP permissions</text>
+  <text x="24" y="296" font-family="Consolas, 'Courier New', monospace" font-size="11" fill="#3cb371">  [OK] roampal-core MCP configured in ~/.claude.json</text>
+  <text x="24" y="312" font-family="Consolas, 'Courier New', monospace" font-size="11" fill="#3cb371">  Claude Code configured!</text>
+
+  <!-- OpenCode -->
+  <text x="16" y="338" font-family="Consolas, 'Courier New', monospace" font-size="12" font-weight="bold" fill="#cccccc">Configuring OpenCode...</text>
+  <text x="24" y="356" font-family="Consolas, 'Courier New', monospace" font-size="11" fill="#3cb371">  Created MCP config: C:\Users\you\.config\opencode\opencode.json</text>
+  <text x="24" y="372" font-family="Consolas, 'Courier New', monospace" font-size="11" fill="#3cb371">  [OK] roampal plugin installed</text>
+  <text x="24" y="388" font-family="Consolas, 'Courier New', monospace" font-size="11" fill="#3cb371">  OpenCode configured!</text>
+  <text x="24" y="404" font-family="Consolas, 'Courier New', monospace" font-size="11" fill="#e5c07b">  Note: Server auto-starts on first message</text>
+
+  <!-- Data dir -->
+  <text x="16" y="430" font-family="Consolas, 'Courier New', monospace" font-size="11" fill="#3cb371">Created data directory: C:\Users\you\AppData\Roaming\Roampal\data</text>
+
+  <!-- Success -->
+  <text x="16" y="460" font-family="Consolas, 'Courier New', monospace" font-size="13" font-weight="bold" fill="#3cb371">Roampal initialized successfully!</text>
+
+  <!-- Next step -->
+  <text x="16" y="488" font-family="Consolas, 'Courier New', monospace" font-size="12" fill="#cccccc">Restart your editor and start chatting!</text>
+
+  <!-- Prompt ready -->
+  <text x="16" y="512" font-family="Consolas, 'Courier New', monospace" font-size="13">
+    <tspan fill="#cccccc">PS C:\&gt;</tspan>
+    <tspan fill="#888888"> _</tspan>
+  </text>
+</svg>

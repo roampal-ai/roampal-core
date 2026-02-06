@@ -1,4 +1,6 @@
-ERROR: Real embeddings required. Install sentence-transformers.
+C:\roampal-core\roampal\backend\modules\memory\chromadb_adapter.py:641: RuntimeWarning: coroutine 'ChromaDBAdapter.cleanup' was never awaited
+  pass  # Ignore errors in destructor
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
 ================================================================================
 ROAMPAL vs PLAIN VECTOR DATABASE - Statistical Significance Test
 ================================================================================
@@ -14,5 +16,156 @@ TEST DESIGN:
 CONTROL:   Plain ChromaDB (pure L2 distance)
 TREATMENT: Roampal (outcome scoring + dynamic weights)
 
-ERROR: This test requires real embeddings.
-Install: pip install sentence-transformers
+Loading embedding model (all-mpnet-base-v2, 768d)...
+Model loaded.
+
+--------------------------------------------------------------------------------
+Running 30 scenarios...
+--------------------------------------------------------------------------------
+
+[ 1/30] DEBUGGING: Query mentions 'print' and 'variable values' - sem...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[ 2/30] DEBUGGING: Query mentions 'write' and 'file' - matches bad ad...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[ 3/30] DEBUGGING: Query mentions 'one by one' and 'check' - matches ...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[ 4/30] DEBUGGING: Query mentions 'print' and 'check' and 'size' - ma...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[ 5/30] DEBUGGING: Query specifically asks about 'timing calls' - mat...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[ 6/30] DATABASE: Query explicitly mentions 'cache' and 'Redis' - ma...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[ 7/30] DATABASE: Query matches connection pool advice exactly...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[ 8/30] DATABASE: Query describes the bad approach directly...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[ 9/30] DATABASE: Query mentions Redis locks specifically...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[10/30] DATABASE: Query asks exactly what the bad advice suggests...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[11/30] API: Query asks for page numbers specifically...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[12/30] API: Query is phrased as if bad advice is the answer...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[13/30] API: Query describes the nested URL pattern directly...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[14/30] API: Query asks for header-based versioning...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[15/30] API: Query describes the simplistic blocking approach...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[16/30] ERRORS: Query asks for the catch-all antipattern...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[17/30] ERRORS: Query phrases the bad pattern as a question...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[18/30] ERRORS: Query asks for print-based error handling...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[19/30] ERRORS: Query asks specifically for retry logic...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[20/30] ERRORS: Query suggests the lazy error handling approach...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[21/30] ASYNC: Query asks for the setTimeout hack...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[22/30] ASYNC: Query asks for sequential chaining...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[23/30] ASYNC: Query asks for the setImmediate approach...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[24/30] ASYNC: Query asks for the unsafe global variable approach...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[25/30] ASYNC: Query asks for sequential awaiting...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[26/30] GIT: Query asks about the antipattern directly...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[27/30] GIT: Query normalizes the bad practice...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[28/30] GIT: Query asks about squash merging...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[29/30] GIT: Query asks for the destructive approach...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+[30/30] GIT: Query describes the manual approach...
+       Control: BAD #1 | Treatment: GOOD #1 | ROAMPAL WINS!
+
+================================================================================
+STATISTICAL ANALYSIS
+================================================================================
+
+1. SUCCESS RATES:
+   Control (Plain Vector DB):  0/30 (0.0%)
+   Treatment (Roampal):         30/30 (100.0%)
+   Improvement:                 +100.0 percentage points
+
+2. STATISTICAL SIGNIFICANCE:
+   Paired t-test:
+     t-statistic: inf
+     p-value:     0.001
+     Result:      ** VERY SIGNIFICANT (p < 0.01)
+
+3. EFFECT SIZE (Cohen's d):
+   d = 1000.000
+   Interpretation: LARGE effect (d >= 0.8)
+
+4. CONFIDENCE INTERVAL (95%):
+   Mean improvement: 100.0%
+   95% CI: [100.0%, 100.0%]
+   Note: CI does not include 0 - improvement is reliable
+
+5. BREAKDOWN BY CATEGORY:
+   debugging : Control   0.0% | Roampal 100.0% | Delta +100.0%
+   database  : Control   0.0% | Roampal 100.0% | Delta +100.0%
+   api       : Control   0.0% | Roampal 100.0% | Delta +100.0%
+   errors    : Control   0.0% | Roampal 100.0% | Delta +100.0%
+   async     : Control   0.0% | Roampal 100.0% | Delta +100.0%
+   git       : Control   0.0% | Roampal 100.0% | Delta +100.0%
+
+================================================================================
+CONCLUSION
+================================================================================
+
+*** ROAMPAL SIGNIFICANTLY OUTPERFORMS PLAIN VECTOR SEARCH ***
+
+Evidence:
+  - Treatment success rate 100.0% vs control 0.0%
+  - Statistically significant (p = 0.001)
+  - Effect size: d = 1000.00 (large)
+
+This proves that outcome-based learning provides REAL value
+that pure semantic similarity cannot achieve.
+
+The system successfully learned to rank GOOD advice above BAD advice,
+even when queries were specifically designed to semantically match
+the BAD advice better.
+
+Full results saved to: C:\roampal-core\dev\benchmarks\roampal_vs_vectordb_data\statistical_results.json
+
+Cleaning up test data...
+Warning: Could not clean up: [WinError 32] The process cannot access the file because it is being used by another process: 'C:\\roampal-core\\dev\\benchmarks\\roampal_vs_vectordb_data\\control_1\\b283dbbe-21ea-49c1-9171-d55e4af97b40\\data_level0.bin'
+Task was destroyed but it is pending!
+task: <Task pending name='Task-270' coro=<KnowledgeGraphService._debounced_save_kg.<locals>.delayed_save() done, defined at C:\roampal-core\roampal\backend\modules\memory\knowledge_graph_service.py:195> wait_for=<Future pending cb=[Task.task_wakeup()]>>

@@ -3,18 +3,25 @@ Roampal CLI - One command install for AI coding tools
 
 Usage:
     pip install roampal
-    roampal init          # Configure Claude Code / Cursor
-    roampal doctor        # Diagnose installation issues
+    roampal init          # Configure Claude Code / Cursor / OpenCode
     roampal start         # Start the memory server
+    roampal stop          # Stop the memory server
     roampal status        # Check server status
+    roampal doctor        # Diagnose installation issues
 """
 
 import argparse
 import json
+import logging
 import os
+import platform
 import sys
+import shutil
 import subprocess
+import urllib.request
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # ANSI colors
 GREEN = "\033[92m"
@@ -27,6 +34,10 @@ BOLD = "\033[1m"
 # Port configuration - DEV and PROD use different ports to avoid collision
 PROD_PORT = 27182
 DEV_PORT = 27183
+
+# Email signup webhook (Google Apps Script → Google Sheet)
+# Deploy Apps Script and paste the web app URL here
+SIGNUP_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxnj6GN8mNtq_xn6vRLwMLSH6VL7397Vcx-9Me8pX_BP7Yt2oob6utsZ7pCke6rcfsY/exec"
 
 
 def is_dev_mode(args=None) -> bool:
@@ -70,6 +81,35 @@ def get_data_dir(dev: bool = False) -> Path:
             return Path.home() / "Library" / "Application Support" / "Roampal" / "data"
         else:  # Linux
             return Path.home() / ".local" / "share" / "roampal" / "data"
+
+
+def _build_hook_command(module: str, is_dev: bool) -> str:
+    """
+    Build hook command with proper ROAMPAL_DEV env var for any platform.
+
+    v0.3.2: Centralized hook command builder ensures all platforms handle
+    dev mode consistently. Previously Claude Code forgot to wrap commands
+    while Cursor did - this function is the single source of truth.
+
+    Args:
+        module: Hook module name (e.g., 'user_prompt_submit_hook', 'stop_hook')
+        is_dev: If True, wraps command to set ROAMPAL_DEV=1 env var
+
+    Returns:
+        Command string ready for hook config
+    """
+    python_exe = sys.executable
+    base = f'{python_exe} -m roampal.hooks.{module}'
+
+    if not is_dev:
+        return base
+
+    # Wrap command to set env var - hooks run as subprocesses that don't
+    # inherit MCP's env block, so we must set the var explicitly
+    if sys.platform == "win32":
+        return f'cmd /c "set ROAMPAL_DEV=1 && {base}"'
+    else:
+        return f'ROAMPAL_DEV=1 {base}'
 
 
 def print_banner():
@@ -122,6 +162,76 @@ def print_update_notice():
         print(f"    Run: pip install --upgrade roampal\n")
 
 
+def collect_email(detected_tools: list):
+    """Optionally collect user email for updates. Non-blocking, skippable.
+
+    Uses a version-stamped marker file so we:
+    - Ask on first install (no marker)
+    - Ask again after updates (marker version differs)
+    - Skip if re-running init on same version (marker matches)
+    """
+    if not SIGNUP_WEBHOOK_URL:
+        return  # Webhook not configured yet
+
+    # Check if we already asked for this version
+    from roampal import __version__
+    data_dir = get_data_dir()
+    marker = data_dir / ".email_asked"
+    if marker.exists():
+        try:
+            asked_version = marker.read_text().strip()
+            if asked_version == __version__:
+                return  # Already asked for this version
+        except Exception:
+            pass  # Corrupted marker, ask again
+
+    print(f"{BOLD}Stay in the loop?{RESET}")
+    print(f"  Get notified about updates and new features.")
+    print(f"  {YELLOW}(Optional - press Enter to skip){RESET}")
+
+    try:
+        email = input(f"\n  Email: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        _write_email_marker(marker, __version__)
+        return
+
+    if not email or "@" not in email:
+        if email:
+            print(f"  {YELLOW}Doesn't look like an email, skipping.{RESET}")
+        else:
+            print()  # Blank line after empty Enter
+        _write_email_marker(marker, __version__)
+        return
+
+    # Send to webhook (fire-and-forget, don't block on failure)
+    # Uses httpx because Google Apps Script redirects break urllib
+    try:
+        import httpx
+        payload = {
+            "email": email,
+            "platform": ", ".join(detected_tools),
+            "version": __version__,
+            "os": platform.system()
+        }
+        httpx.post(SIGNUP_WEBHOOK_URL, json=payload, follow_redirects=True, timeout=5.0)
+        print(f"  {GREEN}Thanks! We'll keep you posted.{RESET}\n")
+    except Exception:
+        # Silently fail - don't let signup issues block init
+        print(f"  {GREEN}Thanks! We'll keep you posted.{RESET}\n")
+
+    _write_email_marker(marker, __version__)
+
+
+def _write_email_marker(marker: Path, version: str):
+    """Write version to marker file so we don't re-ask on same version."""
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(version)
+    except Exception:
+        pass  # Non-critical
+
+
 def cmd_init(args):
     """Initialize Roampal for the current environment."""
     print_banner()
@@ -133,11 +243,19 @@ def cmd_init(args):
     claude_code_dir = home / ".claude"
     cursor_dir = home / ".cursor"
 
-    # Check for explicit flags (--claude-code, --cursor)
+    # OpenCode config location (XDG Base Directory spec)
+    if sys.platform == "win32":
+        opencode_dir = home / ".config" / "opencode"
+    else:
+        xdg_config = os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))
+        opencode_dir = Path(xdg_config) / "opencode"
+
+    # Check for explicit flags (--claude-code, --cursor, --opencode)
     explicit_claude = getattr(args, 'claude_code', False)
     explicit_cursor = getattr(args, 'cursor', False)
+    explicit_opencode = getattr(args, 'opencode', False)
 
-    if explicit_claude or explicit_cursor:
+    if explicit_claude or explicit_cursor or explicit_opencode:
         # User specified explicit tools - use those
         detected = []
         if explicit_claude:
@@ -155,6 +273,13 @@ def cmd_init(args):
                 cursor_dir.mkdir(parents=True, exist_ok=True)
                 detected.append("cursor")
                 print(f"{YELLOW}Created ~/.cursor directory{RESET}")
+        if explicit_opencode:
+            if opencode_dir.exists():
+                detected.append("opencode")
+            else:
+                opencode_dir.mkdir(parents=True, exist_ok=True)
+                detected.append("opencode")
+                print(f"{YELLOW}Created {opencode_dir} directory{RESET}")
     else:
         # Auto-detect installed tools
         detected = []
@@ -162,13 +287,16 @@ def cmd_init(args):
             detected.append("claude-code")
         if cursor_dir.exists():
             detected.append("cursor")
+        if opencode_dir.exists():
+            detected.append("opencode")
 
     if not detected:
         print(f"{YELLOW}No AI coding tools detected.{RESET}")
         print("Roampal works with:")
         print("  - Claude Code (https://claude.com/claude-code)")
         print("  - Cursor (https://cursor.sh)")
-        print("\nInstall one of these tools first, or use --claude-code / --cursor to force setup.")
+        print("  - OpenCode (https://opencode.ai)")
+        print("\nInstall one of these tools first, or use --claude-code / --cursor / --opencode to force setup.")
         return
 
     print(f"{GREEN}Configuring: {', '.join(detected)}{RESET}\n")
@@ -181,18 +309,30 @@ def cmd_init(args):
             configure_claude_code(claude_code_dir, is_dev=is_dev, force=force)
         elif tool == "cursor":
             configure_cursor(cursor_dir, is_dev=is_dev, force=force)
+        elif tool == "opencode":
+            configure_opencode(is_dev=is_dev, force=force)
 
     # Create data directory
     data_dir = get_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
     print(f"{GREEN}Created data directory: {data_dir}{RESET}")
 
-    print(f"""
-{GREEN}{BOLD}Roampal initialized successfully!{RESET}
+    # Build next steps based on configured tools
+    next_steps = []
+    if "claude-code" in detected:
+        next_steps.append(f"  {BLUE}Restart Claude Code{RESET} and start chatting!")
+    if "cursor" in detected:
+        next_steps.append(f"  {BLUE}Restart Cursor{RESET} and start chatting!")
+    if "opencode" in detected:
+        next_steps.append(f"  Run {BLUE}opencode{RESET} and start chatting! (server auto-starts on first message)")
 
-{BOLD}Next step:{RESET}
-  {BLUE}Restart Claude Code{RESET} and start chatting!
-  The MCP server auto-starts - no manual server needed.
+    print(f"\n{GREEN}{BOLD}Roampal initialized successfully!{RESET}\n")
+
+    # Offer email signup (optional, non-blocking)
+    collect_email(detected)
+
+    print(f"""{BOLD}Next steps:{RESET}
+{chr(10).join(next_steps)}
 
 {BOLD}How it works:{RESET}
   - Hooks inject relevant memories into your context automatically
@@ -203,6 +343,10 @@ def cmd_init(args):
   - {BLUE}roampal ingest myfile.pdf{RESET} - Add documents to memory
   - {BLUE}roampal stats{RESET} - Show memory statistics
   - {BLUE}roampal status{RESET} - Check server status
+
+{BOLD}Feedback & Support:{RESET}
+  - Discord: https://discord.com/invite/F87za86R3v
+  - Issues:  https://github.com/roampal-ai/roampal-core/issues
 """)
 
 
@@ -250,14 +394,18 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
         settings["env"] = {"ROAMPAL_DEV": "1"}  # Add for --dev
 
     # Configure hooks - Claude Code expects nested format with type/command
-    python_exe = sys.executable.replace("\\", "\\\\")  # Escape backslashes for JSON
+    # v0.3.2: Use _build_hook_command() to ensure ROAMPAL_DEV is passed to hooks
+    # Previously hooks didn't get the env var, causing split-brain between MCP (dev) and hooks (prod)
+    submit_cmd = _build_hook_command("user_prompt_submit_hook", is_dev)
+    stop_cmd = _build_hook_command("stop_hook", is_dev)
+
     settings["hooks"] = {
         "UserPromptSubmit": [
             {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": f"{python_exe} -m roampal.hooks.user_prompt_submit_hook"
+                        "command": submit_cmd
                     }
                 ]
             }
@@ -267,7 +415,7 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
                 "hooks": [
                     {
                         "type": "command",
-                        "command": f"{python_exe} -m roampal.hooks.stop_hook"
+                        "command": stop_cmd
                     }
                 ]
             }
@@ -510,20 +658,10 @@ def configure_cursor(cursor_dir: Path, is_dev: bool = False, force: bool = False
 
     # Cursor 1.7+ supports hooks - create ~/.cursor/hooks.json
     hooks_config_path = cursor_dir / "hooks.json"
-    python_exe = sys.executable
 
-    # Build hook commands - need to set ROAMPAL_DEV env var if in dev mode
-    if is_dev:
-        # On Windows, use cmd /c to set env var before running
-        if sys.platform == "win32":
-            submit_cmd = f'cmd /c "set ROAMPAL_DEV=1 && {python_exe} -m roampal.hooks.user_prompt_submit_hook"'
-            stop_cmd = f'cmd /c "set ROAMPAL_DEV=1 && {python_exe} -m roampal.hooks.stop_hook"'
-        else:
-            submit_cmd = f'ROAMPAL_DEV=1 {python_exe} -m roampal.hooks.user_prompt_submit_hook'
-            stop_cmd = f'ROAMPAL_DEV=1 {python_exe} -m roampal.hooks.stop_hook'
-    else:
-        submit_cmd = f'{python_exe} -m roampal.hooks.user_prompt_submit_hook'
-        stop_cmd = f'{python_exe} -m roampal.hooks.stop_hook'
+    # v0.3.2: Use centralized _build_hook_command() for consistency
+    submit_cmd = _build_hook_command("user_prompt_submit_hook", is_dev)
+    stop_cmd = _build_hook_command("stop_hook", is_dev)
 
     expected_hooks = {
         "beforeSubmitPrompt": [{"command": submit_cmd}],
@@ -588,6 +726,125 @@ def configure_cursor(cursor_dir: Path, is_dev: bool = False, force: bool = False
     print(f"  {GREEN}Cursor configured!{RESET}\n")
 
 
+def configure_opencode(is_dev: bool = False, force: bool = False):
+    """Configure OpenCode MCP and plugin.
+
+    Args:
+        is_dev: If True, adds ROAMPAL_DEV=1 to env section
+        force: If True, overwrite existing config even if different
+    """
+    print(f"{BOLD}Configuring OpenCode...{RESET}")
+
+    # OpenCode config locations (XDG Base Directory spec)
+    if sys.platform == "win32":
+        config_dir = Path.home() / ".config" / "opencode"
+    else:
+        xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+        config_dir = Path(xdg_config) / "opencode"
+
+    config_file = config_dir / "opencode.json"
+    plugin_dir = config_dir / "plugins"
+
+    # Create directories if they don't exist
+    config_dir.mkdir(parents=True, exist_ok=True)
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+
+    # =========================================================================
+    # 1. Configure MCP server in opencode.json
+    # =========================================================================
+    # Both Claude Code and OpenCode share the same server (27182/27183)
+    # ChromaDB doesn't support concurrent access, so no port isolation
+    # Conversation IDs provide session isolation instead
+    # Ensure PYTHONPATH includes roampal's parent dir so the module is found
+    # regardless of OpenCode's cwd (which may differ from the install location)
+    roampal_root = str(Path(__file__).parent.parent.resolve())
+    expected_env = {"PYTHONPATH": roampal_root}
+    if is_dev:
+        expected_env["ROAMPAL_DEV"] = "1"
+    roampal_mcp_config = {
+        "type": "local",
+        "command": [sys.executable, "-m", "roampal.mcp.server"],
+        "enabled": True,
+    }
+    if expected_env:
+        roampal_mcp_config["environment"] = expected_env
+
+    # Load existing config or create new
+    config = {}
+    mcp_needs_write = True
+
+    if config_file.exists():
+        try:
+            config = json.loads(config_file.read_text())
+            existing_mcp = config.get("mcp", {}).get("roampal-core", {})
+
+            if existing_mcp:
+                # Check if config matches
+                existing_cmd = existing_mcp.get("command", [])
+                existing_env = existing_mcp.get("environment", {})
+
+                if (existing_cmd == roampal_mcp_config["command"] and
+                    existing_env == expected_env):
+                    print(f"  {GREEN}[OK] roampal-core MCP already configured correctly{RESET}")
+                    mcp_needs_write = False
+                elif not force:
+                    print(f"  {YELLOW}roampal-core MCP config differs:{RESET}")
+                    print(f"    Current: command={existing_cmd}")
+                    print(f"    New:     command={roampal_mcp_config['command']}")
+                    print(f"  {YELLOW}Use --force to overwrite{RESET}")
+                    mcp_needs_write = False
+        except Exception as e:
+            logger.warning(f"Failed to parse existing opencode.json: {e}")
+
+    if mcp_needs_write:
+        if "mcp" not in config:
+            config["mcp"] = {}
+        config["mcp"]["roampal-core"] = roampal_mcp_config
+        config_file.write_text(json.dumps(config, indent=2))
+        print(f"  {GREEN}Created MCP config: {config_file}{RESET}")
+
+    # =========================================================================
+    # 2. Install TypeScript plugin
+    # =========================================================================
+    plugin_file = plugin_dir / "roampal.ts"
+    plugin_source = Path(__file__).parent / "plugins" / "opencode" / "roampal.ts"
+
+    plugin_needs_write = True
+
+    if plugin_file.exists():
+        # Check if plugin content matches
+        try:
+            existing_content = plugin_file.read_text()
+            source_content = plugin_source.read_text() if plugin_source.exists() else ""
+
+            if existing_content == source_content:
+                print(f"  {GREEN}[OK] roampal plugin already installed{RESET}")
+                plugin_needs_write = False
+            elif not force:
+                print(f"  {YELLOW}roampal plugin differs from source{RESET}")
+                print(f"  {YELLOW}Use --force to overwrite{RESET}")
+                plugin_needs_write = False
+        except Exception as e:
+            logger.warning(f"Failed to compare plugin files: {e}")
+
+    if plugin_needs_write:
+        if plugin_source.exists():
+            shutil.copy(plugin_source, plugin_file)
+            print(f"  {GREEN}Installed plugin: {plugin_file}{RESET}")
+        else:
+            print(f"  {RED}Plugin source not found: {plugin_source}{RESET}")
+            print(f"  {YELLOW}You may need to reinstall roampal{RESET}")
+
+    # =========================================================================
+    # 3. Remind user about shared server
+    # =========================================================================
+    shared_port = 27183 if is_dev else 27182
+    print(f"  {GREEN}OpenCode configured!{RESET}")
+    print(f"  {GREEN}  Server port: {shared_port}{RESET}")
+    print(f"  {YELLOW}Note: Server auto-starts on first message. To stop: roampal stop{RESET}")
+    print()
+
+
 def cmd_start(args):
     """Start the Roampal server."""
     print_banner()
@@ -623,6 +880,59 @@ def cmd_start(args):
     # Import and start server
     from roampal.server.main import start_server
     start_server(host=host, port=port)
+
+
+def cmd_stop(args):
+    """Stop the Roampal server."""
+    print_banner()
+
+    is_dev = is_dev_mode(args)
+    default_port = DEV_PORT if is_dev else PROD_PORT
+    port = args.port if args.port else default_port
+
+    print(f"{BOLD}Stopping Roampal server on port {port}...{RESET}\n")
+
+    killed = False
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.split("\n"):
+                if f"127.0.0.1:{port}" in line and "LISTENING" in line:
+                    pid = line.strip().split()[-1]
+                    if pid:
+                        subprocess.run(
+                            ["taskkill", "/pid", pid, "/f"],
+                            capture_output=True, timeout=5
+                        )
+                        print(f"  {GREEN}Killed server process (PID {pid}){RESET}")
+                        killed = True
+                    break
+        except Exception as e:
+            print(f"  {RED}Error finding server process: {e}{RESET}")
+    else:
+        try:
+            result = subprocess.run(
+                ["lsof", "-ti", f":{port}"],
+                capture_output=True, text=True, timeout=5
+            )
+            pid = result.stdout.strip().split("\n")[0] if result.stdout.strip() else ""
+            if pid:
+                subprocess.run(
+                    ["kill", "-9", pid],
+                    capture_output=True, timeout=5
+                )
+                print(f"  {GREEN}Killed server process (PID {pid}){RESET}")
+                killed = True
+        except Exception as e:
+            print(f"  {RED}Error finding server process: {e}{RESET}")
+
+    if not killed:
+        print(f"  {YELLOW}No server found on port {port}{RESET}")
+    else:
+        print(f"\n{GREEN}Server stopped.{RESET}")
 
 
 def cmd_status(args):
@@ -1191,10 +1501,11 @@ def main():
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # init command
-    init_parser = subparsers.add_parser("init", help="Initialize Roampal for Claude Code / Cursor")
+    init_parser = subparsers.add_parser("init", help="Initialize Roampal for Claude Code / Cursor / OpenCode")
     init_parser.add_argument("--dev", action="store_true", help="Initialize for DEV mode (separate data directory)")
     init_parser.add_argument("--claude-code", action="store_true", help="Configure Claude Code only (skip auto-detect)")
     init_parser.add_argument("--cursor", action="store_true", help="Configure Cursor only (skip auto-detect)")
+    init_parser.add_argument("--opencode", action="store_true", help="Configure OpenCode only (skip auto-detect)")
     init_parser.add_argument("--force", "-f", action="store_true", help="Force overwrite existing config")
 
     # start command
@@ -1202,6 +1513,11 @@ def main():
     start_parser.add_argument("--host", default="127.0.0.1", help="Server host")
     start_parser.add_argument("--port", type=int, default=27182, help="Server port")
     start_parser.add_argument("--dev", action="store_true", help="Dev mode - use separate data directory")
+
+    # stop command
+    stop_parser = subparsers.add_parser("stop", help="Stop the memory server")
+    stop_parser.add_argument("--port", type=int, default=None, help="Server port (default: 27182 prod, 27183 dev)")
+    stop_parser.add_argument("--dev", action="store_true", help="Stop dev server")
 
     # status command
     status_parser = subparsers.add_parser("status", help="Check server status")
@@ -1241,6 +1557,8 @@ def main():
         cmd_init(args)
     elif args.command == "start":
         cmd_start(args)
+    elif args.command == "stop":
+        cmd_stop(args)
     elif args.command == "status":
         cmd_status(args)
     elif args.command == "stats":

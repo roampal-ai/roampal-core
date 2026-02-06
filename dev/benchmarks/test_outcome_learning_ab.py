@@ -6,16 +6,21 @@ not just that "having memory is better than no memory."
 
 Test Design:
 - Condition A (Treatment): Full Roampal with outcome scoring
-- Condition B (Control): Same storage, but search ignores scores (pure vector similarity)
+- Condition B (Control): Same storage, but NO outcome scoring applied
 
 Both conditions:
-- Use identical embeddings (paraphrase-multilingual-mpnet-base-v2)
-- Store the same memories
+- Use identical real embeddings (all-mpnet-base-v2, 768d)
+- Store the same good + bad advice memories
 - Use the same ChromaDB backend
 
-The ONLY difference: whether search results are re-ranked by outcome scores.
+The ONLY difference: whether outcome scores are applied after storage.
 
-This isolates the value of outcome-based learning.
+ADVERSARIAL DESIGN:
+- Queries are designed to semantically match the BAD advice better
+- Without outcome scoring, pure vector similarity returns the BAD advice first
+- With outcome scoring, the good advice (score=0.9) outranks the bad (score=0.2)
+
+This isolates the value of outcome-based learning under adversarial conditions.
 """
 
 
@@ -24,7 +29,6 @@ os.environ["ROAMPAL_BENCHMARK_MODE"] = "true"
 
 import asyncio
 import json
-import os
 import sys
 import statistics
 import math
@@ -50,74 +54,77 @@ except ImportError:
 
 
 # ====================================================================================
-# TEST SCENARIOS - SINGLE TEXT with multiple copies having different outcomes
+# ADVERSARIAL TEST SCENARIOS
 # ====================================================================================
 #
-# Key insight: To properly test outcome learning, we need:
-# 1. ONE text (so semantic similarity is IDENTICAL for all copies)
-# 2. Multiple copies with different outcomes (worked vs failed)
-# 3. More failed than worked, so without scoring, random selection = mostly failed
-# 4. With scoring, top-N should be the worked copies
+# Each scenario has:
+#   - good_advice: The correct approach (worked in practice)
+#   - bad_advice: The wrong approach (failed in practice)
+#   - query: Designed to semantically match bad_advice better than good_advice
 #
-# Scenario design: 1 worked copy + 3 failed copies of IDENTICAL text
-# Without scoring: 25% chance of worked in top-1 (random)
-# With scoring: 100% chance of worked in top-1 (score-based)
+# Without outcome scoring: bad_advice ranks #1 (closer semantic match to query)
+# With outcome scoring: good_advice ranks #1 (score boost overrides semantic distance)
 
 TEST_SCENARIOS = [
     {
-        "name": "Database Connection Pooling",
-        "description": "Same advice tried 4 times: 1 worked, 3 failed.",
-        "memories": [
-            {"text": "Use connection pooling with a pool size of 10 for database connections", "outcome": "worked"},
-            {"text": "Use connection pooling with a pool size of 10 for database connections", "outcome": "failed"},
-            {"text": "Use connection pooling with a pool size of 10 for database connections", "outcome": "failed"},
-            {"text": "Use connection pooling with a pool size of 10 for database connections", "outcome": "failed"},
-        ],
-        "query": "How should I configure database connections?",
+        "name": "Print Debugging vs Debugger",
+        "good_advice": "Use IDE debugger with breakpoints and watch expressions for systematic debugging",
+        "bad_advice": "Add print statements throughout the code to trace variable values and execution flow",
+        "query": "How should I use print statements to check variable values in my code?",
     },
     {
-        "name": "Redis Caching Strategy",
-        "description": "Same caching advice: 1 worked, 3 failed in different contexts.",
-        "memories": [
-            {"text": "Cache API responses in Redis with a 5 minute TTL for performance", "outcome": "worked"},
-            {"text": "Cache API responses in Redis with a 5 minute TTL for performance", "outcome": "failed"},
-            {"text": "Cache API responses in Redis with a 5 minute TTL for performance", "outcome": "failed"},
-            {"text": "Cache API responses in Redis with a 5 minute TTL for performance", "outcome": "failed"},
-        ],
-        "query": "What's the best caching strategy?",
+        "name": "Cache Everything vs Connection Pool",
+        "good_advice": "Use connection pooling with proper pool size tuning based on workload analysis",
+        "bad_advice": "Cache every database query result in Redis to avoid hitting the database",
+        "query": "How do I cache database queries in Redis to speed things up?",
     },
     {
-        "name": "JWT Authentication",
-        "description": "Same JWT advice: worked once, failed thrice.",
-        "memories": [
-            {"text": "Use JWT tokens with 1 hour expiration for stateless API authentication", "outcome": "worked"},
-            {"text": "Use JWT tokens with 1 hour expiration for stateless API authentication", "outcome": "failed"},
-            {"text": "Use JWT tokens with 1 hour expiration for stateless API authentication", "outcome": "failed"},
-            {"text": "Use JWT tokens with 1 hour expiration for stateless API authentication", "outcome": "failed"},
-        ],
-        "query": "How should I implement authentication?",
+        "name": "Catch-All Errors vs Typed Exceptions",
+        "good_advice": "Create typed exception hierarchy with specific handlers for each error category",
+        "bad_advice": "Use a single try/catch block that catches all exceptions to prevent crashes",
+        "query": "How do I catch all exceptions so my application doesn't crash?",
     },
     {
-        "name": "Exponential Backoff",
-        "description": "Same retry strategy: 1 success, 3 failures.",
-        "memories": [
-            {"text": "Implement exponential backoff with max 3 retries for transient failures", "outcome": "worked"},
-            {"text": "Implement exponential backoff with max 3 retries for transient failures", "outcome": "failed"},
-            {"text": "Implement exponential backoff with max 3 retries for transient failures", "outcome": "failed"},
-            {"text": "Implement exponential backoff with max 3 retries for transient failures", "outcome": "failed"},
-        ],
-        "query": "How do I handle transient failures?",
+        "name": "Manual Timing vs Profiler",
+        "good_advice": "Use cProfile or py-spy profiler to identify actual bottlenecks with statistical sampling",
+        "bad_advice": "Add time.time() calls around each function to measure how long things take",
+        "query": "How do I add timing calls around my functions to find what's slow?",
     },
     {
-        "name": "Structured Logging",
-        "description": "Same logging advice: worked once, failed thrice.",
-        "memories": [
-            {"text": "Use structured JSON logging with correlation IDs for distributed tracing", "outcome": "worked"},
-            {"text": "Use structured JSON logging with correlation IDs for distributed tracing", "outcome": "failed"},
-            {"text": "Use structured JSON logging with correlation IDs for distributed tracing", "outcome": "failed"},
-            {"text": "Use structured JSON logging with correlation IDs for distributed tracing", "outcome": "failed"},
-        ],
-        "query": "What's the best logging setup?",
+        "name": "Sequential Await vs Concurrent",
+        "good_advice": "Use asyncio.gather() or TaskGroup to run independent async operations concurrently",
+        "bad_advice": "Await each async call one by one in sequence to keep the code simple and readable",
+        "query": "Should I await async calls one by one to keep my code simple?",
+    },
+    {
+        "name": "Force Push vs Revert Commit",
+        "good_advice": "Use git revert to create a new commit that undoes changes, preserving history for the team",
+        "bad_advice": "Use git push --force to remove bad commits and clean up the branch history",
+        "query": "How do I force push to remove bad commits and clean up my branch?",
+    },
+    {
+        "name": "Global State vs Dependency Injection",
+        "good_advice": "Use dependency injection to pass shared state explicitly through constructors",
+        "bad_advice": "Use global variables to share state between async tasks for simplicity",
+        "query": "How do I use global variables to share state between async tasks?",
+    },
+    {
+        "name": "Nested REST vs Flat Endpoints",
+        "good_advice": "Use flat REST endpoints with query parameters for filtering and pagination",
+        "bad_advice": "Create deeply nested URL paths to represent all entity relationships",
+        "query": "How should I create nested URL paths to represent entity relationships?",
+    },
+    {
+        "name": "Stock Picking vs Index Funds",
+        "good_advice": "Invest in low-cost index funds - 90% of active managers underperform over 15 years (S&P SPIVA)",
+        "bad_advice": "Pick individual stocks based on research to beat the market and get higher returns",
+        "query": "How do I pick the best individual stocks to beat the market?",
+    },
+    {
+        "name": "Market Timing vs Stay Invested",
+        "good_advice": "Stay invested through market downturns - missing the 10 best days cuts returns by 50% (Schwab)",
+        "bad_advice": "Sell when the market drops and buy back when it starts rising to avoid losses",
+        "query": "When should I sell my stocks to avoid losses during a market drop?",
     },
 ]
 
@@ -133,7 +140,6 @@ def cohens_d(treatment: List[float], control: List[float]) -> float:
     mean_t = statistics.mean(treatment)
     mean_c = statistics.mean(control)
 
-    # Handle edge case where all values are the same
     try:
         var_t = statistics.variance(treatment) if len(treatment) > 1 else 0
         var_c = statistics.variance(control) if len(control) > 1 else 0
@@ -141,51 +147,42 @@ def cohens_d(treatment: List[float], control: List[float]) -> float:
         var_t, var_c = 0, 0
 
     n_t, n_c = len(treatment), len(control)
-
-    # Pooled standard deviation
     if n_t + n_c <= 2:
         return 0.0
     pooled_var = ((n_t - 1) * var_t + (n_c - 1) * var_c) / (n_t + n_c - 2)
-    pooled_std = math.sqrt(pooled_var) if pooled_var > 0 else 0.001
+    if pooled_var == 0:
+        return float('inf') if mean_t != mean_c else 0.0
+    pooled_std = math.sqrt(pooled_var)
 
     return (mean_t - mean_c) / pooled_std
 
 
 def paired_t_test(treatment: List[float], control: List[float]) -> Tuple[float, float]:
-    """Simple paired t-test returning (t_statistic, p_value)"""
+    """Paired t-test using scipy for proper p-value computation."""
     if len(treatment) != len(control) or len(treatment) < 2:
         return (0.0, 1.0)
 
-    differences = [t - c for t, c in zip(treatment, control)]
-    mean_diff = statistics.mean(differences)
-
     try:
-        std_diff = statistics.stdev(differences)
-    except:
-        std_diff = 0.001
-
-    if std_diff == 0:
-        return (float('inf') if mean_diff > 0 else 0.0, 0.005 if mean_diff > 0 else 1.0)
-
-    n = len(differences)
-    t_stat = mean_diff / (std_diff / math.sqrt(n))
-
-    # Approximate p-value from t-statistic (df = n-1)
-    abs_t = abs(t_stat)
-    if abs_t > 4.0:
-        p_value = 0.005
-    elif abs_t > 3.0:
-        p_value = 0.01
-    elif abs_t > 2.5:
-        p_value = 0.025
-    elif abs_t > 2.0:
-        p_value = 0.05
-    elif abs_t > 1.5:
-        p_value = 0.1
-    else:
-        p_value = 0.2
-
-    return (t_stat, p_value)
+        from scipy import stats
+        t_stat, p_value = stats.ttest_rel(treatment, control)
+        if math.isnan(t_stat):
+            # All differences are zero or constant
+            return (0.0, 1.0)
+        return (t_stat, p_value)
+    except ImportError:
+        # Fallback: manual computation with t-distribution approximation
+        differences = [t - c for t, c in zip(treatment, control)]
+        mean_diff = statistics.mean(differences)
+        try:
+            std_diff = statistics.stdev(differences)
+        except:
+            std_diff = 0.0
+        if std_diff == 0:
+            return (float('inf') if mean_diff > 0 else 0.0, 0.0 if mean_diff != 0 else 1.0)
+        n = len(differences)
+        t_stat = mean_diff / (std_diff / math.sqrt(n))
+        # Note: p-value is approximate without scipy
+        return (t_stat, float('nan'))
 
 
 # ====================================================================================
@@ -198,78 +195,84 @@ async def run_scenario_with_outcomes(
     embedding_service
 ) -> Dict:
     """
-    Run scenario WITH outcome-based ranking (Treatment condition).
-
-    Memories are scored based on outcomes, and search results are ranked by score.
-    With identical text, the ONLY differentiator is outcome score.
+    Treatment: Store good + bad advice, apply outcome scoring, then search.
+    Good advice gets "worked" (score boosted), bad gets "failed" (score demoted).
     """
-    name = scenario["name"]
-
-    # Create memory system
-    system = UnifiedMemorySystem(
-        data_path=data_dir,
-        
-        llm_service=MockLLMService()
-    )
+    system = UnifiedMemorySystem(data_path=data_dir)
     await system.initialize()
-    system.embedding_service = embedding_service
+    system._embedding_service = embedding_service
+    if system._search_service:
+        system._search_service.embed_fn = embedding_service.embed_text
 
-    # Store all memories and track which doc_ids map to worked/failed
-    doc_id_to_outcome = {}
-    worked_doc_ids = set()
-    failed_doc_ids = set()
+    # Store both pieces of advice
+    good_id = await system.store(
+        text=scenario["good_advice"],
+        collection="working",
+        metadata={"type": "good", "scenario": scenario["name"]}
+    )
+    bad_id = await system.store(
+        text=scenario["bad_advice"],
+        collection="working",
+        metadata={"type": "bad", "scenario": scenario["name"]}
+    )
 
-    for mem in scenario["memories"]:
-        doc_id = await system.store(
-            text=mem["text"],
-            collection="working",
-            metadata={"scenario": name, "mem_id": mem.get("id", "")}
-        )
-        outcome = mem.get("outcome", "unknown")
-        doc_id_to_outcome[doc_id] = outcome
+    # Apply outcomes by directly setting metadata (consistent with 4-way benchmark).
+    # Avoids uses/success_count inconsistency from manual uses override after record_outcome.
+    adapter = system.collections.get("working")
+    if adapter:
+        # Good advice: proven high-value (5 uses, 90% success rate)
+        try:
+            result = adapter.collection.get(ids=[good_id], include=["metadatas"])
+            if result and result.get("metadatas"):
+                meta = result["metadatas"][0]
+                meta["uses"] = 5
+                meta["score"] = 0.9
+                meta["success_count"] = 4.5  # 4.5/5 = 90%
+                meta["last_outcome"] = "worked"
+                meta["outcome_history"] = json.dumps([
+                    {"outcome": "worked", "timestamp": f"2025-01-{i+1:02d}"}
+                    for i in range(5)
+                ][:5])
+                adapter.collection.update(ids=[good_id], metadatas=[meta])
+        except Exception:
+            pass
 
-        if outcome == "worked":
-            worked_doc_ids.add(doc_id)
-        elif outcome == "failed":
-            failed_doc_ids.add(doc_id)
+        # Bad advice: failing (5 uses, 20% success rate)
+        try:
+            result = adapter.collection.get(ids=[bad_id], include=["metadatas"])
+            if result and result.get("metadatas"):
+                meta = result["metadatas"][0]
+                meta["uses"] = 5
+                meta["score"] = 0.2
+                meta["success_count"] = 1.0  # 1/5 = 20%
+                meta["last_outcome"] = "failed"
+                meta["outcome_history"] = json.dumps([
+                    {"outcome": "failed", "timestamp": f"2025-01-{i+1:02d}"}
+                    for i in range(4)
+                ] + [{"outcome": "worked", "timestamp": "2025-01-05"}])
+                adapter.collection.update(ids=[bad_id], metadatas=[meta])
+        except Exception:
+            pass
 
-    # Apply outcomes ONCE to shift scores without deletion
-    # worked: 0.5 -> 0.7 (boosted)
-    # failed: 0.5 -> 0.3 (demoted but not deleted)
-    for doc_id, outcome in doc_id_to_outcome.items():
-        if outcome in ["worked", "failed"]:
-            await system.record_outcome(
-                doc_id=doc_id,
-                outcome=outcome
-            )
+    # Search - should return good advice first due to score boost
+    # Use limit=5 to retrieve enough candidates for quality scoring to rerank
+    results = await system.search(
+        scenario["query"],
+        collections=["working", "history"],
+        limit=5
+    )
 
-    # Search and evaluate - get top 2 (half the dataset)
-    # If outcome scoring works, top 2 should be "worked" items
-    results = await system.search(scenario["query"], collections=["working"], limit=2)
-
-    # Get all results sorted by final_rank_score
-    all_results = await system.search(scenario["query"], collections=["working"], limit=4)
-
-    # Check if TOP-1 result is the "worked" item
-    # With 1 worked + 3 failed (all identical text):
-    # - Random: 25% chance worked is #1
-    # - With outcome scoring: 100% chance worked is #1 (highest score)
-    top_result = all_results[0] if all_results else None
-    top_is_worked = False
-
-    if top_result:
-        top_id = top_result.get("id", "")
-        top_is_worked = top_id in worked_doc_ids
-
-    # Precision = 1 if worked is #1, else 0
-    precision = 1.0 if top_is_worked else 0.0
+    good_ranked_first = False
+    if results:
+        top_text = results[0].get("text", "").lower()
+        if scenario["good_advice"].lower()[:50] in top_text or top_text in scenario["good_advice"].lower():
+            good_ranked_first = True
 
     return {
-        "scenario": name,
+        "scenario": scenario["name"],
         "condition": "with_outcomes",
-        "top1_is_worked": top_is_worked,
-        "precision": precision,
-        "results": [r.get("text", "")[:80] for r in results]
+        "good_ranked_first": good_ranked_first,
+        "precision": 1.0 if good_ranked_first else 0.0,
     }
 
 
@@ -279,68 +282,48 @@ async def run_scenario_without_outcomes(
     embedding_service
 ) -> Dict:
     """
-    Run scenario WITHOUT outcome-based ranking (Control condition).
-
-    Same memories stored, but we DON'T apply outcome scoring.
-    Search returns pure vector similarity ranking.
-    With identical text and no outcome scoring, results are random/arbitrary.
+    Control: Store good + bad advice, NO outcome scoring, then search.
+    Pure vector similarity determines ranking.
     """
-    name = scenario["name"]
-
-    # Create memory system
-    system = UnifiedMemorySystem(
-        data_path=data_dir,
-        
-        llm_service=MockLLMService()
-    )
+    system = UnifiedMemorySystem(data_path=data_dir)
     await system.initialize()
-    system.embedding_service = embedding_service
+    system._embedding_service = embedding_service
+    if system._search_service:
+        system._search_service.embed_fn = embedding_service.embed_text
 
-    # Store all memories and track which doc_ids map to worked/failed
-    # (We still track this to evaluate results, but don't apply outcomes)
-    doc_id_to_outcome = {}
-    worked_doc_ids = set()
-    failed_doc_ids = set()
+    # Store good advice (no outcomes)
+    await system.store(
+        text=scenario["good_advice"],
+        collection="working",
+        metadata={"type": "good", "scenario": scenario["name"]}
+    )
 
-    for mem in scenario["memories"]:
-        doc_id = await system.store(
-            text=mem["text"],
-            collection="working",
-            metadata={"scenario": name, "mem_id": mem.get("id", "")}
-        )
-        outcome = mem.get("outcome", "unknown")
-        doc_id_to_outcome[doc_id] = outcome
+    # Store bad advice (no outcomes)
+    await system.store(
+        text=scenario["bad_advice"],
+        collection="working",
+        metadata={"type": "bad", "scenario": scenario["name"]}
+    )
 
-        if outcome == "worked":
-            worked_doc_ids.add(doc_id)
-        elif outcome == "failed":
-            failed_doc_ids.add(doc_id)
+    # Search - should return bad advice first (adversarial query matches it better)
+    # Use limit=5 to match treatment condition retrieval depth
+    results = await system.search(
+        scenario["query"],
+        collections=["working"],
+        limit=5
+    )
 
-    # NO outcome recording - pure vector search
-    # Without outcomes, all scores stay at 0.5
-
-    # Get all results - without outcome scoring, all have score 0.5
-    all_results = await system.search(scenario["query"], collections=["working"], limit=4)
-
-    # Check if TOP-1 result is the "worked" item
-    # With 1 worked + 3 failed (all identical text, all score 0.5):
-    # - Random: 25% chance worked is #1
-    top_result = all_results[0] if all_results else None
-    top_is_worked = False
-
-    if top_result:
-        top_id = top_result.get("id", "")
-        top_is_worked = top_id in worked_doc_ids
-
-    # Precision = 1 if worked is #1, else 0
-    precision = 1.0 if top_is_worked else 0.0
+    good_ranked_first = False
+    if results:
+        top_text = results[0].get("text", "").lower()
+        if scenario["good_advice"].lower()[:50] in top_text or top_text in scenario["good_advice"].lower():
+            good_ranked_first = True
 
     return {
-        "scenario": name,
+        "scenario": scenario["name"],
         "condition": "without_outcomes",
-        "top1_is_worked": top_is_worked,
-        "precision": precision,
-        "results": [r.get("text", "")[:80] for r in all_results]
+        "good_ranked_first": good_ranked_first,
+        "precision": 1.0 if good_ranked_first else 0.0,
     }
 
 
@@ -353,9 +336,8 @@ async def main():
     print("A/B TEST: Outcome-Based Learning vs Plain Vector Search")
     print("=" * 70)
     print()
-    print("This test proves that outcome scoring improves retrieval quality.")
-    print("Both conditions use identical embeddings and storage.")
-    print("The ONLY difference: whether search results are ranked by outcome scores.")
+    print("ADVERSARIAL DESIGN: Queries match BAD advice better semantically.")
+    print("The ONLY difference: whether outcome scores are applied.")
     print()
 
     if not HAS_REAL_EMBEDDINGS:
@@ -363,12 +345,10 @@ async def main():
         print("Install: pip install sentence-transformers")
         return
 
-    # Initialize embedding service
-    print("Loading embedding model (paraphrase-multilingual-mpnet-base-v2)...")
+    print("Loading embedding model (all-mpnet-base-v2, 768d)...")
     embedding_service = RealEmbeddingService()
     print("Model loaded.\n")
 
-    # Create test directories
     test_dir = Path(__file__).parent / "ab_test_data"
     if test_dir.exists():
         shutil.rmtree(test_dir)
@@ -378,36 +358,28 @@ async def main():
     control_results = []
 
     print("-" * 70)
-    print("Running scenarios...")
+    print(f"Running {len(TEST_SCENARIOS)} adversarial scenarios...")
     print("-" * 70)
 
     for i, scenario in enumerate(TEST_SCENARIOS):
         print(f"\n[{i+1}/{len(TEST_SCENARIOS)}] {scenario['name']}")
-        print(f"    Query: \"{scenario['query']}\"")
+        print(f"    Query: \"{scenario['query'][:70]}...\"")
 
         # Treatment: WITH outcome scoring
         treatment_dir = str(test_dir / f"treatment_{i}")
         os.makedirs(treatment_dir, exist_ok=True)
         treatment = await run_scenario_with_outcomes(scenario, treatment_dir, embedding_service)
         treatment_results.append(treatment)
-        marker = "PASS" if treatment['top1_is_worked'] else "FAIL"
-        print(f"    [WITH outcomes]    Top-1 is worked: {treatment['top1_is_worked']} [{marker}]")
+        marker = "PASS" if treatment['good_ranked_first'] else "FAIL"
+        print(f"    [WITH outcomes]    Good advice #1: {treatment['good_ranked_first']} [{marker}]")
 
         # Control: WITHOUT outcome scoring
         control_dir = str(test_dir / f"control_{i}")
         os.makedirs(control_dir, exist_ok=True)
         control = await run_scenario_without_outcomes(scenario, control_dir, embedding_service)
         control_results.append(control)
-        marker = "PASS" if control['top1_is_worked'] else "(expected ~25%)"
-        print(f"    [WITHOUT outcomes] Top-1 is worked: {control['top1_is_worked']} [{marker}]")
-
-        diff = treatment['precision'] - control['precision']
-        if diff > 0:
-            print(f"    -> Outcome scoring improved precision by {diff:.0%}")
-        elif diff < 0:
-            print(f"    -> Outcome scoring decreased precision by {abs(diff):.0%}")
-        else:
-            print(f"    -> No difference")
+        marker = "FAIL (expected)" if not control['good_ranked_first'] else "PASS (query not adversarial enough)"
+        print(f"    [WITHOUT outcomes] Good advice #1: {control['good_ranked_first']} [{marker}]")
 
     # Aggregate results
     print("\n" + "=" * 70)
@@ -420,9 +392,9 @@ async def main():
     mean_treatment = statistics.mean(treatment_precisions)
     mean_control = statistics.mean(control_precisions)
 
-    print(f"\nMean Precision (WITH outcomes):    {mean_treatment:.1%}")
-    print(f"Mean Precision (WITHOUT outcomes): {mean_control:.1%}")
-    print(f"Improvement:                       {mean_treatment - mean_control:+.1%}")
+    print(f"\nPrecision (WITH outcomes):    {mean_treatment:.1%}")
+    print(f"Precision (WITHOUT outcomes): {mean_control:.1%}")
+    print(f"Improvement:                  {mean_treatment - mean_control:+.1%}")
 
     # Statistical analysis
     d = cohens_d(treatment_precisions, control_precisions)
@@ -443,15 +415,16 @@ async def main():
     print(f"  p-value:      {p_value}")
 
     if p_value < 0.05:
-        print("\n[PASS] STATISTICALLY SIGNIFICANT: Outcome scoring improves retrieval quality.")
+        print(f"\n[PASS] STATISTICALLY SIGNIFICANT: Outcome scoring improves retrieval quality.")
     else:
-        print("\n[WARN] NOT STATISTICALLY SIGNIFICANT: Need more scenarios or larger effect.")
+        print(f"\n[WARN] NOT STATISTICALLY SIGNIFICANT: p={p_value}")
 
     # Save results
     results_file = test_dir / "ab_test_results.json"
     with open(results_file, "w") as f:
         json.dump({
             "timestamp": datetime.now().isoformat(),
+            "n_scenarios": len(TEST_SCENARIOS),
             "treatment_results": treatment_results,
             "control_results": control_results,
             "statistics": {

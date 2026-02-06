@@ -592,30 +592,32 @@ class SearchService:
             ce_scores = self.reranker.predict(pairs, batch_size=32, show_progress_bar=False)
 
             # Blend scores
+            # v0.3.2: CE weight drops to 0 for scored memories (uses >= 3).
+            # Wilson has real outcome data at that point — don't let semantic
+            # similarity undercut learned rankings. CE only helps cold-start.
             for i, candidate in enumerate(top_candidates):
                 ce_score = float(ce_scores[i])
                 candidate["ce_score"] = ce_score
                 original_score = candidate.get("final_rank_score", 0.5)
 
+                metadata = candidate.get("metadata", {})
+                uses = int(metadata.get("uses", 0))
                 collection = candidate.get("collection", "")
+
+                # Scored memories: skip CE blending, preserve Wilson ranking
+                if uses >= 3:
+                    candidate["final_rank_score"] = original_score
+                    continue
+
+                # Cold-start memories: CE is valuable, blend it in
                 if collection == "memory_bank":
-                    metadata = candidate.get("metadata", {})
                     importance = self._parse_numeric(metadata.get("importance", 0.7))
                     confidence = self._parse_numeric(metadata.get("confidence", 0.7))
                     quality = importance * confidence
 
-                    # v0.2.9: Blend quality with Wilson if enough uses
-                    uses = int(metadata.get("uses", 0))
-                    success_count = float(metadata.get("success_count", 0.0))
-                    if uses >= 3:
-                        wilson = success_count / uses if uses > 0 else 0.5
-                        blended_quality = 0.8 * quality + 0.2 * wilson
-                    else:
-                        blended_quality = quality
-
                     ce_norm = (ce_score + 1) / 2
                     ce_weight = 0.3
-                    quality_boost = 1.0 + blended_quality * 0.3
+                    quality_boost = 1.0 + quality * 0.3
                     blended = ((1 - ce_weight) * original_score + ce_weight * ce_norm) * quality_boost
                 else:
                     ce_norm = (ce_score + 1) / 2
