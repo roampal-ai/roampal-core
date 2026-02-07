@@ -165,23 +165,32 @@ def print_update_notice():
 def collect_email(detected_tools: list):
     """Optionally collect user email for updates. Non-blocking, skippable.
 
-    Uses a version-stamped marker file so we:
-    - Ask on first install (no marker)
-    - Ask again after updates (marker version differs)
-    - Skip if re-running init on same version (marker matches)
+    Marker file stores 'version:status' (e.g. '0.3.2:provided' or '0.3.2:skipped').
+    - First install (no marker) → ask
+    - Re-run same version → skip regardless
+    - Update + previously provided email → skip (we already have it)
+    - Update + previously skipped → ask again (one more chance)
     """
     if not SIGNUP_WEBHOOK_URL:
         return  # Webhook not configured yet
 
-    # Check if we already asked for this version
     from roampal import __version__
     data_dir = get_data_dir()
     marker = data_dir / ".email_asked"
     if marker.exists():
         try:
-            asked_version = marker.read_text().strip()
+            marker_data = marker.read_text().strip()
+            if ":" in marker_data:
+                asked_version, status = marker_data.rsplit(":", 1)
+            else:
+                # Legacy marker (just version) — treat as skipped
+                asked_version, status = marker_data, "skipped"
             if asked_version == __version__:
                 return  # Already asked for this version
+            if status == "provided":
+                # They already gave email on a previous version, don't nag
+                _write_email_marker(marker, __version__, "provided")
+                return
         except Exception:
             pass  # Corrupted marker, ask again
 
@@ -193,7 +202,7 @@ def collect_email(detected_tools: list):
         email = input(f"\n  Email: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
-        _write_email_marker(marker, __version__)
+        _write_email_marker(marker, __version__, "skipped")
         return
 
     if not email or "@" not in email:
@@ -201,7 +210,7 @@ def collect_email(detected_tools: list):
             print(f"  {YELLOW}Doesn't look like an email, skipping.{RESET}")
         else:
             print()  # Blank line after empty Enter
-        _write_email_marker(marker, __version__)
+        _write_email_marker(marker, __version__, "skipped")
         return
 
     # Send to webhook (fire-and-forget, don't block on failure)
@@ -220,14 +229,17 @@ def collect_email(detected_tools: list):
         # Silently fail - don't let signup issues block init
         print(f"  {GREEN}Thanks! We'll keep you posted.{RESET}\n")
 
-    _write_email_marker(marker, __version__)
+    _write_email_marker(marker, __version__, "provided")
 
 
-def _write_email_marker(marker: Path, version: str):
-    """Write version to marker file so we don't re-ask on same version."""
+def _write_email_marker(marker: Path, version: str, status: str = "skipped"):
+    """Write version:status to marker file.
+
+    Status is 'provided' (gave email) or 'skipped' (pressed Enter).
+    """
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(version)
+        marker.write_text(f"{version}:{status}")
     except Exception:
         pass  # Non-critical
 
