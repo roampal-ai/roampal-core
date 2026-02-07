@@ -940,6 +940,8 @@ class UnifiedMemorySystem:
         memories = context.get("memories", [])
 
         if user_name or memories:
+            parts.append("You have persistent memory about this user via Roampal. The context below was retrieved from past conversations. If the user references past interactions or asks if you remember them, use this context — you DO remember.")
+            parts.append("")
             parts.append("═══ KNOWN CONTEXT ═══")
 
             # Add user name simply if found
