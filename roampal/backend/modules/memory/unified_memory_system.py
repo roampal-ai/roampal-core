@@ -948,24 +948,61 @@ class UnifiedMemorySystem:
             if user_name:
                 parts.append(f"User: {user_name}")
 
-            # Add memories
+            # Add memories with relative timestamps
+            from datetime import datetime, timezone
+
+            def _relative_time(ts_str: str) -> str:
+                """Convert ISO timestamp to relative time like '2d', '5h', '3m'."""
+                try:
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    delta = now - ts
+                    days = delta.days
+                    hours = delta.seconds // 3600
+                    minutes = delta.seconds // 60
+                    if days > 365:
+                        return f"{days // 365}y"
+                    elif days > 30:
+                        return f"{days // 30}mo"
+                    elif days > 0:
+                        return f"{days}d"
+                    elif hours > 0:
+                        return f"{hours}h"
+                    elif minutes > 0:
+                        return f"{minutes}m"
+                    else:
+                        return "now"
+                except Exception:
+                    return ""
+
             for mem in memories[:3]:
 
                 # Get content from various possible locations
                 content = mem.get("content") or mem.get("text") or mem.get("metadata", {}).get("text", "")
                 collection = mem.get("collection", "unknown")
 
+                # Get timestamp (working/history have 'timestamp', memory_bank has 'created_at')
+                meta = mem.get("metadata", {})
+                ts_str = meta.get("timestamp") or meta.get("created_at") or ""
+                age = _relative_time(ts_str) if ts_str else ""
+
                 # Get Wilson score and effectiveness
                 wilson = mem.get("wilson_score", 0)
                 effectiveness = mem.get("effectiveness", 0)
 
-                # Format with collection and score info
+                # Build tag string: age + score + collection
+                tags = []
+                if age:
+                    tags.append(age)
                 if wilson >= 0.7:
-                    parts.append(f"• {content} ({int(wilson*100)}% proven, {collection})")
+                    tags.append(f"{int(wilson*100)}% proven")
                 elif effectiveness > 0:
-                    parts.append(f"• {content} ({int(effectiveness*100)}% effective, {collection})")
-                else:
-                    parts.append(f"• {content} ({collection})")
+                    tags.append(f"{int(effectiveness*100)}% effective")
+                tags.append(collection)
+
+                parts.append(f"• {content} ({', '.join(tags)})")
 
             parts.append("═══ END CONTEXT ═══")
             parts.append("")
