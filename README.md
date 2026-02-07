@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="Roampal - Persistent Memory for AI Coding Tools" width="900">
+  <img src="assets/banner.svg" alt="Roampal - Outcome-Based Memory for AI Coding Tools" width="900">
 </p>
 
 <p align="center">
@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <strong>Two commands. Your AI coding assistant gets persistent memory.</strong><br>
+  <strong>Two commands. Your AI coding assistant gets outcome-based memory.</strong><br>
   Works with <strong>Claude Code</strong> and <strong>OpenCode</strong>.
 </p>
 
@@ -33,18 +33,16 @@ Auto-detects installed tools. Restart your editor and start chatting.
 
 ### Platform Differences
 
-The core loop is identical — both platforms inject context, capture exchanges, and score outcomes. The difference is *how* scoring gets enforced:
+The core loop is identical — both platforms inject context, capture exchanges, and score outcomes. The delivery mechanism differs:
 
 | | Claude Code | OpenCode |
 |--|-------------|----------|
 | Context injection | Hooks (stdout) | Plugin (system prompt) |
 | Exchange capture | Stop hook | Plugin `session.idle` event |
-| Scoring | Main LLM prompted, **enforced** — hook blocks if not scored | Main LLM prompted + independent sidecar call as fallback |
-| Self-healing | Hooks auto-restart server on failure | Plugin logs error, MCP tools recover on next call |
+| Scoring | Main LLM prompted via hooks | Main LLM prompted + independent sidecar fallback |
+| Self-healing | Hooks auto-restart server on failure | Plugin auto-restarts server on failure |
 
-**Claude Code** has tighter enforcement — the stop hook can block the conversation if `score_response` wasn't called, forcing the AI to score every exchange.
-
-**OpenCode** can't block (plugin API limitation), so it uses a two-layer approach: prompt the main LLM to score, and if it doesn't, an independent API call scores the exchange automatically. Scoring still happens on every exchange — it's just not enforced at the platform level.
+Both platforms prompt the main LLM to score each exchange. OpenCode adds an independent sidecar call (using free models) as a fallback if the main LLM doesn't score — so scoring happens every exchange regardless.
 
 ## How It Works
 
@@ -112,7 +110,7 @@ Your AI gets 7 memory tools:
 | `add_to_memory_bank` | Store permanent facts (identity, preferences, goals) |
 | `update_memory` | Correct or update existing memories |
 | `delete_memory` | Remove outdated info |
-| `score_response` | Score previous exchange — enforced automatically by hooks |
+| `score_response` | Score previous exchange — prompted automatically by hooks |
 | `record_response` | Store key takeaways from significant exchanges |
 
 ## What's Different?
