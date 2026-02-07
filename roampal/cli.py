@@ -294,12 +294,40 @@ def cmd_init(args):
                 print(f"{YELLOW}Created {opencode_dir} directory{RESET}")
     else:
         # Auto-detect installed tools
+        # Check config dirs, PATH binaries, AND platform-specific install locations
+        # (fresh installs may not have config dirs yet)
         detected = []
-        if claude_code_dir.exists():
+
+        # Claude Code: config dir OR binary in PATH
+        if claude_code_dir.exists() or shutil.which("claude"):
             detected.append("claude-code")
-        if cursor_dir.exists():
+
+        # Cursor: config dir OR binary in PATH OR platform-specific install
+        cursor_found = cursor_dir.exists() or shutil.which("cursor")
+        if not cursor_found:
+            if sys.platform == "darwin":
+                cursor_found = Path("/Applications/Cursor.app").exists()
+            elif sys.platform == "win32":
+                localappdata = os.environ.get("LOCALAPPDATA", "")
+                if localappdata and (Path(localappdata) / "Programs" / "cursor").exists():
+                    cursor_found = True
+        if cursor_found:
             detected.append("cursor")
-        if opencode_dir.exists():
+
+        # OpenCode: config dir OR binary in PATH OR platform-specific install
+        opencode_found = opencode_dir.exists() or shutil.which("opencode")
+        if not opencode_found:
+            if sys.platform == "win32":
+                # Windows: Electron installer puts files in LOCALAPPDATA
+                for env_var in ["LOCALAPPDATA", "APPDATA"]:
+                    d = os.environ.get(env_var, "")
+                    if d and (Path(d) / "opencode").exists():
+                        opencode_found = True
+                        break
+            elif sys.platform == "darwin":
+                # macOS: .app bundle or Homebrew
+                opencode_found = Path("/Applications/OpenCode.app").exists()
+        if opencode_found:
             detected.append("opencode")
 
     if not detected:
@@ -341,6 +369,14 @@ def cmd_init(args):
     print(f"\n{GREEN}{BOLD}Roampal initialized successfully!{RESET}\n")
 
     # Offer email signup (optional, non-blocking)
+    # --force resets the email marker so user gets re-prompted
+    if force:
+        email_marker = get_data_dir() / ".email_asked"
+        if email_marker.exists():
+            try:
+                email_marker.unlink()
+            except Exception:
+                pass
     collect_email(detected)
 
     print(f"""{BOLD}Next steps:{RESET}
@@ -384,6 +420,9 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
         force: If True, overwrite existing config even if different
     """
     print(f"{BOLD}Configuring Claude Code...{RESET}")
+
+    # Ensure directory exists (may not if detected via PATH on fresh install)
+    claude_dir.mkdir(parents=True, exist_ok=True)
 
     # Create settings.json with hooks and permissions
     settings_path = claude_dir / "settings.json"
@@ -615,6 +654,9 @@ def configure_cursor(cursor_dir: Path, is_dev: bool = False, force: bool = False
         force: If True, overwrite existing config even if different
     """
     print(f"{BOLD}Configuring Cursor...{RESET}")
+
+    # Ensure directory exists (may not if detected via PATH on fresh install)
+    cursor_dir.mkdir(parents=True, exist_ok=True)
 
     # Cursor uses ~/.cursor/mcp.json
     mcp_config_path = cursor_dir / "mcp.json"
