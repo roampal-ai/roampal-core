@@ -51,3 +51,6 @@ Documentation = "https://github.com/roampal-ai/roampal-core#readme"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["roampal*"]
+
+[tool.setuptools.package-data]
+"roampal.plugins.opencode" = ["*.ts"]
