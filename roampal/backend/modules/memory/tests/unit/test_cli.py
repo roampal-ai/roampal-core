@@ -509,6 +509,7 @@ class TestCmdInit:
 
         with patch("roampal.cli.Path.home", return_value=tmp_path), \
              patch("roampal.cli.configure_opencode") as mock_configure, \
+             patch("roampal.cli.collect_email"), \
              patch("roampal.cli.print_banner"), \
              patch("roampal.cli.print_update_notice"), \
              patch("builtins.print"):
@@ -531,6 +532,7 @@ class TestCmdInit:
 
         with patch("roampal.cli.Path.home", return_value=tmp_path), \
              patch("roampal.cli.configure_claude_code") as mock_configure, \
+             patch("roampal.cli.collect_email"), \
              patch("roampal.cli.print_banner"), \
              patch("roampal.cli.print_update_notice"), \
              patch("builtins.print"):
@@ -554,8 +556,10 @@ class TestCmdInit:
         args.force = True
 
         with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("shutil.which", return_value=None), \
              patch("roampal.cli.configure_claude_code") as mock_cc, \
              patch("roampal.cli.configure_opencode") as mock_oc, \
+             patch("roampal.cli.collect_email"), \
              patch("roampal.cli.print_banner"), \
              patch("roampal.cli.print_update_notice"), \
              patch("builtins.print"):
@@ -575,7 +579,11 @@ class TestCmdInit:
         args.dev = False
         args.force = False
 
+        # Must mock shutil.which AND env vars to fully isolate from real system
+        fake_env = {"APPDATA": str(tmp_path / "appdata"), "LOCALAPPDATA": str(tmp_path / "localappdata")}
         with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("shutil.which", return_value=None), \
+             patch.dict(os.environ, fake_env, clear=False), \
              patch("roampal.cli.print_banner"), \
              patch("roampal.cli.print_update_notice"), \
              patch("builtins.print") as mock_print:
