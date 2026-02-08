@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roampal"
-version = "0.3.3.2"
+version = "0.3.4"
 description = "Persistent memory for AI coding tools (Claude Code, OpenCode)"
 readme = "README.md"
 license = {text = "Apache-2.0"}

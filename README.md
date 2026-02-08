@@ -42,7 +42,7 @@ The core loop is identical — both platforms inject context, capture exchanges,
 | Scoring | Main LLM prompted via hooks | Main LLM prompted + independent sidecar fallback |
 | Self-healing | Hooks auto-restart server on failure | Plugin auto-restarts server on failure |
 
-Both platforms prompt the main LLM to score each exchange. OpenCode adds an independent sidecar call (using free models) as a fallback if the main LLM doesn't score — so scoring happens every exchange regardless.
+Both platforms prompt the main LLM to score each exchange. OpenCode adds an independent sidecar call (using free models) as a fallback — sidecar only runs if the main LLM doesn't call `score_response`, so memories are never double-scored.
 
 ## How It Works
 

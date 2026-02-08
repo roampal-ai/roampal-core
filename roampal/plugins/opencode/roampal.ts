@@ -3,16 +3,20 @@
  *
  * Provides persistent memory capabilities through:
  * 1. Context fetch via chat.message hook (caches scoring prompt + context)
- * 2. Memory context via experimental.chat.system.transform (system prompt, invisible in UI)
- * 2b. Scoring prompt via experimental.chat.messages.transform (prepended to last user message, invisible in UI)
+ * 2a. Memory context via experimental.chat.system.transform (system prompt, invisible in UI)
+ * 2b. Scoring prompt via experimental.chat.messages.transform (deep-cloned user message, invisible in UI)
  * 3. Exchange capture via event hook (session lifecycle + message parts)
  * 4. MCP tools for memory operations (configured separately in opencode.json)
  *
  * Both Claude Code and OpenCode share the same server (27182/27183) to avoid ChromaDB locking.
  *
+ * v0.3.4: Fix #1 — scoring prompt injection uses deep clone instead of in-place mutation.
+ *         OpenCode holds refs to original message objects for UI rendering; mutating them
+ *         caused garbled text in the input box. Clone goes to LLM, original stays in UI.
+ *         Also: sidecar scoring deferred from chat.message to session.idle to prevent
+ *         double-scoring memories (sidecar only runs if main LLM didn't call score_response).
  * v0.3.2: Fixed event handler to use correct OpenCode event structure (event.properties.*)
  *         Added message.part.updated handling for assistant text capture
- *         Scoring prompt via messages.transform (invisible in UI, AI sees it in user message)
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
@@ -64,8 +68,8 @@ const assistantTextParts = new Map<string, Map<string, string>>()
 // If true, skip independent scoring — main LLM already provided precise per-memory scores
 const mainLLMScored = new Map<string, boolean>()
 
-// Session-independent scoring prompt — messages.transform doesn't get sessionID from OpenCode,
-// so we store the most recent prompt here for it to read.
+// Session-independent scoring prompt — messages.transform may not get sessionID from OpenCode,
+// so we store the most recent prompt here as a fallback.
 let pendingScoringPrompt: string | null = null
 
 // Mutex for independent scoring — only one scoring call at a time to avoid 429 pile-ups
@@ -95,6 +99,15 @@ let pendingScoring: {
   exchange: { user: string; assistant: string }
   memories: Array<{ id: string; content: string }> | null
 } | null = null
+
+// Pending scoring data — set in chat.message, consumed in session.idle.
+// Sidecar scoring is deferred to session.idle so we can check if the main LLM
+// already scored (prevents double-scoring memories — GitHub issue #1 follow-up).
+const pendingScoringData = new Map<string, {
+  userMessage: string
+  exchange: { user: string; assistant: string }
+  memories: Array<{ id: string; content: string }> | null
+}>()
 
 // Cached context from chat.message for system.transform to use (avoids double-fetch)
 // Map<sessionID, { contextOnly, scoringPrompt, scoringPromptSimple, scoringExchange, scoringMemories, timestamp }>
@@ -625,13 +638,13 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
     },
 
     // ========================================================================
-    // Hook 1: Capture user message + fetch context + score previous exchange
+    // Hook 1: Capture user message + fetch context
     //
     // chat.message fires FIRST (before system.transform). We:
     // 1. Store user text for exchange tracking
     // 2. Fetch context from server (includes split scoring_prompt + context_only)
     // 3. Cache for system.transform + messages.transform
-    // 4. Await independent scoring (blocks ~2-3s, completes before main model fires)
+    // 4. Cache scoring data for session.idle (sidecar scoring is DEFERRED)
     // NOTE: We do NOT modify output.parts — any changes are visible in the UI.
     // ========================================================================
     "chat.message": async (
@@ -654,13 +667,10 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
       }
       ctx.userPrompt = userText
 
-      // Check if main LLM scored the PREVIOUS exchange (before clearing state)
-      const previousExchangeScoredByMainLLM = mainLLMScored.get(sessionId) || false
-
       // Clear assistant tracking from previous exchange
+      // (mainLLMScored is cleared in session.idle after sidecar check)
       assistantMessageIds.delete(sessionId)
       assistantTextParts.delete(sessionId)
-      mainLLMScored.delete(sessionId)
 
       // Fetch context from server — get split scoring_prompt + context_only + raw scoring data
       const { scoringPrompt, scoringPromptSimple, contextOnly, scoringRequired, scoringExchange, scoringMemories } = await getContextFromRoampal(sessionId, userText)
@@ -670,59 +680,29 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
       cachedContext.set(sessionId, { contextOnly, scoringPrompt, scoringPromptSimple, scoringRequired, scoringExchange, scoringMemories, timestamp: Date.now() })
 
       // Store scoring prompt in session-independent var for messages.transform
-      // (OpenCode doesn't pass sessionID to messages.transform)
+      // (OpenCode doesn't always pass sessionID to messages.transform)
       pendingScoringPrompt = scoringPromptSimple || scoringPrompt || null
 
-      // Independent LLM scoring — await BEFORE the main model call starts.
-      // Deferred retry ensures scoring data is NEVER lost: if it fails now,
-      // it's queued and retried on the next message until it succeeds.
-
-      // Step 1: Retry deferred scoring from previous failure
-      if (pendingScoring && !previousExchangeScoredByMainLLM) {
-        debugLog(`chat.message: Retrying deferred scoring...`)
-        try {
-          const ok = await scoreExchangeViaLLM(pendingScoring.sessionId, pendingScoring.userMessage, pendingScoring.exchange, pendingScoring.memories)
-          if (ok) {
-            debugLog(`chat.message: Deferred scoring succeeded`)
-            pendingScoring = null
-          }
-        } catch (err) {
-          debugLog(`chat.message: Deferred scoring error: ${err}`)
-        }
-      }
-
-      // Step 2: Score current exchange
+      // Cache scoring data for session.idle — sidecar scoring is DEFERRED until
+      // after the main LLM responds so we can check mainLLMScored first.
+      // This prevents double-scoring: if the main LLM calls score_response with
+      // per-memory scores, the sidecar's uniform scoring is skipped entirely.
       if (scoringRequired && scoringExchange) {
-        if (previousExchangeScoredByMainLLM) {
-          debugLog(`chat.message: Main LLM already scored — skipping`)
-          pendingScoring = null
-        } else if (!pendingScoring) {
-          // Deferred retry either succeeded or didn't exist — try current
-          debugLog(`chat.message: Awaiting scoreExchangeViaLLM...`)
-          try {
-            const ok = await scoreExchangeViaLLM(sessionId, userText, scoringExchange, scoringMemories)
-            if (!ok) {
-              pendingScoring = { sessionId, userMessage: userText, exchange: scoringExchange, memories: scoringMemories }
-              debugLog(`chat.message: Scoring failed — queued for deferred retry`)
-            }
-          } catch (err) {
-            pendingScoring = { sessionId, userMessage: userText, exchange: scoringExchange, memories: scoringMemories }
-            debugLog(`chat.message: Scoring error — queued for deferred retry: ${err}`)
-          }
-        } else {
-          // Deferred retry STILL failing — replace with current (server re-provides old data)
-          pendingScoring = { sessionId, userMessage: userText, exchange: scoringExchange, memories: scoringMemories }
-          debugLog(`chat.message: Deferred still failing — replaced with current exchange`)
-        }
+        pendingScoringData.set(sessionId, {
+          userMessage: userText,
+          exchange: scoringExchange,
+          memories: scoringMemories
+        })
+        debugLog(`chat.message: Cached scoring data for session.idle (deferred to avoid double-scoring)`)
       }
     },
 
     // ========================================================================
-    // Hook 2: Inject memory context into system prompt (invisible in UI)
+    // Hook 2a: Inject memory context into system prompt (invisible in UI)
     //
     // Uses cached data from chat.message to avoid double-fetching.
     // Only context goes here — scoring prompt goes in messages.transform
-    // because system prompt injection is easy for the AI to ignore.
+    // via deep clone to avoid mutating UI-visible objects (GitHub issue #1).
     // ========================================================================
     "experimental.chat.system.transform": async (
       input: { sessionID?: string; model?: any },
@@ -736,7 +716,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
       if (cached) {
         if (cached.contextOnly) {
           output.system.push(cached.contextOnly)
-          console.log(`[roampal] Injected ${cached.contextOnly.length} chars context into system prompt (cached)`)
+          debugLog(`system.transform: Injected ${cached.contextOnly.length} chars context into system prompt (cached)`)
         }
         return
       }
@@ -747,7 +727,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
 
       if (contextOnly) {
         output.system.push(contextOnly)
-        console.log(`[roampal] Injected ${contextOnly.length} chars context into system prompt (fresh fetch)`)
+        debugLog(`system.transform: Injected ${contextOnly.length} chars context into system prompt (fresh fetch)`)
       }
     },
 
@@ -755,10 +735,10 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
     // Hook 2b: Inject scoring prompt into message history (invisible in UI)
     //
     // experimental.chat.messages.transform fires right before the LLM API call.
-    // It gives us the full messages array — we prepend the scoring prompt to
-    // the last user message's text part. This is invisible in the UI but the
-    // AI sees it as part of the user message, just like Claude Code's
-    // UserPromptSubmit hook.
+    // We DEEP CLONE the user message before modifying it — OpenCode holds
+    // direct references to the original objects for UI rendering, so mutating
+    // in place causes garbled text in the input box (GitHub issue #1).
+    // The clone goes to the LLM; the original stays untouched in the UI.
     // ========================================================================
     "experimental.chat.messages.transform": async (
       input: { sessionID?: string },
@@ -768,7 +748,6 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
       debugLog(`messages.transform: sessionID=${sessionId}, messageCount=${output.messages?.length}, pendingPrompt=${pendingScoringPrompt?.length || 0}`)
 
       // Try session-keyed cache first, fall back to session-independent variable
-      // (OpenCode doesn't pass sessionID to messages.transform)
       let prompt: string | null = null
       if (sessionId) {
         const cached = cachedContext.get(sessionId)
@@ -780,15 +759,17 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
 
       if (!prompt) return
 
-      // Find the last user message in the array
+      // Find the last user message and inject via DEEP CLONE (not mutation)
       for (let i = output.messages.length - 1; i >= 0; i--) {
         const msg = output.messages[i]
         if (msg.info?.role === "user") {
-          const textPart = msg.parts.find((p: any) => p.type === "text" && p.text)
-          if (textPart) {
-            textPart.text = prompt + "\n\n" + textPart.text
-            debugLog(`messages.transform: INJECTED ${prompt.length} chars into user message`)
-            // Clear after injection so it doesn't re-inject on retry/next call
+          const textPartIndex = msg.parts.findIndex((p: any) => p.type === "text" && p.text)
+          if (textPartIndex >= 0) {
+            // Deep clone the entire message to avoid mutating UI-visible objects
+            const cloned = JSON.parse(JSON.stringify(msg))
+            cloned.parts[textPartIndex].text = prompt + "\n\n" + cloned.parts[textPartIndex].text
+            output.messages[i] = cloned
+            debugLog(`messages.transform: INJECTED ${prompt.length} chars via clone into user message`)
             pendingScoringPrompt = null
           }
           break
@@ -873,17 +854,14 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
         }
 
         case "session.idle": {
-          // Agent finished responding — store the exchange
+          // Agent finished responding — store exchange + run deferred sidecar scoring
           const sid = event.properties?.sessionID
           if (!sid) break
 
           const ctx = sessionContextMap.get(sid)
           const textParts = assistantTextParts.get(sid)
 
-          // Note: Independent LLM scoring fires from chat.message (awaited before
-          // main model starts). Always uses Zen free models — saves paid users'
-          // API credits and avoids rate limit collisions.
-          debugLog(`session.idle: sid=${sid}, userPrompt=${!!ctx?.userPrompt}, textParts=${textParts?.size || 0}`)
+          debugLog(`session.idle: sid=${sid}, userPrompt=${!!ctx?.userPrompt}, textParts=${textParts?.size || 0}, mainLLMScored=${mainLLMScored.get(sid) || false}`)
 
           if (ctx?.userPrompt && textParts?.size) {
             const assistantText = Array.from(textParts.values()).join("\n")
@@ -894,12 +872,50 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
             ctx.userPrompt = ""
           }
 
-          // Clear assistant tracking for next exchange
-          // Note: mainLLMScored is NOT cleared here — it's read at the NEXT chat.message
-          // to decide whether to skip independent scoring. Cleared there after reading.
+          // Retry deferred scoring from previous failures FIRST (before current scoring).
+          // This ensures failed scoring from exchange N-1 gets retried when exchange N completes.
+          if (pendingScoring) {
+            debugLog(`session.idle: Retrying deferred scoring for ${pendingScoring.sessionId}`)
+            try {
+              const ok = await scoreExchangeViaLLM(pendingScoring.sessionId, pendingScoring.userMessage, pendingScoring.exchange, pendingScoring.memories)
+              if (ok) {
+                debugLog(`session.idle: Deferred scoring succeeded`)
+                pendingScoring = null
+              }
+            } catch (err) {
+              debugLog(`session.idle: Deferred scoring still failing: ${err}`)
+            }
+          }
+
+          // Sidecar scoring for CURRENT exchange — ONLY if main LLM did NOT call score_response.
+          // This prevents double-scoring: main LLM provides per-memory scores,
+          // sidecar provides uniform fallback. Never both.
+          const scoringData = pendingScoringData.get(sid)
+          if (scoringData) {
+            pendingScoringData.delete(sid)
+
+            if (mainLLMScored.get(sid)) {
+              debugLog(`session.idle: Main LLM scored — skipping sidecar for ${sid}`)
+            } else {
+              // Main LLM didn't score — run sidecar with uniform scoring
+              debugLog(`session.idle: Main LLM did NOT score — running sidecar for ${sid}`)
+              try {
+                const ok = await scoreExchangeViaLLM(sid, scoringData.userMessage, scoringData.exchange, scoringData.memories)
+                if (!ok) {
+                  pendingScoring = { sessionId: sid, ...scoringData }
+                  debugLog(`session.idle: Sidecar failed — queued for deferred retry`)
+                }
+              } catch (err) {
+                pendingScoring = { sessionId: sid, ...scoringData }
+                debugLog(`session.idle: Sidecar error — queued for deferred retry: ${err}`)
+              }
+            }
+          }
+
+          // Clear state for next exchange
           assistantMessageIds.delete(sid)
           assistantTextParts.delete(sid)
-          // Clear cached context (exchange complete)
+          mainLLMScored.delete(sid)
           cachedContext.delete(sid)
           break
         }
@@ -914,6 +930,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           assistantTextParts.delete(sid)
           mainLLMScored.delete(sid)
           cachedContext.delete(sid)
+          pendingScoringData.delete(sid)
           console.log(`[roampal] Session deleted: ${sid}`)
           break
         }
