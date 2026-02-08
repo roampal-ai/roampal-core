@@ -673,7 +673,11 @@ Automatically detects and configures installed tools. Use `--claude-code` or `--
 }
 ```
 
-Plugin installed to `~/.config/opencode/plugin/roampal.ts`. Context injection is handled by the plugin (not hooks), using `chat.message` + `experimental.chat.system.transform` for split delivery (scoring prompt at top, memory context at end of system prompt).
+Plugin installed to `~/.config/opencode/plugins/roampal.ts`. Context injection is handled by the plugin (not hooks):
+- `chat.message` → fetches context + caches scoring data
+- `experimental.chat.system.transform` → injects memory context into system prompt
+- `experimental.chat.messages.transform` → injects scoring prompt via deep-cloned user message (clone avoids mutating UI-visible objects)
+- `session.idle` → stores exchange, then runs sidecar scoring ONLY if main LLM didn't call `score_response` (prevents double-scoring memories)
 
 ---
 

@@ -430,17 +430,23 @@ Separately, record_response(key_takeaway="...") is OPTIONAL - only for significa
         """
         Build a simplified scoring prompt for non-Claude models (OpenCode).
 
-        Only asks the main LLM to score cached memories — exchange outcome
-        is handled by the independent LLM scoring call in the plugin.
+        Asks the main LLM to score both the previous exchange outcome AND
+        cached memories. If the main LLM doesn't call score_response, the
+        sidecar handles exchange scoring and applies the result to memories.
         """
-        # Build memory list with content so the model knows what each memory was about.
-        # The previous turn's system prompt (where these were shown) is gone —
-        # the model can't score what it can't see.
+        user_asked = previous_exchange.get("user", "")
+        assistant_said = previous_exchange.get("assistant", "")
+
+        # Truncate long responses to keep prompt concise
+        if len(assistant_said) > 300:
+            assistant_said = assistant_said[:300] + "..."
+
+        # Build memory list with content
         memory_lines = []
         memory_scores_str = "{}"
         if surfaced_memories:
             scores = ", ".join(
-                f'"{mem.get("id", mem.get("doc_id", "unknown"))}": "unknown"'
+                f'"{mem.get("id", mem.get("doc_id", "unknown"))}": "___"'
                 for mem in surfaced_memories
             )
             memory_scores_str = "{" + scores + "}"
@@ -449,19 +455,29 @@ Separately, record_response(key_takeaway="...") is OPTIONAL - only for significa
                 content = mem.get("content", mem.get("text", ""))[:200]
                 memory_lines.append(f"- {mid}: \"{content}\"")
 
-        memory_list = "\n".join(memory_lines) if memory_lines else "(none)"
+        memory_section = "\n".join(memory_lines) if memory_lines else "(none)"
 
-        return f"""REQUIRED: Call score_response to score if these memories were helpful.
+        return f"""REQUIRED: Score the previous exchange before responding.
 
-These memories were in your context last turn:
-{memory_list}
+Previous:
+- User asked: "{user_asked}"
+- You answered: "{assistant_said}"
+
+Memories in your context last turn:
+{memory_section}
+
+Based on the user's follow-up, score the exchange:
+- "worked" = user satisfied, moves on
+- "failed" = user corrects you, says wrong
+- "partial" = lukewarm
+- "unknown" = no clear signal
 
 Call score_response with:
-  outcome: "unknown"
+  outcome: "worked" or "failed" or "partial" or "unknown"
   memory_scores: {memory_scores_str}
 
-Score each: "worked" = helpful, "failed" = misleading, "partial" = somewhat useful, "unknown" = didn't use.
-Then respond to the user.
+For each memory: "worked" = helpful, "failed" = misleading, "partial" = somewhat, "unknown" = didn't use.
+Call score_response FIRST, then respond to the user.
 """
 
     # ========== Completion State Tracking ==========
