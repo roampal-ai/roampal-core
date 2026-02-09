@@ -37,7 +37,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 
 # Import memory system and session manager
@@ -336,12 +336,14 @@ class StopHookResponse(BaseModel):
 
 class SearchRequest(BaseModel):
     """Request for searching memory."""
-    query: str
-    conversation_id: Optional[str] = None
+    query: Optional[str] = Field("", max_length=2000)
+    days_back: Optional[int] = Field(None, ge=1, le=365)
+    id: Optional[str] = Field(None, max_length=200)
+    conversation_id: Optional[str] = Field(None, max_length=200)
     collections: Optional[List[str]] = None
-    limit: int = 10
+    limit: int = Field(10, ge=1, le=100)
     metadata_filters: Optional[Dict[str, Any]] = None
-    sort_by: Optional[str] = None
+    sort_by: Optional[str] = Field(None, pattern="^(relevance|recency|score)$")
 
 
 class MemoryBankAddRequest(BaseModel):
@@ -434,17 +436,17 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Roampal",
         description="Persistent memory for AI coding tools",
-        version="0.3.2",
+        version="0.3.5",
         lifespan=lifespan
     )
 
-    # CORS for local development
+    # CORS — localhost only (v0.3.5: tightened from allow_origins=["*"])
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=[],
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
     )
 
     # ==================== Hook Endpoints ====================
@@ -548,7 +550,8 @@ def create_app() -> FastAPI:
                             content = mem.get("content", mem.get("text", ""))
                             scoring_memories_data.append({
                                 "id": mem_id,
-                                "content": content
+                                "content": content,
+                                "content_hint": content[:60] if content else ""  # v0.3.5: brief hint for SCORING REFERENCE
                             })
                     # Track that we injected scoring prompt (for Stop hook to check)
                     _session_manager.set_scoring_required(conversation_id, True)
@@ -732,11 +735,28 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="Memory system not ready")
 
         try:
+            # Direct ID lookup — bypass search entirely
+            if request.id:
+                doc = _memory.get_by_id(request.id)
+                results = [doc] if doc else []
+                return {
+                    "query": request.id,
+                    "count": len(results),
+                    "results": results
+                }
+
+            # Convert days_back to date filter
+            metadata_filters = request.metadata_filters or {}
+            if request.days_back:
+                from datetime import timedelta
+                cutoff = (datetime.now() - timedelta(days=request.days_back)).isoformat()
+                metadata_filters["created_at"] = {"$gte": cutoff}
+
             results = await _memory.search(
-                query=request.query,
+                query=request.query or "",
                 collections=request.collections,
                 limit=request.limit,
-                metadata_filters=request.metadata_filters,
+                metadata_filters=metadata_filters if metadata_filters else None,
                 sort_by=request.sort_by
             )
 
@@ -844,6 +864,11 @@ def create_app() -> FastAPI:
 
         if not content:
             raise HTTPException(status_code=400, detail="Content required")
+
+        # v0.3.5: Enforce size limit at API layer (store_book also checks, but fail fast)
+        max_size = 10 * 1024 * 1024  # 10MB
+        if len(content) > max_size:
+            raise HTTPException(status_code=413, detail=f"Content too large ({len(content)} bytes, max {max_size})")
 
         try:
             doc_ids = await _memory.store_book(

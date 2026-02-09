@@ -95,6 +95,152 @@ class ActionOutcome:
         return cls(**data)
 
 
+def _humanize_age(iso_timestamp: str) -> str:
+    """Convert ISO timestamp to human-readable relative age like '2d', '5h'."""
+    if not iso_timestamp:
+        return ""
+    try:
+        from datetime import timezone
+        dt = datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        delta = now - dt
+        days = delta.days
+        hours = delta.seconds // 3600
+        minutes = delta.seconds // 60
+        if days > 365:
+            return f"{days // 365}y"
+        elif days > 30:
+            return f"{days // 30}mo"
+        elif days > 0:
+            return f"{days}d"
+        elif hours > 0:
+            return f"{hours}h"
+        elif minutes > 0:
+            return f"{minutes}m"
+        else:
+            return "now"
+    except Exception:
+        return ""
+
+
+def normalize_memory(result: Dict, collection: str = None) -> Dict:
+    """
+    Standardize memory shape across all retrieval paths.
+
+    After normalization, every memory has consistent fields:
+    - content, id, collection at root level
+    - created_at (standardized from created_at or timestamp)
+    - age (relative time string)
+    - score, uses, success_count, last_outcome, outcome_history
+    - tags (parsed list, empty [] for non-memory_bank)
+    - importance/confidence (memory_bank only)
+    - metadata preserved as-is
+    """
+    metadata = result.get("metadata", {})
+
+    # === Content: ONE canonical location ===
+    content = (
+        result.get("content")
+        or metadata.get("content")
+        or metadata.get("text")
+        or result.get("text", "")
+    )
+    result["content"] = content
+    result.pop("text", None)
+
+    # === Collection ===
+    if not collection:
+        collection = result.get("collection") or ""
+        if not collection and result.get("id"):
+            for prefix in ["working", "history", "patterns", "memory_bank", "books"]:
+                if result["id"].startswith(prefix):
+                    collection = prefix
+                    break
+    result["collection"] = collection
+
+    # === Timestamps: standardize to created_at ===
+    created_at = (
+        metadata.get("created_at")
+        or metadata.get("timestamp")
+        or ""
+    )
+    result["created_at"] = created_at
+    metadata["created_at"] = created_at  # Write back so _apply_date_filters() sees it
+    result["age"] = _humanize_age(created_at)
+
+    # === Outcome scoring (always present, defaults for unscored) ===
+    result["score"] = float(metadata.get("score", 0.5))
+    result["uses"] = int(metadata.get("uses", 0))
+    result["success_count"] = float(metadata.get("success_count", 0.0))
+    result["last_outcome"] = metadata.get("last_outcome", "")
+
+    # Format outcome history
+    outcome_history_raw = metadata.get("outcome_history", "")
+    if isinstance(outcome_history_raw, str) and outcome_history_raw:
+        try:
+            history = json.loads(outcome_history_raw)
+            if history:
+                symbols = []
+                for entry in history[-3:]:
+                    outcome = entry.get("outcome", "")
+                    if outcome == "worked":
+                        symbols.append("Y")
+                    elif outcome == "failed":
+                        symbols.append("N")
+                    elif outcome == "partial":
+                        symbols.append("~")
+                result["outcome_history"] = "[" + "".join(symbols) + "]" if symbols else ""
+            else:
+                result["outcome_history"] = ""
+        except (json.JSONDecodeError, TypeError):
+            result["outcome_history"] = ""
+    else:
+        result["outcome_history"] = ""
+
+    # Wilson score: compute if not already present
+    if "wilson_score" not in result:
+        uses = result["uses"]
+        success_count = result["success_count"]
+        if uses > 0 and success_count is not None:
+            # Simple Wilson lower bound approximation
+            p = success_count / uses if uses > 0 else 0.5
+            z = 1.96  # 95% confidence
+            n = uses
+            denominator = 1 + z * z / n
+            centre = p + z * z / (2 * n)
+            spread = z * ((p * (1 - p) + z * z / (4 * n)) / n) ** 0.5
+            result["wilson_score"] = round((centre - spread) / denominator, 4)
+        else:
+            result["wilson_score"] = 0.5  # Untested default
+
+    if "learned_score" not in result:
+        result["learned_score"] = result.get("score", 0.5)
+
+    # === Tags: always present ===
+    tags_raw = metadata.get("tags", "[]")
+    if isinstance(tags_raw, str):
+        try:
+            result["tags"] = json.loads(tags_raw)
+        except json.JSONDecodeError:
+            result["tags"] = []
+    elif isinstance(tags_raw, list):
+        result["tags"] = tags_raw
+    else:
+        result["tags"] = []
+
+    # === Memory bank specific: importance/confidence ===
+    if collection == "memory_bank":
+        result["importance"] = float(metadata.get("importance", 0.7))
+        result["confidence"] = float(metadata.get("confidence", 0.7))
+
+    # Preserve raw metadata
+    result["metadata"] = metadata
+
+    return result
+
+
 class UnifiedMemorySystem:
     """
     The unified memory system for roampal-core.
@@ -468,6 +614,7 @@ class UnifiedMemorySystem:
                     limit=limit,
                     collections=collections,
                     metadata_filters=metadata_filters,
+                    sort_by=sort_by,
                 )
 
                 # Filter ghost IDs (deleted books)
@@ -719,13 +866,13 @@ class UnifiedMemorySystem:
             if doc_id.startswith(coll_name):
                 doc = adapter.get_fragment(doc_id)
                 if doc:
-                    return {
+                    result = {
                         "id": doc_id,
                         "content": doc.get("content", ""),
-                        "text": doc.get("content", ""),
                         "metadata": doc.get("metadata", {}),
                         "collection": coll_name
                     }
+                    return normalize_memory(result, coll_name)
         return None
 
     # ==================== Outcome Recording ====================
@@ -901,7 +1048,6 @@ class UnifiedMemorySystem:
         Extracts user name from identity-tagged memories.
         """
         import re
-        import json as json_module
         parts = []
         user_name = None
 
@@ -912,7 +1058,7 @@ class UnifiedMemorySystem:
             tags_raw = fact.get("metadata", {}).get("tags", [])
             if isinstance(tags_raw, str):
                 try:
-                    tags = json_module.loads(tags_raw) if tags_raw else []
+                    tags = json.loads(tags_raw) if tags_raw else []
                 except:
                     tags = []
             else:
@@ -940,7 +1086,7 @@ class UnifiedMemorySystem:
         memories = context.get("memories", [])
 
         if user_name or memories:
-            parts.append("You have persistent memory about this user via Roampal. The context below was retrieved from past conversations. If the user references past interactions or asks if you remember them, use this context — you DO remember.")
+            parts.append("You have persistent memory about this user via Roampal. Scored memories include Wilson confidence and outcome history. [id:...] tags can be looked up with search_memory(id=...). Memories may be outdated or wrong. Verify before treating as ground truth. The context below was retrieved from past conversations. If the user references past interactions or asks if you remember them, use this context — you DO remember.")
             parts.append("")
             parts.append("═══ KNOWN CONTEXT ═══")
 
@@ -948,61 +1094,31 @@ class UnifiedMemorySystem:
             if user_name:
                 parts.append(f"User: {user_name}")
 
-            # Add memories with relative timestamps
-            from datetime import datetime, timezone
-
-            def _relative_time(ts_str: str) -> str:
-                """Convert ISO timestamp to relative time like '2d', '5h', '3m'."""
-                try:
-                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=timezone.utc)
-                    now = datetime.now(timezone.utc)
-                    delta = now - ts
-                    days = delta.days
-                    hours = delta.seconds // 3600
-                    minutes = delta.seconds // 60
-                    if days > 365:
-                        return f"{days // 365}y"
-                    elif days > 30:
-                        return f"{days // 30}mo"
-                    elif days > 0:
-                        return f"{days}d"
-                    elif hours > 0:
-                        return f"{hours}h"
-                    elif minutes > 0:
-                        return f"{minutes}m"
-                    else:
-                        return "now"
-                except Exception:
-                    return ""
-
             for mem in memories[:3]:
+                # Normalize for consistent field access
+                normalized = normalize_memory(dict(mem), mem.get("collection", "unknown"))
 
-                # Get content from various possible locations
-                content = mem.get("content") or mem.get("text") or mem.get("metadata", {}).get("text", "")
-                collection = mem.get("collection", "unknown")
-
-                # Get timestamp (working/history have 'timestamp', memory_bank has 'created_at')
-                meta = mem.get("metadata", {})
-                ts_str = meta.get("timestamp") or meta.get("created_at") or ""
-                age = _relative_time(ts_str) if ts_str else ""
+                content = normalized.get("content", "")
+                collection = normalized.get("collection", "unknown")
+                doc_id = normalized.get("id", "")
+                age = normalized.get("age", "")
 
                 # Get Wilson score and effectiveness
-                wilson = mem.get("wilson_score", 0)
-                effectiveness = mem.get("effectiveness", 0)
+                wilson = normalized.get("wilson_score", 0)
+                effectiveness = normalized.get("effectiveness", 0)
 
                 # Build tag string: age + score + collection
-                tags = []
+                tag_parts = []
                 if age:
-                    tags.append(age)
+                    tag_parts.append(age)
                 if wilson >= 0.7:
-                    tags.append(f"{int(wilson*100)}% proven")
+                    tag_parts.append(f"{int(wilson*100)}% proven")
                 elif effectiveness > 0:
-                    tags.append(f"{int(effectiveness*100)}% effective")
-                tags.append(collection)
+                    tag_parts.append(f"{int(effectiveness*100)}% effective")
+                tag_parts.append(collection)
 
-                parts.append(f"• {content} ({', '.join(tags)})")
+                id_str = f" [id:{doc_id}]" if doc_id else ""
+                parts.append(f"• {content}{id_str} ({', '.join(tag_parts)})")
 
             parts.append("═══ END CONTEXT ═══")
             parts.append("")

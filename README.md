@@ -5,14 +5,24 @@
 <p align="center">
   <a href="https://pypi.org/project/roampal/"><img src="https://img.shields.io/pypi/v/roampal?color=blue&style=flat-square" alt="PyPI"></a>
   <a href="https://pypi.org/project/roampal/"><img src="https://img.shields.io/pypi/dm/roampal?color=blue&style=flat-square" alt="Downloads"></a>
+  <a href="https://github.com/roampal-ai/roampal-core/stargazers"><img src="https://img.shields.io/github/stars/roampal-ai/roampal-core?color=blue&style=flat-square" alt="Stars"></a>
   <a href="https://github.com/roampal-ai/roampal-core/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue?style=flat-square" alt="Python"></a>
+  <a href="https://discord.com/invite/F87za86R3v"><img src="https://img.shields.io/badge/discord-join-blue?style=flat-square" alt="Discord"></a>
 </p>
 
 <p align="center">
   <strong>Two commands. Your AI coding assistant gets outcome-based memory.</strong><br>
   Works with <strong>Claude Code</strong> and <strong>OpenCode</strong>.
 </p>
+
+---
+
+## Why?
+
+AI coding assistants forget everything between sessions. You explain your architecture, your preferences, your conventions — again. When they give bad advice, there's no mechanism to learn from it.
+
+Roampal fixes this with outcome-based memory. Good advice gets promoted. Bad advice gets demoted. Your AI gets smarter every exchange, across every session.
 
 ---
 
@@ -31,7 +41,8 @@ Auto-detects installed tools. Restart your editor and start chatting.
   <img src="assets/init-demo.svg" alt="roampal init demo" width="720">
 </p>
 
-### Platform Differences
+<details>
+<summary><strong>Platform Differences</strong></summary>
 
 The core loop is identical — both platforms inject context, capture exchanges, and score outcomes. The delivery mechanism differs:
 
@@ -43,6 +54,7 @@ The core loop is identical — both platforms inject context, capture exchanges,
 | Self-healing | Hooks auto-restart server on failure | Plugin auto-restarts server on failure |
 
 Both platforms prompt the main LLM to score each exchange. OpenCode adds an independent sidecar call (using free models) as a fallback — sidecar only runs if the main LLM doesn't call `score_response`, so memories are never double-scored.
+</details>
 
 ## How It Works
 
@@ -56,8 +68,8 @@ fix the auth bug
 **Your AI sees:**
 ```
 ═══ KNOWN CONTEXT ═══
-• [patterns] (3d, s:0.9, [YYY]) JWT refresh fixed auth loop
-• [memory_bank] Alex, backend engineer — prefers: no git staging
+• JWT refresh pattern fixed auth loop [id:patterns_a1b2] (3d, 90% proven, patterns)
+• User prefers: never stage git changes [id:mb_c3d4] (memory_bank)
 ═══ END CONTEXT ═══
 
 fix the auth bug
@@ -77,9 +89,9 @@ No manual calls. No workflow changes. It just works.
 
 | Collection | Purpose | Lifetime |
 |------------|---------|----------|
-| `working` | Current session context | 24h, then auto-promotes |
+| `working` | Current session context | 24h — promotes if useful, deleted otherwise |
 | `history` | Past conversations | 30 days, outcome-scored |
-| `patterns` | Proven solutions | Permanent, promoted from history |
+| `patterns` | Proven solutions | Persistent while useful, promoted from history |
 | `memory_bank` | Identity, preferences, goals | Permanent |
 | `books` | Uploaded reference docs | Permanent |
 
@@ -122,7 +134,32 @@ Your AI gets 7 memory tools:
 | No learning from mistakes | Outcomes tracked — bad advice gets demoted |
 | No document memory | Ingest docs, searchable forever |
 
-## Architecture
+### Benchmarks
+
+Tested across 10 adversarial scenarios designed to trick similarity search (200 total tests):
+
+| Condition | Top-1 Accuracy |
+|-----------|---------------|
+| RAG baseline (vector search only) | 10% |
+| + Cross-encoder reranking | 20% |
+| **Full Roampal (outcomes + reranking)** | **10% → 60% at maturity** |
+
+Outcome learning provides a **5x improvement** over reranking alone (+50 pts vs +10 pts). Roampal vs plain vector DB: **40% vs 0%** accuracy on adversarial queries (p=0.000135).
+
+Full benchmark data: [`dev/benchmarks/results/`](dev/benchmarks/results/)
+
+### How Roampal Compares
+
+| Feature | Roampal Core | .cursorrules / CLAUDE.md | Mem0 |
+|---------|-------------|--------------------------|------|
+| Learns from outcomes | Yes — bad advice demoted, good advice promoted | No | No |
+| Zero-config context injection | Yes — hooks inject automatically | Manual file editing | API calls required |
+| Works across sessions | Yes — 5 memory collections with promotion | Per-project static files | Yes |
+| Fully local / private | Yes — all data on your machine | Yes | Cloud or self-hosted |
+| Open source | Apache 2.0 | N/A | Apache 2.0 |
+
+<details>
+<summary><strong>Architecture</strong></summary>
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -154,6 +191,9 @@ Your AI gets 7 memory tools:
 │    All clients share one server, isolated by session    │
 └─────────────────────────────────────────────────────────┘
 ```
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for full technical details.
+</details>
 
 ## Requirements
 

@@ -304,7 +304,7 @@ class TestConfigureOpencode:
         if plugin_source.exists():
             assert plugin_dest.exists()
             # Content should match source
-            assert plugin_dest.read_text() == plugin_source.read_text()
+            assert plugin_dest.read_text(encoding="utf-8") == plugin_source.read_text(encoding="utf-8")
 
 # ============================================================================
 # configure_claude_code() Tests

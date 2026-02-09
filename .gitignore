@@ -112,3 +112,10 @@ dev/docs/RELEASE_CHECKLIST.md
 roampal-core*
 test_data/
 test_env/
+
+# Debug/temp files (never commit — may contain PII or memory content)
+debug_*.json
+debug_*.txt
+*_providers.json
+*search_out.json
+*verify_fix.json

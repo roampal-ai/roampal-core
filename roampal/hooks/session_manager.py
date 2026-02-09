@@ -10,6 +10,7 @@ Stores exchanges in JSONL files so the Stop hook can:
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -50,7 +51,42 @@ class SessionManager:
         # Completion state file (persists across hook invocations)
         self._state_file = self.sessions_dir / "_completion_state.json"
 
+        # v0.3.5: Cleanup old session transcripts (7-day TTL)
+        self._cleanup_old_transcripts(max_age_days=7)
+
         logger.info(f"SessionManager initialized: {self.sessions_dir}")
+
+    def _cleanup_old_transcripts(self, max_age_days: int = 7) -> int:
+        """
+        Delete session JSONL transcripts older than max_age_days.
+
+        Called at startup. Transcripts are redundant once their content
+        has been captured in memory (working -> history -> patterns).
+
+        Args:
+            max_age_days: Delete files older than this (default 7)
+
+        Returns:
+            Number of files deleted
+        """
+        cutoff = time.time() - (max_age_days * 86400)
+        deleted = 0
+
+        try:
+            for f in self.sessions_dir.glob("*.jsonl"):
+                try:
+                    if f.stat().st_mtime < cutoff:
+                        f.unlink()
+                        deleted += 1
+                except OSError as e:
+                    logger.warning(f"Could not delete old transcript {f.name}: {e}")
+
+            if deleted:
+                logger.info(f"Transcript cleanup: deleted {deleted} files older than {max_age_days} days")
+        except Exception as e:
+            logger.warning(f"Transcript cleanup error: {e}")
+
+        return deleted
 
     def _get_session_file(self, conversation_id: str) -> Path:
         """Get path to session file."""
@@ -337,51 +373,35 @@ class SessionManager:
         surfaced_memories: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """
-        Build the scoring prompt to inject.
+        Build lean scoring prompt for Claude Code/Cursor.
 
-        This is what Claude sees at the start of each turn,
-        prompting them to score the previous exchange.
+        v0.3.5: Removed duplicate content (user_asked, assistant_said, memory content,
+        current_user_message) — all already visible in conversation history and KNOWN CONTEXT.
+        Only includes memory doc_ids for per-memory scoring.
 
         Args:
-            previous_exchange: The exchange to score
-            current_user_message: What the user just said (for context)
+            previous_exchange: The exchange to score (unused in lean prompt — kept for API compat)
+            current_user_message: What the user just said (unused in lean prompt — kept for API compat)
             surfaced_memories: Optional list of memories that were injected (for selective scoring)
 
         Returns:
             Formatted prompt to prepend
         """
-        user_asked = previous_exchange.get("user", "")
-        assistant_said = previous_exchange.get("assistant", "")
-
-        # Build memories section if we have surfaced memories
-        memories_section = ""
+        # Build memory scoring template with IDs only (content in KNOWN CONTEXT [id:...] tags)
         if surfaced_memories:
-            memory_lines = []
-            for mem in surfaced_memories:
-                doc_id = mem.get("id", mem.get("doc_id", "unknown"))
-                content = mem.get("content") or mem.get("text") or mem.get("metadata", {}).get("content", "")
-                # Truncate long content for display
-                if len(content) > 100:
-                    content = content[:100] + "..."
-                memory_lines.append(f"• [{doc_id}] \"{content}\"")
-
-            if memory_lines:
-                memories_section = "\nMemories surfaced:\n" + "\n".join(memory_lines) + "\n"
-
-        # Build per-memory scoring instruction (v0.2.8)
-        scoring_instruction = "Call score_response(outcome=\"worked|failed|partial|unknown\", memory_scores={}) FIRST, then respond."
-        if surfaced_memories:
-            # Build explicit list of memories to score
             memory_score_lines = []
             for mem in surfaced_memories:
                 doc_id = mem.get("id", mem.get("doc_id", "unknown"))
                 memory_score_lines.append(f'        "{doc_id}": "___"')
             memory_scores_template = ",\n".join(memory_score_lines)
 
-            scoring_instruction = f"""Score each cached memory individually:
+            return f"""<roampal-score-required>
+Score the previous exchange before responding.
 
-Cached memories to score:
-{chr(10).join([f"- {mem.get('id', mem.get('doc_id', 'unknown'))}" for mem in surfaced_memories])}
+Look at your previous response and the user's follow-up below.
+The memories injected last turn had IDs shown in [id:...] tags in KNOWN CONTEXT.
+
+Score each memory:
 
 Call score_response(
     outcome="worked|failed|partial|unknown",
@@ -394,27 +414,23 @@ SCORING GUIDE:
 • worked = this memory was helpful
 • partial = somewhat helpful
 • unknown = didn't use this memory
-• failed = this memory was MISLEADING (gave bad advice)
+• failed = this memory was MISLEADING
 
-You MUST score every cached memory above.
-You MAY add scores for other memories in your context (KNOWN CONTEXT, earlier conversation, etc.)."""
+You MUST score every memory listed above.
+You MAY also score any other memory visible in KNOWN CONTEXT or earlier conversation.
 
-        return f"""<roampal-score-required>
+Separately, record_response(key_takeaway="...") is OPTIONAL - only for significant learnings.
+</roampal-score-required>
+
+"""
+        else:
+            # No surfaced memories — minimal scoring prompt
+            return """<roampal-score-required>
 Score the previous exchange before responding.
 
-Previous:
-- User asked: "{user_asked}"
-- You answered: "{assistant_said}"
-{memories_section}
-Current user message: "{current_user_message}"
+Look at your previous response and the user's follow-up below.
 
-Based on the user's current message, evaluate if your previous answer helped:
-- "worked" = user satisfied, says thanks, moves on to new topic
-- "failed" = user corrects you, says no/wrong, repeats question
-- "partial" = lukewarm response, "kind of", "I guess"
-- "unknown" = no clear signal
-
-{scoring_instruction}
+Call score_response(outcome="worked|failed|partial|unknown", memory_scores={})
 
 Separately, record_response(key_takeaway="...") is OPTIONAL - only for significant learnings.
 </roampal-score-required>
@@ -428,21 +444,12 @@ Separately, record_response(key_takeaway="...") is OPTIONAL - only for significa
         surfaced_memories: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """
-        Build a simplified scoring prompt for non-Claude models (OpenCode).
+        v0.3.5: Lean scoring prompt for OpenCode.
 
-        Asks the main LLM to score both the previous exchange outcome AND
-        cached memories. If the main LLM doesn't call score_response, the
-        sidecar handles exchange scoring and applies the result to memories.
+        IDs only — memory content is in SCORING REFERENCE block in the system prompt.
+        No exchange text (LLM just saw it). No memory content (in system prompt).
         """
-        user_asked = previous_exchange.get("user", "")
-        assistant_said = previous_exchange.get("assistant", "")
-
-        # Truncate long responses to keep prompt concise
-        if len(assistant_said) > 300:
-            assistant_said = assistant_said[:300] + "..."
-
-        # Build memory list with content
-        memory_lines = []
+        # Build memory scores template with IDs only
         memory_scores_str = "{}"
         if surfaced_memories:
             scores = ", ".join(
@@ -450,34 +457,27 @@ Separately, record_response(key_takeaway="...") is OPTIONAL - only for significa
                 for mem in surfaced_memories
             )
             memory_scores_str = "{" + scores + "}"
-            for mem in surfaced_memories:
-                mid = mem.get("id", mem.get("doc_id", "unknown"))
-                content = mem.get("content", mem.get("text", ""))[:200]
-                memory_lines.append(f"- {mid}: \"{content}\"")
 
-        memory_section = "\n".join(memory_lines) if memory_lines else "(none)"
+        return f"""<roampal-score-required>
+Score the memories that may have influenced your previous response.
+These memories were in your context last turn — see SCORING REFERENCE in system prompt.
 
-        return f"""REQUIRED: Score the previous exchange before responding.
+Call score_response(
+    outcome="worked|failed|partial|unknown",
+    memory_scores={memory_scores_str}
+)
 
-Previous:
-- User asked: "{user_asked}"
-- You answered: "{assistant_said}"
+SCORING GUIDE:
+• worked = this memory was helpful
+• partial = somewhat helpful
+• unknown = didn't use this memory
+• failed = this memory was MISLEADING
 
-Memories in your context last turn:
-{memory_section}
+You MUST score every memory listed above.
+You MAY also score any other memory visible in KNOWN CONTEXT or earlier conversation.
 
-Based on the user's follow-up, score the exchange:
-- "worked" = user satisfied, moves on
-- "failed" = user corrects you, says wrong
-- "partial" = lukewarm
-- "unknown" = no clear signal
-
-Call score_response with:
-  outcome: "worked" or "failed" or "partial" or "unknown"
-  memory_scores: {memory_scores_str}
-
-For each memory: "worked" = helpful, "failed" = misleading, "partial" = somewhat, "unknown" = didn't use.
-Call score_response FIRST, then respond to the user.
+Separately, record_response(key_takeaway="...") is OPTIONAL - only for significant learnings.
+</roampal-score-required>
 """
 
     # ========== Completion State Tracking ==========
