@@ -4,7 +4,7 @@
 
 **One command install. AI coding tools get persistent memory.**
 
-Roampal Core provides hook-based memory injection and outcome learning for AI coding tools. Works with **Claude Code** and **OpenCode**. The external LLM (Claude, GPT, etc.) sits in the driver seat — using the same memory system as Roampal's internal LLM, but without local model limitations.
+Roampal Core provides hook-based memory injection and outcome learning for AI coding tools. Works with **Claude Code** and **OpenCode**. The LLM behind your coding tool sits in the driver seat — Roampal provides the memory layer, the LLM provides the intelligence.
 
 ```bash
 pip install roampal
@@ -141,11 +141,9 @@ Separately, record_response(key_takeaway="...") is OPTIONAL - only for significa
 </roampal-score-required>
 
 ═══ KNOWN CONTEXT ═══
-• User: backend engineer
-• Preference: TypeScript, detailed explanations
-
-[Past Solutions]
-• JWT refresh token pattern worked for auth issues (92% effective, from patterns)
+• User: backend engineer [id:mb_abc123] (memory_bank)
+• Preference: TypeScript, detailed explanations [id:mb_def456] (memory_bank)
+• JWT refresh token pattern worked for auth issues [id:patterns_ghi789] (5d, 90% proven, patterns)
 ═══ END CONTEXT ═══
 
 Help me fix this auth bug
@@ -182,7 +180,8 @@ roampal-core/
 │   │           ├── memory_bank_service.py   # Permanent user facts
 │   │           ├── context_service.py       # Context analysis
 │   │           ├── config.py                # MemoryConfig
-│   │           └── types.py                 # TypedDicts, enums
+│   │           ├── memory_types.py          # TypedDicts, enums
+│   │           └── content_graph.py         # Content KG entity linking
 │   │
 │   ├── server/
 │   │   ├── __init__.py
@@ -210,9 +209,9 @@ roampal-core/
 | Collection | Purpose | Scorable | Decay |
 |------------|---------|----------|-------|
 | `books` | Uploaded reference docs | No | Never |
-| `working` | Current session context | Yes | Session |
+| `working` | Current session context | Yes | 24h — promotes if useful, deleted otherwise |
 | `history` | Past conversations | Yes | 30d + Score-based |
-| `patterns` | Proven solutions (promoted from history) | Yes | Never |
+| `patterns` | Proven solutions (promoted from history) | Yes | Demoted if score < 0.4, deleted if < 0.2 |
 | `memory_bank` | Permanent user facts (LLM-controlled) | No | Never |
 
 ### Memory Bank Guidelines
@@ -238,10 +237,10 @@ roampal-core/
 ```
 working → history → patterns
    ↓         ↓         ↓
- score     score     score ≥ 0.8
- < 0.2:    ≥ 0.7     AND success_count ≥ 5
- deleted   AND       = PATTERN
-           uses ≥ 2
+ score     score     score ≥ 0.9
+ < 0.2:    ≥ 0.7     AND uses ≥ 3
+ deleted   AND       AND success_count ≥ 5
+           uses ≥ 2  = PATTERN
            = promote
 
  working: Age > 24h without promotion = deleted
@@ -270,6 +269,9 @@ working → history → patterns
 | `/api/memory-bank/archive` | POST | Archive memory bank entry |
 | `/api/record-response` | POST | Store key takeaway in working memory (MCP tool proxy) |
 | `/api/context-insights` | POST | Get user profile + relevant memories (MCP tool proxy) |
+| `/api/ingest` | POST | Ingest document into books collection |
+| `/api/books` | GET | List all ingested books |
+| `/api/remove-book` | POST | Remove a book by title |
 | `/api/health` | GET | Health check |
 | `/api/stats` | GET | Memory statistics |
 
@@ -448,7 +450,9 @@ knowledge_graph.json
 └── context_action_effectiveness  # (context, action, collection) -> stats
 ```
 
-### KG Methods
+### KG Methods (on UnifiedMemorySystem)
+
+These methods live on `UnifiedMemorySystem`, which delegates to `KnowledgeGraphService` internally:
 
 | Method | Description |
 |--------|-------------|
@@ -509,6 +513,7 @@ roampal start               # Start the HTTP server manually
 roampal stop                # Stop the HTTP server
 roampal status              # Check server status
 roampal stats               # Show memory statistics
+roampal doctor              # Diagnose installation issues
 roampal ingest <file>       # Ingest .txt/.md/.pdf into books collection
 roampal books               # List all ingested books
 roampal remove <title>      # Remove a book by title
@@ -626,8 +631,26 @@ Automatically detects and configures installed tools. Use `--claude-code` or `--
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": ["python", "-m", "roampal.hooks.user_prompt_submit_hook"],
-    "Stop": ["python", "-m", "roampal.hooks.stop_hook"]
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m roampal.hooks.user_prompt_submit_hook"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m roampal.hooks.stop_hook"
+          }
+        ]
+      }
+    ]
   },
   "permissions": {
     "allow": [

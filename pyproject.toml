@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roampal"
-version = "0.3.4.1"
+version = "0.3.5"
 description = "Persistent memory for AI coding tools (Claude Code, OpenCode)"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "Roampal", email = "roampal@protonmail.com"}
 ]
-keywords = ["ai", "memory", "claude", "cursor", "mcp", "llm"]
+keywords = ["ai", "memory", "claude", "opencode", "mcp", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

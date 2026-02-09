@@ -83,7 +83,7 @@ class TestMainSearch:
             coll.hybrid_query = AsyncMock(side_effect=mock_hybrid_query)
 
         scoring = MagicMock(spec=ScoringService)
-        scoring.apply_scoring_to_results = MagicMock(side_effect=lambda x: x)
+        scoring.apply_scoring_to_results = MagicMock(side_effect=lambda x, **kwargs: x)
 
         routing = MagicMock(spec=RoutingService)
         routing.route_query = MagicMock(return_value=["working", "history"])

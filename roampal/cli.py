@@ -868,8 +868,8 @@ def configure_opencode(is_dev: bool = False, force: bool = False):
     if plugin_file.exists():
         # Check if plugin content matches
         try:
-            existing_content = plugin_file.read_text()
-            source_content = plugin_source.read_text() if plugin_source.exists() else ""
+            existing_content = plugin_file.read_text(encoding="utf-8")
+            source_content = plugin_source.read_text(encoding="utf-8") if plugin_source.exists() else ""
 
             if existing_content == source_content:
                 print(f"  {GREEN}[OK] roampal plugin already installed{RESET}")

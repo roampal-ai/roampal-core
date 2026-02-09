@@ -34,12 +34,21 @@ const ROAMPAL_PORT = ROAMPAL_DEV ? 27183 : 27182
 const ROAMPAL_HOOK_URL = `http://127.0.0.1:${ROAMPAL_PORT}/api/hooks`
 
 // Debug logging to file (console.log leaks into OpenCode UI on some platforms)
-import { appendFileSync } from "fs"
+import { appendFileSync, readFileSync, statSync, writeFileSync } from "fs"
 import { join } from "path"
 const DEBUG_LOG = join(process.env.APPDATA || process.env.HOME || ".", "roampal_plugin_debug.log")
+const DEBUG_LOG_MAX_BYTES = 1024 * 1024  // 1 MB — rotate by truncating to last 256KB
 function debugLog(msg: string) {
   try {
     appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] ${msg}\n`)
+    // Rotate: if log exceeds 1MB, keep only the last 256KB
+    try {
+      const size = statSync(DEBUG_LOG).size
+      if (size > DEBUG_LOG_MAX_BYTES) {
+        const tail = readFileSync(DEBUG_LOG, "utf-8").slice(-256 * 1024)
+        writeFileSync(DEBUG_LOG, `[LOG ROTATED at ${new Date().toISOString()}]\n${tail}`)
+      }
+    } catch { /* best effort rotation */ }
   } catch { /* best effort */ }
 }
 
@@ -155,7 +164,7 @@ async function restartServer(): Promise<boolean> {
         for (const line of result.split("\n")) {
           if (line.includes(`127.0.0.1:${port}`) && line.includes("LISTENING")) {
             const pid = line.trim().split(/\s+/).pop()
-            if (pid) {
+            if (pid && /^\d+$/.test(pid)) {
               execSync(`taskkill /pid ${pid} /f`, { timeout: 5000 })
               debugLog(`Killed stale server process ${pid}`)
             }
@@ -166,8 +175,10 @@ async function restartServer(): Promise<boolean> {
         const result = execSync(`lsof -ti :${port}`, { timeout: 5000 }).toString().trim()
         if (result) {
           const pid = result.split("\n")[0]
-          execSync(`kill -9 ${pid}`, { timeout: 5000 })
-          debugLog(`Killed stale server process ${pid}`)
+          if (/^\d+$/.test(pid)) {
+            execSync(`kill -9 ${pid}`, { timeout: 5000 })
+            debugLog(`Killed stale server process ${pid}`)
+          }
         }
       }
     } catch {
@@ -714,6 +725,18 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
       const cached = cachedContext.get(sessionId)
 
       if (cached) {
+        // v0.3.5: Inject SCORING REFERENCE block on scoring turns
+        // Previous turn's memories go here so the lean scoring prompt can reference them by ID
+        if (cached.scoringRequired && cached.scoringMemories && cached.scoringMemories.length > 0) {
+          const refLines = cached.scoringMemories.map((mem: any) => {
+            const hint = mem.content_hint || (mem.content || "").substring(0, 60)
+            return `• [id:${mem.id}] "${hint}"`
+          })
+          const scoringRef = `═══ SCORING REFERENCE (previous turn) ═══\n${refLines.join("\n")}\n═══ END SCORING REFERENCE ═══`
+          output.system.push(scoringRef)
+          debugLog(`system.transform: Injected SCORING REFERENCE with ${cached.scoringMemories.length} memories`)
+        }
+
         if (cached.contextOnly) {
           output.system.push(cached.contextOnly)
           debugLog(`system.transform: Injected ${cached.contextOnly.length} chars context into system prompt (cached)`)

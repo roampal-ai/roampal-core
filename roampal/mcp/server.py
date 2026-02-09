@@ -157,6 +157,9 @@ _dev_mode = False
 # Cache for update check (only check once per session)
 _update_check_cache: Optional[tuple] = None
 
+# v0.3.5: Self-audit counter — triggers every 4th get_context_insights call
+_context_insights_count = 0
+
 
 def _check_for_updates() -> tuple:
     """Check if a newer version is available on PyPI.
@@ -425,6 +428,7 @@ WHEN TO SEARCH:
 • User says "remember", "I told you", "we discussed" → search immediately
 • get_context_insights recommended a collection → search that collection
 • You need more detail than the context provided
+• You see [id:...] in KNOWN CONTEXT and want full details → use id= parameter
 
 WHEN NOT TO SEARCH:
 • General knowledge questions (use your training)
@@ -433,17 +437,45 @@ WHEN NOT TO SEARCH:
 Collections: working (24h then auto-promotes), history (30d scored), patterns (permanent scored), memory_bank (permanent), books (permanent docs)
 Omit 'collections' parameter for auto-routing (recommended).
 
+TEMPORAL SEARCH:
+Use days_back=N to search by time without a semantic query.
+Examples: days_back=7 → last 7 days. days_back=1, collections=["working"] → today's working memory.
+Combine with query for time-filtered semantic search: query="auth", days_back=14.
+
+ID LOOKUP:
+Use id="patterns_abc123" to look up a specific memory directly (bypasses search).
+Useful when you see [id:...] tags in KNOWN CONTEXT and want full metadata.
+
 READING RESULTS:
 • [YYN] = outcome history (last 3: Y=worked, ~=partial, N=failed)
-• s:0.7 = outcome score (0-1, higher = more successful outcomes, statistically weighted)
+• s:0.7 = outcome score (0-1, higher = more successful outcomes)
+• w:0.68 = Wilson confidence score (statistical lower bound, 0-1)
+• 8 uses = times this memory has been surfaced and scored
 • 5d = age of memory
-• [id:patterns_abc123] = memory ID for selective scoring (use with related=["id1","id2"])""",
+• [id:patterns_abc123] = memory ID for lookup or scoring
+
+VERIFICATION USE:
+• Before stating a fact from memory as definitive, search for it
+• If you find conflicting memories on the same topic, prefer the
+  newer one and score the older one "failed" on the next scoring prompt
+• Use id= lookup to verify specific memories referenced in KNOWN CONTEXT
+  before building conclusions on them""",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
                             "description": "Search query - use the users EXACT words/phrases, do NOT simplify or extract keywords"
+                        },
+                        "days_back": {
+                            "type": "integer",
+                            "description": "Only return memories from the last N days. Can be used alone (no query needed) or combined with a semantic query.",
+                            "minimum": 1,
+                            "maximum": 365
+                        },
+                        "id": {
+                            "type": "string",
+                            "description": "Look up a specific memory by its doc_id (e.g., 'patterns_abc123'). Returns the full memory with all metadata. Bypasses semantic search."
                         },
                         "collections": {
                             "type": "array",
@@ -460,7 +492,7 @@ READING RESULTS:
                         },
                         "metadata": {
                             "type": "object",
-                            "description": "Optional filters. Use sparingly. Examples: timestamp='2025-11-12', last_outcome='worked', has_code=true",
+                            "description": "Optional filters. Use sparingly. Examples: created_at='2025-11-12', last_outcome='worked', has_code=true",
                             "additionalProperties": True
                         },
                         "sort_by": {
@@ -470,7 +502,7 @@ READING RESULTS:
                             "default": None
                         }
                     },
-                    "required": ["query"]
+                    "required": []
                 }
             ),
             types.Tool(
@@ -511,7 +543,17 @@ SIZE GUIDANCE:
 
 Rule of thumb: If it helps maintain continuity across sessions OR enables learning/improvement, store it. If it's session-specific, don't.
 
-Note: memory_bank is NOT outcome-scored. Facts persist until deleted.""",
+Note: memory_bank is NOT outcome-scored. Facts persist until deleted.
+
+STORAGE DISCIPLINE:
+• confidence=0.9+ is reserved for facts you VERIFIED against source
+  (code, docs, tool output). Not for things you "know"
+• confidence=0.7 is the default — use it unless you have evidence
+• confidence=0.5 for unverified claims, approximate numbers, or
+  things the user told you that you couldn't confirm
+• Before storing, ask: "Will this still be true next week?" If not,
+  it doesn't belong in memory_bank — let working/history handle it
+• One fact per memory. Don't combine unrelated information""",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -526,7 +568,7 @@ Note: memory_bank is NOT outcome-scored. Facts persist until deleted.""",
             ),
             types.Tool(
                 name="update_memory",
-                description="Update existing memory when information changes or needs correction.",
+                description="Update existing memory when information changes or needs correction.\n\nWHEN TO USE: When you discover a memory_bank fact is outdated, wrong, or incomplete — fix it immediately. Don't wait to be told. If you gave wrong info because of a stale memory, update it in the same turn you discover the error. This is YOUR memory — maintain it.\n\nUPDATE vs DELETE: Update when the fact is still relevant but details changed (version, path, status). Delete when the fact is no longer relevant at all or has been replaced by a different memory.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -538,7 +580,7 @@ Note: memory_bank is NOT outcome-scored. Facts persist until deleted.""",
             ),
             types.Tool(
                 name="delete_memory",
-                description="Delete outdated/irrelevant memories from memory_bank.",
+                description="Delete outdated/irrelevant memories from memory_bank.\n\nWHEN TO USE: When a memory_bank fact is wrong, stale, redundant, or harmful. Deleting bad memories is as important as storing good ones. If a memory has been misleading you across sessions, don't just score it 'failed' — delete it. memory_bank is not outcome-scored, so scoring alone won't remove it. You must act directly.\n\nUPDATE vs DELETE: Delete when the fact is completely wrong or no longer relevant. Update (use update_memory instead) when the fact is still relevant but details changed.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -554,24 +596,38 @@ Note: memory_bank is NOT outcome-scored. Facts persist until deleted.""",
 ⚠️ IMPORTANT: This tool is ONLY for scoring when prompted by the hook. Do NOT call it at other times.
 For storing important learnings at any time, use record_response(key_takeaway="...") instead.
 
+FINDING MEMORY IDs:
+The scoring prompt lists memory IDs to score. These IDs correspond to [id:...] tags
+in the KNOWN CONTEXT block from the previous turn. Look at KNOWN CONTEXT to see what
+each memory contained, then score based on whether it helped your response.
+
 EXCHANGE OUTCOME (read user's reaction):
 ✓ worked = user satisfied, says thanks, moves on
 ✗ failed = user corrects you, says "no", "that's wrong", provides the right answer
 ~ partial = user says "kind of" or takes some but not all of your answer
 ? unknown = no clear signal from user
 
-PER-MEMORY SCORING (v0.2.8):
-You MUST score each cached memory individually in memory_scores:
+PER-MEMORY SCORING:
+You MUST score each memory ID listed in the scoring prompt:
 • worked = this memory was helpful
 • partial = somewhat helpful
 • unknown = didn't use this memory
-• failed = this memory was MISLEADING
+• failed = this memory was MISLEADING (gave bad advice that led you astray)
 
-You MAY add scores for any other memory in your context (KNOWN CONTEXT, earlier conversation, searched memories).
+You MAY also score any other memory visible in KNOWN CONTEXT or earlier conversation.
 
-⚠️ CRITICAL - "failed" for memories means MISLEADING, not just unused.
-Only mark a memory as "failed" if it gave bad advice that led you astray.
-If you didn't use a memory, mark it "unknown" not "failed".""",
+⚠️ CRITICAL - "failed" means MISLEADING, not just unused.
+If you didn't use a memory, mark it "unknown" not "failed".
+
+ACTIVE MEMORY MANAGEMENT:
+• "failed" is not punishment — it's pruning. A memory scored "failed"
+  3 times will be demoted or deleted. This is GOOD. Use it.
+• If a memory was MISLEADING in your response (you gave wrong info
+  because of it), score it "failed" even if the exchange went okay
+• If you notice a pattern memory surfacing repeatedly with "unknown"
+  scores, consider: is this memory actually useful? If not, scoring
+  "failed" once helps the system stop wasting context on it
+• You are the gardener. Pull the weeds.""",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -619,17 +675,53 @@ Scoring happens via score_response on the next turn: +0.2 worked, +0.05 partial,
             ),
             types.Tool(
                 name="get_context_insights",
-                description="""Search your memory before responding. Returns what you know about this user/topic.
+                description="""You have outcome-based persistent memory that learns across sessions.
 
-WORKFLOW (follow these steps):
+HOW IT WORKS:
+Your memories are scored every time they surface. Scores drive the lifecycle:
+• working (new, 24h) → score ≥0.7 + 2 uses → history (30d) → score ≥0.9 + uses ≥3 + 5 proven successes → patterns (permanent)
+• Score drops below 0.4 → demoted. Below 0.2 → deleted.
+• memory_bank: permanent facts you store manually (not outcome-scored — ranked by importance × confidence, with Wilson weighting blended into ranking after 3 uses)
+• books: reference documents (not scored, permanent)
+
+READING RESULTS:
+• w:0.68 = Wilson confidence (statistical lower bound — higher = more proven useful)
+• s:0.7 = outcome score (raw success rate, 0-1)
+• 8 uses = times surfaced and scored (more = more battle-tested)
+• [YYN] = last 3 outcomes (Y=worked, ~=partial, N=failed)
+• 5d = age
+• [id:patterns_abc123] = memory ID — look up with search_memory(id=...)
+
+SEARCHING:
+• Semantic: search_memory(query="auth bug") — find by meaning
+• Temporal: search_memory(days_back=7) — recent memories, no query needed
+• Direct: search_memory(id="patterns_abc") — look up by ID
+• Combined: search_memory(query="auth", days_back=14) — meaning + time filter
+
+YOUR ROLE:
+Score honestly — your scores determine which memories survive and improve.
+Use add_to_memory_bank() SELECTIVELY for permanent facts only.
+Use record_response() for significant learnings worth preserving.
+
+MEMORY HYGIENE (your responsibility):
+• When you give a wrong answer and get corrected, actively score the
+  misleading memory as "failed" — don't just score the exchange
+• When you notice a memory_bank fact that's outdated or wrong, use
+  update_memory or delete_memory immediately — don't wait to be told
+• When you store a new fact, verify it first. If you can't verify it,
+  store with confidence=0.5, not 0.9
+• When KNOWN CONTEXT contains a memory you know is wrong from THIS
+  session's work, call it out: "Note: [id:xxx] appears outdated because..."
+• Never state specific details (ports, paths, versions, numbers) from
+  memory without checking — if it's not in KNOWN CONTEXT verbatim or
+  confirmed by a tool call, say "I believe X but let me verify"
+
+WORKFLOW:
 1. get_context_insights(query) ← YOU ARE HERE
-2. Read the context returned
-3. search_memory() if you need more details
+2. Read context — memories include [id:...] tags for reference
+3. search_memory() if you need more details (use id= for direct lookup)
 4. Respond to user
-5. record_response() to complete
-
-Returns: Known facts, past solutions, recommended collections, tool stats.
-Uses semantic search across your memory collections.
+5. record_response() for significant learnings
 
 PROACTIVE MEMORY: If you learn something NEW about the user during the conversation
 (name, preference, goal, project context), use add_to_memory_bank() to store it.
@@ -665,67 +757,124 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                 limit = arguments.get("limit", 5)
                 metadata = arguments.get("metadata")
                 sort_by = arguments.get("sort_by")
+                days_back = arguments.get("days_back")
+                doc_id = arguments.get("id")
 
-                # v0.2.0: Auto-detect temporal queries for recency sort
-                if sort_by is None and _is_temporal_query(query):
-                    sort_by = "recency"
-
-                try:
-                    result = await _api_call("POST", "/api/search", {
-                        "query": query,
-                        "conversation_id": _mcp_session_id,
-                        "collections": collections,
-                        "limit": limit,
-                        "metadata_filters": metadata,
-                        "sort_by": sort_by
-                    })
-                    results = result.get("results", [])
-
-                    # v0.2.0: Apply sorting if requested
-                    if sort_by:
-                        results = _sort_results(results, sort_by)
-
-                except Exception as search_err:
+                # Validation: at least one of query, days_back, or id must be provided
+                if not query and not days_back and not doc_id:
                     return [types.TextContent(
                         type="text",
-                        text=f"Search error: {search_err}"
+                        text="Provide at least one of: query, days_back, or id"
                     )]
 
-                if not results:
-                    text = f"No results found for '{query}'."
+                # Direct ID lookup — bypass search entirely
+                if doc_id:
+                    try:
+                        result = await _api_call("POST", "/api/search", {
+                            "query": "",
+                            "conversation_id": _mcp_session_id,
+                            "id": doc_id,
+                            "limit": 1
+                        })
+                        results = result.get("results", [])
+                    except Exception as search_err:
+                        return [types.TextContent(
+                            type="text",
+                            text=f"Lookup error: {search_err}"
+                        )]
+
+                    if not results:
+                        return [types.TextContent(
+                            type="text",
+                            text=f"Memory '{doc_id}' not found."
+                        )]
                 else:
-                    text = f"Found {len(results)} result(s) for '{query}':\n\n"
+                    # v0.2.0: Auto-detect temporal queries for recency sort
+                    if sort_by is None and query and _is_temporal_query(query):
+                        sort_by = "recency"
+
+                    # Default to recency sort for days_back without query
+                    if sort_by is None and days_back and not query:
+                        sort_by = "recency"
+
+                    try:
+                        result = await _api_call("POST", "/api/search", {
+                            "query": query,
+                            "conversation_id": _mcp_session_id,
+                            "collections": collections,
+                            "limit": limit,
+                            "metadata_filters": metadata,
+                            "sort_by": sort_by,
+                            "days_back": days_back
+                        })
+                        results = result.get("results", [])
+
+                        # v0.2.0: Apply sorting if requested
+                        if sort_by:
+                            results = _sort_results(results, sort_by)
+
+                    except Exception as search_err:
+                        return [types.TextContent(
+                            type="text",
+                            text=f"Search error: {search_err}"
+                        )]
+
+                if not results:
+                    search_desc = query if query else f"last {days_back} days" if days_back else "search"
+                    text = f"No results found for '{search_desc}'."
+                else:
+                    search_desc = query if query else f"last {days_back} days" if days_back else "search"
+                    text = f"Found {len(results)} result(s) for '{search_desc}':\n\n"
                     for i, r in enumerate(results[:limit], 1):
-                        metadata = r.get("metadata", {})
-                        doc_id = r.get("id", "")
-                        # Content can be in multiple places
-                        content = r.get("content") or metadata.get("content") or metadata.get("text") or r.get("text", "")
+                        metadata = r.get("metadata") or {}
+                        result_doc_id = r.get("id", "")
+                        # Use normalized content (falls back to metadata locations)
+                        content = r.get("content") or metadata.get("content") or metadata.get("text") or ""
                         collection = r.get("collection", "unknown")
 
-                        # Build metadata parts
+                        # Build metadata parts — use normalized fields when available
                         meta_parts = []
 
-                        # Age from created_at
-                        age = _humanize_age(metadata.get("created_at", ""))
+                        # Age: prefer normalized age field, fall back to computing from metadata
+                        age = r.get("age") or _humanize_age(metadata.get("created_at", "") or metadata.get("timestamp", ""))
                         if age:
                             meta_parts.append(age)
 
-                        # Outcome history for scored collections
+                        # Scored collections: show score, Wilson, uses, outcome history
                         if collection in ["patterns", "history", "working"]:
-                            score = metadata.get("score", 0.5)
-                            outcomes = _format_outcomes(metadata.get("outcome_history", ""))
+                            try:
+                                score = float(r.get("score", metadata.get("score", 0.5)) or 0.5)
+                                wilson = float(r.get("wilson_score", 0) or 0)
+                                uses = r.get("uses", metadata.get("uses", 0))
+                            except (ValueError, TypeError):
+                                score, wilson, uses = 0.5, 0, 0
+                            outcomes = r.get("outcome_history") or _format_outcomes(metadata.get("outcome_history", ""))
                             meta_parts.append(f"s:{score:.1f}")
+                            if wilson and wilson > 0:
+                                meta_parts.append(f"w:{wilson:.2f}")
+                            if uses:
+                                meta_parts.append(f"{uses} uses")
                             if outcomes:
                                 meta_parts.append(outcomes)
 
-                        # v0.2.0: Show book title for books collection
-                        if collection == "books":
+                        # Memory bank: show importance/confidence
+                        elif collection == "memory_bank":
+                            try:
+                                imp = float(r.get("importance", metadata.get("importance", 0.7)) or 0.7)
+                                conf = float(r.get("confidence", metadata.get("confidence", 0.7)) or 0.7)
+                            except (ValueError, TypeError):
+                                imp, conf = 0.7, 0.7
+                            meta_parts.append(f"imp:{imp:.1f}")
+                            meta_parts.append(f"conf:{conf:.1f}")
+
+                        # Books: show title
+                        elif collection == "books":
                             book_title = metadata.get("title", "")
                             if book_title and book_title != "Untitled":
                                 meta_parts.append(f"📖 {book_title}")
 
                         meta_str = f" ({', '.join(meta_parts)})" if meta_parts else ""
-                        id_str = f" [id:{doc_id}]" if doc_id else ""  # v0.2.4: Full ID for related param
+                        id_str = f" [id:{result_doc_id}]" if result_doc_id else ""
                         text += f"{i}. [{collection}]{meta_str}{id_str} {content}\n\n"
 
                 return [types.TextContent(type="text", text=text)]
@@ -839,6 +988,9 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                 )]
 
             elif name == "get_context_insights":
+                global _context_insights_count
+                _context_insights_count += 1
+
                 query = arguments.get("query", "")
 
                 if not query:
@@ -869,8 +1021,12 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                     text += "**Relevant Memories:**\n"
                     for mem in memories:
                         coll = mem.get("collection", "unknown")
-                        content = mem.get("content") or mem.get("metadata", {}).get("content", "")
-                        score = mem.get("metadata", {}).get("score", 0.5)
+                        mem_meta = mem.get("metadata") or {}
+                        content = mem.get("content") or mem_meta.get("content", "")
+                        try:
+                            score = float(mem.get("score", mem_meta.get("score", 0.5)) or 0.5)
+                        except (ValueError, TypeError):
+                            score = 0.5
                         text += f"• [{coll}] (score:{score:.2f}) {content}\n"
                     text += "\n"
 
@@ -878,6 +1034,10 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                     text += "No relevant context found. This may be a new topic or first interaction.\n"
 
                 text += f"\n_Cached {len(doc_ids)} doc_ids for outcome scoring._"
+
+                # v0.3.5: Periodic self-audit — every 4th call, remind LLM to maintain memory
+                if user_facts and _context_insights_count % 4 == 0:
+                    text += "\n\nSELF-AUDIT: Review any memory_bank items above. If any look outdated, wrong, or redundant, use update_memory or delete_memory to clean them up. Good assistants maintain their own memory."
 
                 # Add update notice if available (checked once per session)
                 text += _get_update_notice()

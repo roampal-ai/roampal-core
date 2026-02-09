@@ -175,7 +175,8 @@ class SearchService:
         collections: Optional[List[CollectionName]] = None,
         metadata_filters: Optional[Dict[str, Any]] = None,
         return_metadata: bool = False,
-        transparency_context: Optional[Any] = None
+        transparency_context: Optional[Any] = None,
+        sort_by: Optional[str] = None
     ) -> Union[List[Dict], Dict]:
         """
         Search memory with intelligent routing and optional metadata filtering.
@@ -188,6 +189,7 @@ class SearchService:
             metadata_filters: ChromaDB where filters
             return_metadata: Include pagination metadata
             transparency_context: Optional context for tracking
+            sort_by: Sort order (recency, score, relevance). Default: relevance for queries, recency for empty.
 
         Returns:
             Ranked results (list or dict with pagination metadata)
@@ -205,7 +207,9 @@ class SearchService:
         # Special handling for empty query - return all items
         if not query or query.strip() == "":
             return await self._search_all(
-                collections, limit, offset, return_metadata
+                collections, limit, offset, return_metadata,
+                metadata_filters=metadata_filters,
+                sort_by=sort_by
             )
 
         # Preprocess query for better retrieval
@@ -278,9 +282,13 @@ class SearchService:
         collections: List[str],
         limit: int,
         offset: int,
-        return_metadata: bool
+        return_metadata: bool,
+        metadata_filters: Optional[Dict[str, Any]] = None,
+        sort_by: Optional[str] = None
     ) -> Union[List[Dict], Dict]:
-        """Handle empty query - return all items."""
+        """Handle empty query - return all items with full scoring pipeline."""
+        from .unified_memory_system import normalize_memory
+
         all_results = []
 
         for coll_name in collections:
@@ -297,18 +305,40 @@ class SearchService:
                     result = {
                         'id': items['ids'][i],
                         'content': items['documents'][i] if i < len(items['documents']) else '',
-                        'text': items['documents'][i] if i < len(items['documents']) else '',
                         'metadata': metadata,
                         'collection': coll_name
                     }
-                    if 'score' in metadata:
-                        result['score'] = metadata['score']
+                    # Normalize for consistent fields (created_at, score, tags, etc.)
+                    result = normalize_memory(result, coll_name)
                     all_results.append(result)
             except Exception as e:
                 logger.error(f"Error getting all items from {coll_name}: {e}")
 
-        # Sort by timestamp
-        all_results.sort(key=lambda x: x.get('metadata', {}).get('timestamp', ''), reverse=True)
+        # Apply metadata + date filters (previously bypassed for empty queries)
+        if metadata_filters:
+            chromadb_filters, date_filters = self._extract_date_filters(metadata_filters)
+            # v0.3.5: Apply non-date metadata filters in Python (chromadb_filters
+            # can't be passed to .get() retroactively since we already fetched)
+            if chromadb_filters:
+                for key, value in chromadb_filters.items():
+                    if isinstance(value, dict):
+                        # Operator filters like {"$gte": x} — skip, these are for ChromaDB
+                        continue
+                    all_results = [r for r in all_results if (r.get("metadata") or {}).get(key) == value]
+            if date_filters:
+                all_results = self._apply_date_filters(all_results, date_filters)
+
+        # Apply scoring pipeline (Wilson, learned_score, final_rank_score)
+        all_results = self.scoring_service.apply_scoring_to_results(all_results, sort=False)
+
+        # Sort by requested order (default: recency for no-query searches)
+        if sort_by == "score":
+            all_results.sort(key=lambda x: x.get("score", 0.5), reverse=True)
+        elif sort_by == "relevance":
+            all_results.sort(key=lambda x: x.get("final_rank_score", 0.0), reverse=True)
+        else:
+            # Default: recency — use normalized created_at
+            all_results.sort(key=lambda x: x.get("created_at", ""), reverse=True)
 
         paginated_results = all_results[offset:offset + limit]
         if return_metadata:

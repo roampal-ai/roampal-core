@@ -67,11 +67,12 @@ def _restart_server(server_url: str, port: int, timeout: float = 15.0) -> bool:
             for line in result.stdout.splitlines():
                 if f"127.0.0.1:{port}" in line and "LISTENING" in line:
                     pid = line.strip().split()[-1]
-                    subprocess.run(
-                        ["taskkill", "/pid", pid, "/f"],
-                        capture_output=True, timeout=5
-                    )
-                    print(f"Roampal: killed stale server process {pid}", file=sys.stderr)
+                    if pid.isdigit():
+                        subprocess.run(
+                            ["taskkill", "/pid", pid, "/f"],
+                            capture_output=True, timeout=5
+                        )
+                        print(f"Roampal: killed stale server process {pid}", file=sys.stderr)
                     break
         else:
             # Unix: lsof + kill
@@ -80,8 +81,9 @@ def _restart_server(server_url: str, port: int, timeout: float = 15.0) -> bool:
             )
             if result.stdout.strip():
                 pid = result.stdout.strip().split('\n')[0]
-                subprocess.run(["kill", "-9", pid], capture_output=True, timeout=5)
-                print(f"Roampal: killed stale server process {pid}", file=sys.stderr)
+                if pid.isdigit():
+                    subprocess.run(["kill", "-9", pid], capture_output=True, timeout=5)
+                    print(f"Roampal: killed stale server process {pid}", file=sys.stderr)
     except Exception:
         pass  # Best effort — if we can't kill, the new server will fail to bind and we'll exit
 
