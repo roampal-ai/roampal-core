@@ -159,7 +159,7 @@ Your AI gets 7 memory tools:
 
 - Python 3.10+
 - One of: **Claude Code** or **OpenCode**
-- **Platforms:** Windows, macOS, Linux
+- **Platforms:** Windows, macOS, Linux (primarily developed and tested on Windows)
 
 ## Troubleshooting
 
