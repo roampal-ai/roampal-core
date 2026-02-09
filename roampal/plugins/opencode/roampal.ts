@@ -33,7 +33,7 @@ const ROAMPAL_DEV = process.env.ROAMPAL_DEV === "1"
 const ROAMPAL_PORT = ROAMPAL_DEV ? 27183 : 27182
 const ROAMPAL_HOOK_URL = `http://127.0.0.1:${ROAMPAL_PORT}/api/hooks`
 
-// Debug logging to file (console.log is invisible from plugins)
+// Debug logging to file (console.log leaks into OpenCode UI on some platforms)
 import { appendFileSync } from "fs"
 import { join } from "path"
 const DEBUG_LOG = join(process.env.APPDATA || process.env.HOME || ".", "roampal_plugin_debug.log")
@@ -157,7 +157,7 @@ async function restartServer(): Promise<boolean> {
             const pid = line.trim().split(/\s+/).pop()
             if (pid) {
               execSync(`taskkill /pid ${pid} /f`, { timeout: 5000 })
-              console.log(`[roampal] Killed stale server process ${pid}`)
+              debugLog(`Killed stale server process ${pid}`)
             }
             break
           }
@@ -167,7 +167,7 @@ async function restartServer(): Promise<boolean> {
         if (result) {
           const pid = result.split("\n")[0]
           execSync(`kill -9 ${pid}`, { timeout: 5000 })
-          console.log(`[roampal] Killed stale server process ${pid}`)
+          debugLog(`Killed stale server process ${pid}`)
         }
       }
     } catch {
@@ -188,7 +188,7 @@ async function restartServer(): Promise<boolean> {
       ...(process.platform === "win32" ? { windowsHide: true } : {})
     }).unref()
 
-    console.log(`[roampal] Starting fresh server on port ${port}`)
+    debugLog(`Starting fresh server on port ${port}`)
 
     // 3. Poll for health
     const healthUrl = `http://127.0.0.1:${port}/api/health`
@@ -199,7 +199,7 @@ async function restartServer(): Promise<boolean> {
       try {
         const resp = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) })
         if (resp.ok) {
-          console.log("[roampal] Server restarted successfully")
+          debugLog("Server restarted successfully")
           return true
         }
       } catch {
@@ -555,7 +555,7 @@ Return JSON: {"outcome": "worked"}`
 // ============================================================================
 
 export const RoampalPlugin: Plugin = async ({ client }) => {
-  console.log(`[roampal] Plugin loaded (${ROAMPAL_DEV ? "DEV" : "PROD"} mode, port ${ROAMPAL_PORT})`)
+  debugLog(`Plugin loaded (${ROAMPAL_DEV ? "DEV" : "PROD"} mode, port ${ROAMPAL_PORT})`)
 
   // Discover available Zen free models at startup — replaces hardcoded list.
   // If discovery fails, the hardcoded fallback list is used.
@@ -800,7 +800,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           const sid = event.properties?.info?.id
           if (!sid) break
           sessionContextMap.set(sid, { sessionId: sid, userPrompt: "" })
-          console.log(`[roampal] Session created: ${sid}`)
+          debugLog(`Session created: ${sid}`)
           break
         }
 
@@ -827,7 +827,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           // If so, we skip independent scoring (main LLM provided precise per-memory scores)
           if (part.type === "tool-invocation" && part.name === "score_response") {
             mainLLMScored.set(sid, true)
-            console.log(`[roampal] Main LLM called score_response for session ${sid}`)
+            debugLog(`Main LLM called score_response for session ${sid}`)
             break
           }
 
@@ -866,7 +866,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           if (ctx?.userPrompt && textParts?.size) {
             const assistantText = Array.from(textParts.values()).join("\n")
             await storeExchange(sid, ctx.userPrompt, assistantText)
-            console.log(`[roampal] Stored exchange for session ${sid}`)
+            debugLog(`Stored exchange for session ${sid}`)
 
             // Reset for next exchange
             ctx.userPrompt = ""
@@ -931,7 +931,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           mainLLMScored.delete(sid)
           cachedContext.delete(sid)
           pendingScoringData.delete(sid)
-          console.log(`[roampal] Session deleted: ${sid}`)
+          debugLog(`Session deleted: ${sid}`)
           break
         }
       }
