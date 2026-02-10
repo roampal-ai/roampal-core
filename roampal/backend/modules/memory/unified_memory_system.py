@@ -1094,7 +1094,7 @@ class UnifiedMemorySystem:
             if user_name:
                 parts.append(f"User: {user_name}")
 
-            for mem in memories[:3]:
+            for mem in memories[:4]:
                 # Normalize for consistent field access
                 normalized = normalize_memory(dict(mem), mem.get("collection", "unknown"))
 
