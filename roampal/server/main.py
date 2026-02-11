@@ -614,6 +614,15 @@ def create_app() -> FastAPI:
             logger.error(f"Error getting context: {e}\n{traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/api/hooks/check-scored")
+    async def check_scored(conversation_id: str = ""):
+        """Check if score_response was already called for this conversation this turn.
+        Used by OpenCode plugin to skip sidecar if main LLM already scored."""
+        if not _session_manager:
+            return {"scored": False}
+        scored = _session_manager.was_scored_this_turn(conversation_id)
+        return {"scored": scored}
+
     @app.post("/api/hooks/stop", response_model=StopHookResponse)
     async def stop_hook(request: StopHookRequest):
         """
@@ -1049,21 +1058,23 @@ def create_app() -> FastAPI:
             # Track that score_response was called this turn (for Stop hook blocking)
             _session_manager.set_scored_this_turn(conversation_id, True)
 
+            # v0.3.6: Resolve the plugin session ID via injection_map BEFORE outcome check.
+            # The MCP session ID (conversation_id) differs from the plugin session (ses_xxx).
+            # We need to mark the plugin session as scored so check-scored returns true.
+            exchange_conv_id = conversation_id
+            if request.memory_scores and _injection_map:
+                for doc_id in request.memory_scores.keys():
+                    injection = _injection_map.get(doc_id)
+                    if injection:
+                        exchange_conv_id = injection["conversation_id"]
+                        _session_manager.set_scored_this_turn(exchange_conv_id, True)
+                        logger.info(f"Resolved conversation {exchange_conv_id} via injection_map (doc_id={doc_id})")
+                        break
+
             # v0.2.9.2: Score the exchange itself with the outcome
             # This was accidentally removed in v0.2.3's performance fix
             exchange_doc_id = None
-            exchange_conv_id = conversation_id  # Track which session the exchange came from
             if request.outcome in ["worked", "failed", "partial"]:
-                # v0.3.2: Try to find the correct conversation via injection_map first
-                # This is the most robust approach for multi-session scoring
-                # Look up any memory being scored to find which conversation received it
-                if request.memory_scores and _injection_map:
-                    for doc_id in request.memory_scores.keys():
-                        injection = _injection_map.get(doc_id)
-                        if injection:
-                            exchange_conv_id = injection["conversation_id"]
-                            logger.info(f"Resolved conversation {exchange_conv_id} via injection_map (doc_id={doc_id})")
-                            break
 
                 # Get exchange doc_id from session manager's cache (O(1) lookup)
                 previous = _session_manager._last_exchange_cache.get(exchange_conv_id)
