@@ -842,15 +842,23 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
 
         case "message.part.updated": {
           const part = event.properties?.part
+
+          // DEBUG: Log RAW part data BEFORE any guards filter it out
+          if (part && part.type !== "text") {
+            debugLog(`part.updated RAW: type=${part.type}, name=${part.name}, toolName=${part.toolName}, tool=${part.tool}, sessionID=${part.sessionID}, messageID=${part.messageID}, keys=${Object.keys(part).join(",")}`)
+          }
+
           if (!part || !part.sessionID || !part.messageID) break
 
           const sid = part.sessionID
 
           // Track tool invocations — detect if main LLM called score_response
-          // If so, we skip independent scoring (main LLM provided precise per-memory scores)
-          if (part.type === "tool-invocation" && part.name === "score_response") {
+          // Check multiple possible field names for tool call detection
+          const toolName = part.name || part.toolName || part.tool
+          const isToolPart = part.type === "tool-invocation" || part.type === "tool-call" || part.type === "tool_invocation" || part.type === "tool_call"
+          if (isToolPart && toolName === "score_response") {
             mainLLMScored.set(sid, true)
-            debugLog(`Main LLM called score_response for session ${sid}`)
+            debugLog(`Main LLM called score_response for session ${sid} (part.type=${part.type})`)
             break
           }
 
@@ -917,8 +925,24 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           if (scoringData) {
             pendingScoringData.delete(sid)
 
-            if (mainLLMScored.get(sid)) {
-              debugLog(`session.idle: Main LLM scored — skipping sidecar for ${sid}`)
+            // v0.3.6: Server-side check — ask the server if score_response was already called.
+            // This replaces the broken client-side mainLLMScored detection (message.part.updated
+            // never fires for MCP tool calls in OpenCode).
+            let serverSaysScored = false
+            try {
+              const checkResp = await fetch(`${ROAMPAL_HOOK_URL}/check-scored?conversation_id=${encodeURIComponent(sid)}`, {
+                signal: AbortSignal.timeout(3000)
+              })
+              if (checkResp.ok) {
+                const checkData = await checkResp.json() as { scored: boolean }
+                serverSaysScored = checkData.scored
+              }
+            } catch (err) {
+              debugLog(`session.idle: check-scored failed (${err}), assuming not scored`)
+            }
+
+            if (mainLLMScored.get(sid) || serverSaysScored) {
+              debugLog(`session.idle: Main LLM already scored — skipping sidecar for ${sid} (client=${mainLLMScored.get(sid) || false}, server=${serverSaysScored})`)
             } else {
               // Main LLM didn't score — run sidecar with uniform scoring
               debugLog(`session.idle: Main LLM did NOT score — running sidecar for ${sid}`)
