@@ -292,6 +292,8 @@ Keep it conversational - don't interrogate. A simple "I don't think we've met - 
         return None
 
 
+
+
 # ==================== Request/Response Models ====================
 
 class GetContextRequest(BaseModel):
@@ -320,9 +322,11 @@ class GetContextResponse(BaseModel):
 class StopHookRequest(BaseModel):
     """Request from Stop hook after LLM responds."""
     conversation_id: str
-    user_message: str
-    assistant_response: str
+    user_message: str = ""  # v0.3.6: Optional — Claude Code sends empty (state-only)
+    assistant_response: str = ""  # v0.3.6: Optional — Claude Code sends empty (state-only)
     transcript: Optional[str] = None  # Full transcript to check for record_response call
+    metadata: Optional[Dict[str, Any]] = None  # v0.3.6: Extra metadata (e.g., memory_type: "exchange_summary")
+    lifecycle_only: bool = False  # v0.3.6: Track in session JSONL but skip ChromaDB storage
 
 
 class StopHookResponse(BaseModel):
@@ -341,7 +345,7 @@ class SearchRequest(BaseModel):
     id: Optional[str] = Field(None, max_length=200)
     conversation_id: Optional[str] = Field(None, max_length=200)
     collections: Optional[List[str]] = None
-    limit: int = Field(10, ge=1, le=100)
+    limit: int = Field(10, ge=1, le=500)
     metadata_filters: Optional[Dict[str, Any]] = None
     sort_by: Optional[str] = Field(None, pattern="^(relevance|recency|score)$")
 
@@ -367,6 +371,8 @@ class RecordOutcomeRequest(BaseModel):
     outcome: str  # worked, failed, partial, unknown
     related: Optional[List[str]] = None  # DEPRECATED: use memory_scores instead
     memory_scores: Optional[Dict[str, str]] = None  # v0.2.8: Per-memory scoring (doc_id -> outcome)
+    exchange_summary: Optional[str] = None  # v0.3.6: ~300 char summary from main LLM
+    exchange_outcome: Optional[str] = None  # v0.3.6: backward compat alias for outcome
 
 
 class RecordResponseRequest(BaseModel):
@@ -375,10 +381,11 @@ class RecordResponseRequest(BaseModel):
     conversation_id: str
 
 
-class ContextInsightsRequest(BaseModel):
-    """Request for context insights (MCP tool proxy)."""
-    query: str
-    conversation_id: Optional[str] = None
+class UpdateContentRequest(BaseModel):
+    """Request to update a memory's content (v0.3.6 summarization)."""
+    doc_id: str
+    collection: str
+    new_content: str
 
 
 # ==================== Lifecycle ====================
@@ -436,7 +443,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Roampal",
         description="Persistent memory for AI coding tools",
-        version="0.3.5",
+        version="0.3.6",
         lifespan=lifespan
     )
 
@@ -559,6 +566,9 @@ def create_app() -> FastAPI:
                 else:
                     # No unscored exchange, but assistant did complete
                     _session_manager.set_scoring_required(conversation_id, False)
+
+                # v0.3.6: Exchange summarization handled by main LLM via score_memories
+                # (no background sidecar needed — see Change 9 platform-split architecture)
             else:
                 # User interrupted mid-work OR cold start - no scoring needed
                 _session_manager.set_scoring_required(conversation_id, False)
@@ -616,7 +626,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/hooks/check-scored")
     async def check_scored(conversation_id: str = ""):
-        """Check if score_response was already called for this conversation this turn.
+        """Check if score_memories was already called for this conversation this turn.
         Used by OpenCode plugin to skip sidecar if main LLM already scored."""
         if not _session_manager:
             return {"scored": False}
@@ -628,9 +638,14 @@ def create_app() -> FastAPI:
         """
         Called by Stop hook AFTER the LLM responds.
 
-        1. Stores the exchange with doc_id for later scoring
-        2. Checks if record_response was called (with retry for race condition)
-        3. Returns should_block=True if scoring was required but not done
+        v0.3.6: Two modes via lifecycle_only flag:
+        - Claude Code (lifecycle_only=True): JSONL exchange tracking + state management.
+          Exchanges stored in session JSONL for scoring prompt generation, but NOT in ChromaDB.
+          Main LLM stores summaries directly via score_memories tool.
+        - OpenCode (lifecycle_only=False): Full exchange storage in both JSONL and ChromaDB.
+          Sidecar summarizes later via session.idle event.
+
+        Always handles turn lifecycle: checks scoring compliance, marks turn complete.
         """
         if not _memory or not _session_manager:
             raise HTTPException(status_code=503, detail="Memory system not ready")
@@ -638,37 +653,53 @@ def create_app() -> FastAPI:
         try:
             conversation_id = request.conversation_id or "default"
 
-            # Skip storing if either message is empty/blank
+            # Store exchange based on mode:
+            # - lifecycle_only=True (Claude Code): Store in session JSONL only (for scoring prompts)
+            #   Main LLM stores summaries in ChromaDB via score_memories tool.
+            # - lifecycle_only=False (OpenCode): Store in both JSONL and ChromaDB working memory
+            #   Sidecar summarizes later via session.idle event.
             user_msg = (request.user_message or "").strip()
             assistant_msg = (request.assistant_response or "").strip()
+            doc_id = ""
 
-            if not user_msg or not assistant_msg:
-                logger.warning(f"Skipping empty exchange storage: user={bool(user_msg)}, assistant={bool(assistant_msg)}")
-                return StopHookResponse(
-                    stored=False,
-                    doc_id="",
-                    scoring_complete=False,
-                    should_block=False
-                )
+            if user_msg and assistant_msg:
+                if request.lifecycle_only:
+                    # Claude Code path: JSONL only (for get_previous_exchange scoring lifecycle)
+                    # Skip ChromaDB — main LLM stores summaries via score_memories
+                    await _session_manager.store_exchange(
+                        conversation_id=conversation_id,
+                        user_message=request.user_message,
+                        assistant_response=request.assistant_response,
+                        doc_id=""  # No ChromaDB doc — main LLM handles storage
+                    )
+                    logger.info(f"Lifecycle-only exchange stored in JSONL for {conversation_id}")
+                else:
+                    # OpenCode path: Full storage in both ChromaDB and JSONL
+                    content = f"User: {user_msg}\n\nAssistant: {assistant_msg}"
+                    store_metadata = {
+                        "turn_type": "exchange",
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    if request.metadata:
+                        store_metadata.update(request.metadata)
 
-            # Store the exchange in working memory
-            content = f"User: {user_msg}\n\nAssistant: {assistant_msg}"
-            doc_id = await _memory.store_working(
-                content=content,
-                conversation_id=conversation_id,
-                metadata={
-                    "turn_type": "exchange",
-                    "timestamp": datetime.now().isoformat()
-                }
-            )
+                    doc_id = await _memory.store_working(
+                        content=content,
+                        conversation_id=conversation_id,
+                        metadata=store_metadata
+                    )
 
-            # Store exchange in session file
-            await _session_manager.store_exchange(
-                conversation_id=conversation_id,
-                user_message=request.user_message,
-                assistant_response=request.assistant_response,
-                doc_id=doc_id
-            )
+                    await _session_manager.store_exchange(
+                        conversation_id=conversation_id,
+                        user_message=request.user_message,
+                        assistant_response=request.assistant_response,
+                        doc_id=doc_id
+                    )
+                    logger.info(f"Full exchange {doc_id} stored for {conversation_id}")
+            else:
+                logger.info(f"State-only stop hook for {conversation_id} (no exchange data)")
+
+            # === State management (always runs) ===
 
             # IMPORTANT: Check scoring flags BEFORE set_completed() resets them
             scoring_was_required = _session_manager.was_scoring_required(conversation_id)
@@ -693,14 +724,12 @@ def create_app() -> FastAPI:
                 for sid, sdata in state.items():
                     if sid.startswith("mcp_") and sdata.get("scored_this_turn"):
                         scored_this_turn = True
-                        # Clear the MCP session's flag so it doesn't persist
                         _session_manager.set_scored_this_turn(sid, False)
                         logger.info(f"Session ID mismatch resolved: MCP {sid} scored for plugin {conversation_id}")
                         break
 
             # Mark assistant as completed - this signals UserPromptSubmit that
             # scoring is needed on the NEXT user message
-            # Note: This resets scoring_required, so we check it above first
             _session_manager.set_completed(conversation_id)
             logger.info(f"Marked assistant as completed for {conversation_id}")
 
@@ -711,20 +740,22 @@ def create_app() -> FastAPI:
 
             if scored_this_turn:
                 scoring_complete = True
-                logger.info(f"record_response was called this turn for {conversation_id}")
+                logger.info(f"score_memories was called this turn for {conversation_id}")
             elif scoring_was_required:
-                # Scoring was required this turn but LLM didn't call record_response
-                # SOFT ENFORCE: Log warning but don't block (prompt injection does 95% of the work)
-                # We trade guaranteed enforcement for smooth UX - no block_message either
+                # SOFT ENFORCE: Log warning but don't block
                 should_block = False
-                block_message = None  # Don't send any message to avoid UI noise
-                logger.warning(f"Soft enforce: record_response not called for {conversation_id}")
+                block_message = None
+                logger.warning(f"Soft enforce: score_memories not called for {conversation_id}")
             else:
-                # Scoring wasn't required (user interrupted mid-work) - don't block
                 logger.info(f"No scoring required this turn for {conversation_id} - not blocking")
 
+            # v0.3.6: Spawn background auto-summarize task (non-blocking)
+            # One old memory cleaned up per stop hook cycle.
+            # Follows existing pattern from _deferred_action_kg_updates().
+            asyncio.create_task(_auto_summarize_one_memory())
+
             return StopHookResponse(
-                stored=True,
+                stored=bool(doc_id),
                 doc_id=doc_id,
                 scoring_complete=scoring_complete,
                 should_block=should_block,
@@ -962,35 +993,6 @@ def create_app() -> FastAPI:
             logger.error(f"Error recording response: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.post("/api/context-insights")
-    async def context_insights_endpoint(request: ContextInsightsRequest):
-        """Get context insights for MCP tool proxy."""
-        if not _memory:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
-
-        try:
-            context = await _memory.get_context_for_injection(request.query)
-            doc_ids = context.get("doc_ids", [])
-
-            # Cache doc_ids for scoring (like hook injection does)
-            if request.conversation_id and doc_ids:
-                _search_cache[request.conversation_id] = {
-                    "doc_ids": doc_ids,
-                    "query": request.query,
-                    "source": "context_insights",
-                    "timestamp": datetime.now().isoformat()
-                }
-
-            return {
-                "user_facts": context.get("user_facts", []),
-                "relevant_memories": context.get("relevant_memories", []),
-                "doc_ids": doc_ids
-            }
-
-        except Exception as e:
-            logger.error(f"Error getting context insights: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
     # v0.2.3: Deferred background task for Action KG updates
     async def _deferred_action_kg_updates(
         doc_ids: List[str],
@@ -1017,7 +1019,7 @@ def create_app() -> FastAPI:
 
                 # Track in Action KG
                 action = ActionOutcome(
-                    action_type="score_response",
+                    action_type="score_memories",
                     context_type=context_type,
                     outcome=outcome,
                     doc_id=doc_id,
@@ -1043,7 +1045,7 @@ def create_app() -> FastAPI:
         """
         Record outcome for learning.
 
-        Called by the score_response MCP tool.
+        Called by the score_memories MCP tool.
         Scores:
         1. Most recent unscored exchange (across ALL sessions - handles MCP/hook ID mismatch)
         2. Cached search results (from _search_cache)
@@ -1055,55 +1057,68 @@ def create_app() -> FastAPI:
             conversation_id = request.conversation_id or "default"
             doc_ids_scored = []
 
-            # Track that score_response was called this turn (for Stop hook blocking)
+            # Track that score_memories was called this turn (for Stop hook blocking)
             _session_manager.set_scored_this_turn(conversation_id, True)
 
             # v0.3.6: Resolve the plugin session ID via injection_map BEFORE outcome check.
             # The MCP session ID (conversation_id) differs from the plugin session (ses_xxx).
             # We need to mark the plugin session as scored so check-scored returns true.
             exchange_conv_id = conversation_id
+            resolved_via = None
             if request.memory_scores and _injection_map:
                 for doc_id in request.memory_scores.keys():
                     injection = _injection_map.get(doc_id)
                     if injection:
                         exchange_conv_id = injection["conversation_id"]
                         _session_manager.set_scored_this_turn(exchange_conv_id, True)
-                        logger.info(f"Resolved conversation {exchange_conv_id} via injection_map (doc_id={doc_id})")
+                        resolved_via = f"injection_map (doc_id={doc_id})"
+                        logger.info(f"Resolved conversation {exchange_conv_id} via {resolved_via}")
                         break
 
-            # v0.2.9.2: Score the exchange itself with the outcome
-            # This was accidentally removed in v0.2.3's performance fix
+            # Fallback: if injection_map didn't resolve, check _last_exchange_cache
+            # for most recent unscored exchange (handles empty memory_scores case)
+            if not resolved_via and _session_manager:
+                best_ts = ""
+                for cid, exc in _session_manager._last_exchange_cache.items():
+                    if cid != conversation_id and not exc.get("scored", False):
+                        ts = exc.get("timestamp", "")
+                        if ts > best_ts:
+                            best_ts = ts
+                            exchange_conv_id = cid
+                            resolved_via = "last_exchange_cache (most recent unscored)"
+                if resolved_via:
+                    _session_manager.set_scored_this_turn(exchange_conv_id, True)
+                    logger.info(f"Resolved conversation {exchange_conv_id} via {resolved_via}")
+
+            # Look up the previous exchange doc_id (needed for summary replacement on OpenCode)
+            # Claude Code: exchange_doc_id will be None (stop hook doesn't store exchanges)
             exchange_doc_id = None
-            if request.outcome in ["worked", "failed", "partial"]:
+            previous = _session_manager._last_exchange_cache.get(exchange_conv_id)
+            if not previous:
+                previous = _session_manager._last_exchange_cache.get(conversation_id)
+                if previous:
+                    exchange_conv_id = conversation_id
 
-                # Get exchange doc_id from session manager's cache (O(1) lookup)
-                previous = _session_manager._last_exchange_cache.get(exchange_conv_id)
-                if not previous:
-                    # Try the original conversation_id as fallback
-                    previous = _session_manager._last_exchange_cache.get(conversation_id)
-                    if previous:
-                        exchange_conv_id = conversation_id
+            if not previous:
+                # Last resort: Find the MOST RECENT unscored exchange across all sessions
+                best_ts = ""
+                for cid, exc in _session_manager._last_exchange_cache.items():
+                    if not exc.get("scored", False):
+                        exc_ts = exc.get("timestamp", "")
+                        if exc_ts > best_ts:
+                            best_ts = exc_ts
+                            previous = exc
+                            exchange_conv_id = cid
+                if previous:
+                    logger.warning(f"Used 'most recent unscored' fallback - resolved to {exchange_conv_id}")
 
-                if not previous:
-                    # Last resort: Find the MOST RECENT unscored exchange across all sessions
-                    # This handles edge cases where injection_map doesn't have the doc_id
-                    best_ts = ""
-                    for cid, exc in _session_manager._last_exchange_cache.items():
-                        if not exc.get("scored", False):
-                            exc_ts = exc.get("timestamp", "")
-                            if exc_ts > best_ts:
-                                best_ts = exc_ts
-                                previous = exc
-                                exchange_conv_id = cid
-                    if previous:
-                        logger.warning(f"Used 'most recent unscored' fallback - resolved to {exchange_conv_id}")
-
-                if previous and previous.get("doc_id") and not previous.get("scored", False):
-                    exchange_doc_id = previous["doc_id"]
+            if previous and previous.get("doc_id") and not previous.get("scored", False):
+                exchange_doc_id = previous["doc_id"]
+                # Score the exchange with the outcome (skip for "unknown" — no signal)
+                if request.outcome in ["worked", "failed", "partial"]:
                     await _memory.record_outcome(doc_ids=[exchange_doc_id], outcome=request.outcome)
-                    # Mark as scored in session manager (use correct conversation_id)
-                    await _session_manager.mark_scored(exchange_conv_id, exchange_doc_id, request.outcome)
-                    logger.info(f"Scored exchange {exchange_doc_id} with outcome={request.outcome}")
+                await _session_manager.mark_scored(exchange_conv_id, exchange_doc_id, request.outcome)
+                logger.info(f"Scored exchange {exchange_doc_id} with outcome={request.outcome}")
 
             # v0.2.3: Skip session file scan - doc_ids are in _search_cache or request.related
             # Old approach scanned ALL session files (O(n×m) I/O) - now O(1) cache lookup
@@ -1134,7 +1149,7 @@ def create_app() -> FastAPI:
             # v0.2.8: Per-memory scoring - process each memory with individual outcome
             if request.memory_scores:
                 for doc_id, mem_outcome in request.memory_scores.items():
-                    if mem_outcome in ["worked", "failed", "partial"]:
+                    if mem_outcome in ["worked", "failed", "partial", "unknown"]:
                         await _memory.record_outcome(doc_ids=[doc_id], outcome=mem_outcome)
                         doc_ids_scored.append(doc_id)
                 logger.info(f"Per-memory scoring: {len(doc_ids_scored)} memories with individual outcomes")
@@ -1152,6 +1167,51 @@ def create_app() -> FastAPI:
                 logger.info(f"Cache scoring: {len(cached_doc_ids)} doc_ids")
                 if doc_ids_scored and request.outcome in ["worked", "failed", "partial"]:
                     await _memory.record_outcome(doc_ids=doc_ids_scored, outcome=request.outcome)
+
+            # v0.3.6: Store exchange summary
+            # Claude Code: main LLM stores summary directly (no prior exchange to replace)
+            # OpenCode: replace the full exchange stored by stop hook with summary
+            summary_stored = False
+            if request.exchange_summary and _memory:
+                try:
+                    if exchange_doc_id:
+                        # OpenCode path: replace existing full exchange with summary
+                        adapter = _memory.collections.get("working")
+                        if adapter:
+                            doc = adapter.get_fragment(exchange_doc_id)
+                            if doc:
+                                metadata = doc.get("metadata", {})
+                                metadata["text"] = request.exchange_summary
+                                metadata["content"] = request.exchange_summary
+                                metadata["memory_type"] = "exchange_summary"
+                                metadata["exchange_outcome"] = request.outcome
+                                metadata["summarized_at"] = datetime.now().isoformat()
+                                metadata["original_length"] = len(doc.get("content", ""))
+
+                                embedding = await _memory._embedding_service.embed_text(request.exchange_summary)
+                                await adapter.upsert_vectors(
+                                    ids=[exchange_doc_id],
+                                    vectors=[embedding],
+                                    metadatas=[metadata],
+                                )
+                                summary_stored = True
+                                logger.info(f"Replaced exchange {exchange_doc_id} with summary ({len(request.exchange_summary)} chars, was {metadata.get('original_length', '?')})")
+                    else:
+                        # Claude Code path: store summary directly as new working memory
+                        summary_doc_id = await _memory.store_working(
+                            content=request.exchange_summary,
+                            conversation_id=conversation_id,
+                            metadata={
+                                "memory_type": "exchange_summary",
+                                "exchange_outcome": request.outcome or "unknown",
+                                "summarized_at": datetime.now().isoformat(),
+                                "turn_type": "exchange",
+                            }
+                        )
+                        summary_stored = True
+                        logger.info(f"Stored exchange summary {summary_doc_id} directly ({len(request.exchange_summary)} chars)")
+                except Exception as e:
+                    logger.error(f"Failed to store exchange summary: {e}")
 
             # Log final result and trigger background updates
             if doc_ids_scored:
@@ -1181,12 +1241,195 @@ def create_app() -> FastAPI:
             return {
                 "success": True,
                 "outcome": request.outcome,
-                "documents_scored": len(doc_ids_scored)
+                "documents_scored": len(doc_ids_scored),
+                "summary_stored": summary_stored
             }
 
         except Exception as e:
             logger.error(f"Error recording outcome: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+
+    # ==================== Content Update (v0.3.6 Summarization) ====================
+
+    @app.post("/api/memory/update-content")
+    async def update_memory_content(request: UpdateContentRequest):
+        """
+        Update a memory's content and re-embed it.
+
+        v0.3.6: Used by `roampal summarize` to replace long memories with summaries.
+        """
+        if not _memory:
+            raise HTTPException(status_code=503, detail="Memory system not ready")
+
+        try:
+            collection = request.collection
+            if collection not in _memory.collections:
+                raise HTTPException(status_code=400, detail=f"Unknown collection: {collection}")
+
+            adapter = _memory.collections[collection]
+            doc = adapter.get_fragment(request.doc_id)
+            if not doc:
+                raise HTTPException(status_code=404, detail=f"Document not found: {request.doc_id}")
+
+            # Update metadata with new content
+            metadata = doc.get("metadata", {})
+            metadata["text"] = request.new_content
+            metadata["content"] = request.new_content
+            metadata["summarized_at"] = datetime.now().isoformat()
+            metadata["original_length"] = len(doc.get("content", ""))
+
+            # Re-embed with new content
+            embedding = await _memory._embedding_service.embed_text(request.new_content)
+            await adapter.upsert_vectors(
+                ids=[request.doc_id],
+                vectors=[embedding],
+                metadatas=[metadata]
+            )
+
+            logger.info(f"Updated content for {request.doc_id}: {metadata['original_length']} -> {len(request.new_content)} chars")
+            return {"success": True, "doc_id": request.doc_id, "new_length": len(request.new_content)}
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating content: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ==================== Auto-Summarize (v0.3.6 Change 10) ====================
+
+    async def _do_auto_summarize_one() -> Dict[str, Any]:
+        """
+        Find one long memory and summarize it. Shared by endpoint and background task.
+
+        v0.3.6: Sidecar-first routing — uses user's configured backend (Custom > Haiku > Zen > Ollama).
+        Returns dict with {summarized, reason, doc_id, old_len, new_len} or
+        {summarized: false, reason, doc_id, collection, content, old_len} for plugin Zen fallback.
+        """
+        if not _memory:
+            return {"summarized": False, "reason": "memory_not_ready"}
+
+        # Search for candidates across working, history, patterns
+        candidates = []
+        for coll_name in ["working", "history", "patterns"]:
+            try:
+                results = await _memory.search(
+                    query="",
+                    collections=[coll_name],
+                    limit=10,
+                    sort_by="recency"
+                )
+                for r in results:
+                    content = r.get("content", "")
+                    metadata = r.get("metadata", {})
+                    if len(content) > 400 and not metadata.get("summarized_at"):
+                        candidates.append((coll_name, r))
+                        if len(candidates) >= 1:
+                            break
+            except Exception as e:
+                logger.warning(f"Auto-summarize search error for {coll_name}: {e}")
+
+            if candidates:
+                break
+
+        if not candidates:
+            return {"summarized": False, "reason": "no_candidates"}
+
+        coll_name, memory = candidates[0]
+        content = memory.get("content", "")
+        doc_id = memory.get("id", memory.get("doc_id", ""))
+
+        # Summarize via sidecar (Custom > Haiku > Zen > Ollama > claude -p)
+        try:
+            from roampal.sidecar_service import summarize_only
+            summary = await asyncio.to_thread(summarize_only, content)
+        except Exception as e:
+            logger.warning(f"Auto-summarize backend error: {e}")
+            return {
+                "summarized": False, "reason": "backend_failed",
+                "doc_id": doc_id, "collection": coll_name,
+                "content": content, "old_len": len(content)
+            }
+
+        if not summary:
+            return {
+                "summarized": False, "reason": "backend_failed",
+                "doc_id": doc_id, "collection": coll_name,
+                "content": content, "old_len": len(content)
+            }
+
+        # Enforce summary length to prevent re-summarization loops
+        if len(summary) > 400:
+            summary = summary[:380] + "... [truncated]"
+
+        # Update memory with summary
+        try:
+            adapter = _memory.collections.get(coll_name)
+            if not adapter:
+                return {"summarized": False, "reason": "collection_not_found"}
+
+            doc = adapter.get_fragment(doc_id)
+            if not doc:
+                return {"summarized": False, "reason": "doc_not_found"}
+
+            metadata = doc.get("metadata", {})
+            metadata["text"] = summary
+            metadata["content"] = summary
+            metadata["summarized_at"] = datetime.now().isoformat()
+            metadata["original_length"] = len(content)
+
+            embedding = await _memory._embedding_service.embed_text(summary)
+            await adapter.upsert_vectors(
+                ids=[doc_id],
+                vectors=[embedding],
+                metadatas=[metadata]
+            )
+
+            logger.info(f"Auto-summarized {doc_id}: {len(content)} -> {len(summary)} chars")
+            return {
+                "summarized": True, "doc_id": doc_id,
+                "old_len": len(content), "new_len": len(summary)
+            }
+        except Exception as e:
+            logger.error(f"Auto-summarize update error: {e}")
+            return {"summarized": False, "reason": "update_failed"}
+
+    async def _auto_summarize_one_memory():
+        """
+        Background task: summarize one long memory. Non-blocking.
+
+        v0.3.6: Spawned at end of stop_hook handler via asyncio.create_task().
+        Follows existing pattern from _deferred_action_kg_updates().
+        """
+        try:
+            result = await _do_auto_summarize_one()
+            if result.get("summarized"):
+                logger.info(f"[Background] Auto-summarized {result['doc_id']}: {result['old_len']} -> {result['new_len']} chars")
+            elif result.get("reason") == "no_candidates":
+                logger.debug("[Background] No auto-summarize candidates found")
+            else:
+                logger.info(f"[Background] Auto-summarize skipped: {result.get('reason', 'unknown')}")
+        except Exception as e:
+            logger.error(f"[Background] Auto-summarize error: {e}")
+
+    @app.post("/api/memory/auto-summarize-one")
+    async def auto_summarize_one():
+        """
+        Find and summarize one long memory.
+
+        v0.3.6: Called by OpenCode plugin (session.idle) and Claude Code background task.
+        Sidecar-first: uses user's configured backend before plugin falls back to Zen.
+
+        Returns:
+            {summarized: true, doc_id, old_len, new_len} on success
+            {summarized: false, reason: "no_candidates"} if nothing to summarize
+            {summarized: false, reason: "backend_failed", doc_id, collection, content, old_len}
+                if sidecar failed (plugin can fall back to Zen)
+        """
+        if not _memory:
+            raise HTTPException(status_code=503, detail="Memory system not ready")
+
+        result = await _do_auto_summarize_one()
+        return result
 
     # ==================== Health/Status Endpoints ====================
 

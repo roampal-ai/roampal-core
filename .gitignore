@@ -89,6 +89,8 @@ secrets.json
 credentials.json
 
 # Dev artifacts
+dev/benchmarks/results/
+dev/benchmarks/*_data/
 dev/benchmarks/test_latency_data/
 test_venv/
 nul

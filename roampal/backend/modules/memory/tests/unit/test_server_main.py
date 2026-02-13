@@ -27,7 +27,7 @@ class PIIGuardConfig:
     def _load(self):
         """Load forbidden values from local config if it exists."""
         # Defaults (known past leaks)
-        self.forbidden_names = ["logan", "logte"]
+        self.forbidden_names = []
         self.forbidden_emails = []
         self.forbidden_api_keys = []
         self.forbidden_urls = []

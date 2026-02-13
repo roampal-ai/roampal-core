@@ -3,10 +3,15 @@
 Roampal Stop Hook
 
 Called by Claude Code / Cursor AFTER the LLM responds.
-This hook:
-1. Stores the exchange for later scoring
-2. Checks if record_response() was called
-3. BLOCKS (exit 2) if scoring was required but not done
+Handles two responsibilities:
+1. Exchange tracking: Reads transcript and sends exchange data to server
+   with lifecycle_only=True. Server stores in session JSONL (for scoring
+   prompt generation via get_previous_exchange) but skips ChromaDB storage.
+2. Turn lifecycle: Signals the server that the assistant turn is complete
+   so the next UserPromptSubmit can inject scoring prompts.
+
+v0.3.6: ChromaDB exchange storage moved to main LLM (via score_memories tool).
+Stop hook handles JSONL lifecycle tracking + state management only.
 
 Usage (Claude Code - .claude/settings.json):
 {
@@ -29,12 +34,12 @@ Environment variables:
 
 Reads from stdin (Claude Code format):
 - session_id: Conversation session ID
-- transcript_path: Path to JSONL file with conversation history
+- transcript_path: Path to conversation transcript JSONL
 - stop_hook_active: Boolean to prevent infinite loops
 
 Exit codes:
 - 0: Success, continue
-- 2: Block - record_response() not called, inject message back to LLM
+- 2: Block - score_memories() not called, inject message back to LLM
 """
 
 import sys
@@ -120,10 +125,9 @@ def _restart_server(server_url: str, port: int, timeout: float = 15.0) -> bool:
     return False
 
 
-def read_transcript(transcript_path: str) -> tuple[str, str, str]:
+def read_transcript(transcript_path: str) -> tuple[str, str]:
     """
-    Read the transcript JSONL file and extract last user message,
-    assistant response, and full transcript text.
+    Read the transcript JSONL file and extract last user message and assistant response.
 
     Claude Code transcript format:
     - type: "user" or "assistant" (top level)
@@ -131,7 +135,6 @@ def read_transcript(transcript_path: str) -> tuple[str, str, str]:
     """
     user_message = ""
     assistant_response = ""
-    transcript_lines = []
 
     try:
         with open(transcript_path, 'r', encoding='utf-8') as f:
@@ -156,65 +159,83 @@ def read_transcript(transcript_path: str) -> tuple[str, str, str]:
                     if isinstance(content, list):
                         text_parts = []
                         for block in content:
-                            if isinstance(block, dict):
-                                if block.get("type") == "text":
-                                    text_parts.append(block.get("text", ""))
-                                elif block.get("type") == "tool_use":
-                                    # Include tool calls in transcript for record_response detection
-                                    tool_name = block.get("name", "")
-                                    text_parts.append(f"[Tool: {tool_name}]")
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text_parts.append(block.get("text", ""))
                             elif isinstance(block, str):
                                 text_parts.append(block)
                         content = "\n".join(text_parts)
 
                     if entry_type == "user":
                         user_message = content if content else user_message
-                        if content:
-                            transcript_lines.append(f"User: {content}")
                     elif entry_type == "assistant":
                         assistant_response = content if content else assistant_response
-                        if content:
-                            transcript_lines.append(f"Assistant: {content}")
                 except json.JSONDecodeError:
                     continue
     except Exception as e:
         print(f"Error reading transcript: {e}", file=sys.stderr)
 
-    return user_message, assistant_response, "\n\n".join(transcript_lines)
+    return user_message, assistant_response
+
+
+_DIAG_LOG = os.path.join(os.path.expanduser("~"), ".claude", "stop_hook_diag.log")
+
+
+def _diag(msg: str):
+    """Diagnostic logging to file + stderr."""
+    line = f"[roampal-stop-diag] {msg}"
+    print(line, file=sys.stderr)
+    try:
+        with open(_DIAG_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
 
 
 def main():
+    # Breadcrumb: touch a file to prove this hook was invoked at all
+    try:
+        breadcrumb = os.path.join(os.path.expanduser("~"), ".claude", "stop_hook_breadcrumb.txt")
+        with open(breadcrumb, "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} stop_hook invoked\n")
+    except Exception:
+        pass
+
     # Read hook input from stdin
     try:
-        input_data = json.load(sys.stdin)
-    except json.JSONDecodeError:
-        # No input or invalid JSON - just exit cleanly
+        raw_input = sys.stdin.read()
+        _diag(f"stdin length: {len(raw_input)} chars")
+        if not raw_input.strip():
+            _diag("stdin was empty — exiting")
+            sys.exit(0)
+        input_data = json.loads(raw_input)
+        _diag(f"stdin keys: {list(input_data.keys())}")
+    except (json.JSONDecodeError, Exception) as e:
+        _diag(f"stdin parse error: {e}")
         sys.exit(0)
 
     # Check if this is already a stop hook continuation (prevent infinite loops)
     if input_data.get("stop_hook_active", False):
+        _diag("stop_hook_active=True — exiting to prevent loop")
         sys.exit(0)
 
-    # Extract conversation data - support both Claude Code (session_id) and Cursor (conversation_id)
+    # Extract conversation ID - support both Claude Code (session_id) and Cursor (conversation_id)
     conversation_id = input_data.get("conversation_id") or input_data.get("session_id", os.environ.get("ROAMPAL_CONVERSATION_ID", "default"))
+    _diag(f"conversation_id={conversation_id}")
+
+    # v0.3.6: Stop hook reads transcript for exchange lifecycle tracking (session JSONL)
+    # but does NOT store in ChromaDB — main LLM stores summaries via score_memories.
+    # The exchange data is needed so get_previous_exchange() can generate scoring prompts.
+
+    # Read transcript to get exchange data for lifecycle tracking
     transcript_path = input_data.get("transcript_path", "")
-
-    # Read the transcript file to get actual messages
+    user_message = ""
+    assistant_response = ""
     if transcript_path and os.path.exists(transcript_path):
-        user_message, assistant_response, transcript = read_transcript(transcript_path)
-    else:
-        # Fallback for direct input (testing)
-        user_message = input_data.get("user_message", "")
-        assistant_response = input_data.get("assistant_response", "")
-        transcript = input_data.get("transcript", "")
-
-    # If no messages, nothing to do
-    if not user_message and not assistant_response:
-        print(f"Stop hook: no messages found for {conversation_id}, transcript_path={transcript_path}", file=sys.stderr)
-        sys.exit(0)
+        user_message, assistant_response = read_transcript(transcript_path)
+        _diag(f"parsed user_message length: {len(user_message)}")
+        _diag(f"parsed assistant_response length: {len(assistant_response)}")
 
     # Call Roampal server
-    # Respect ROAMPAL_DEV env var for port selection
     dev_mode = os.environ.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")
     default_port = 27183 if dev_mode else 27182
     server_url = os.environ.get("ROAMPAL_SERVER_URL", f"http://127.0.0.1:{default_port}")
@@ -224,8 +245,10 @@ def main():
             "conversation_id": conversation_id,
             "user_message": user_message,
             "assistant_response": assistant_response,
-            "transcript": transcript
+            "lifecycle_only": True,  # v0.3.6: track in JSONL but skip ChromaDB storage
         }).encode("utf-8")
+
+        _diag(f"POSTing to {server_url}/api/hooks/stop ({len(request_data)} bytes)")
 
         req = urllib.request.Request(
             f"{server_url}/api/hooks/stop",
@@ -237,20 +260,22 @@ def main():
         with urllib.request.urlopen(req, timeout=5) as response:
             result = json.loads(response.read().decode("utf-8"))
 
+        _diag(f"server response: {json.dumps(result)[:500]}")
+
         # Check if we should block
         if result.get("should_block"):
-            # Output the block message to stderr - exit code 2 shows stderr to Claude
             block_message = result.get("block_message", "")
             if block_message:
                 print(block_message, file=sys.stderr)
 
-            # Exit code 2 = block stopping, shows stderr to Claude
+            _diag("BLOCKING — exit code 2")
             sys.exit(2)
 
-        # Success - exchange stored
+        _diag("SUCCESS — state updated, exit 0")
         sys.exit(0)
 
     except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        _diag(f"server error: {type(e).__name__}: {e}")
         # v0.3.2: Self-healing — restart server and retry once
         is_503 = isinstance(e, urllib.error.HTTPError) and e.code == 503
         is_down = isinstance(e, urllib.error.URLError)
@@ -285,6 +310,7 @@ def main():
         # Stop hook never blocks on error — don't break the user's flow
         sys.exit(0)
     except Exception as e:
+        _diag(f"unexpected error: {type(e).__name__}: {e}")
         print(f"Roampal hook error: {e}", file=sys.stderr)
         sys.exit(0)
 

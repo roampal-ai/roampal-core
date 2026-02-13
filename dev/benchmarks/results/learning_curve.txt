@@ -1,59 +1,0 @@
-================================================================================
-LEARNING CURVE BENCHMARK
-================================================================================
-
-HYPOTHESIS: More outcome history = better adversarial resistance
-
-MATURITY LEVELS:
-  cold_start  :  0 uses,  0 worked (0% success)
-  early       :  3 uses,  2 worked (67% success)
-  established :  5 uses,  4 worked (80% success)
-  proven      : 10 uses,  8 worked (80% success)
-  mature      : 20 uses, 18 worked (90% success)
-
-Loading embedding model: all-mpnet-base-v2 (768 dim)...
-Model loaded.
-
---------------------------------------------------------------------------------
-Running 10 scenarios × 5 maturity levels = 50 tests
---------------------------------------------------------------------------------
-[  1/50] finance  @ cold_start  [  2/50] finance  @ early       C:\roampal-core\roampal\backend\modules\memory\chromadb_adapter.py:641: RuntimeWarning: coroutine 'ChromaDBAdapter.cleanup' was never awaited
-  pass  # Ignore errors in destructor
-RuntimeWarning: Enable tracemalloc to get the object allocation traceback
-[  3/50] finance  @ established [  4/50] finance  @ proven      [  5/50] finance  @ mature      [  6/50] finance  @ cold_start  [  7/50] finance  @ early       [  8/50] finance  @ established [  9/50] finance  @ proven      [ 10/50] finance  @ mature      [ 11/50] health   @ cold_start  [ 12/50] health   @ early       [ 13/50] health   @ established [ 14/50] health   @ proven      [ 15/50] health   @ mature      [ 16/50] health   @ cold_start  [ 17/50] health   @ early       [ 18/50] health   @ established [ 19/50] health   @ proven      [ 20/50] health   @ mature      [ 21/50] tech     @ cold_start  [ 22/50] tech     @ early       [ 23/50] tech     @ established [ 24/50] tech     @ proven      [ 25/50] tech     @ mature      [ 26/50] tech     @ cold_start  [ 27/50] tech     @ early       [ 28/50] tech     @ established [ 29/50] tech     @ proven      [ 30/50] tech     @ mature      [ 31/50] nutrition @ cold_start  [ 32/50] nutrition @ early       [ 33/50] nutrition @ established [ 34/50] nutrition @ proven      [ 35/50] nutrition @ mature      [ 36/50] nutrition @ cold_start  [ 37/50] nutrition @ early       [ 38/50] nutrition @ established [ 39/50] nutrition @ proven      [ 40/50] nutrition @ mature      [ 41/50] crypto   @ cold_start  [ 42/50] crypto   @ early       [ 43/50] crypto   @ established [ 44/50] crypto   @ proven      [ 45/50] crypto   @ mature      [ 46/50] crypto   @ cold_start  [ 47/50] crypto   @ early       [ 48/50] crypto   @ established [ 49/50] crypto   @ proven      [ 50/50] crypto   @ mature      
-
-
-================================================================================
-RESULTS: LEARNING CURVE
-================================================================================
-
-Maturity Level  Uses   Accuracy     Correct/Total  
---------------------------------------------------
-cold_start      0        0.0%       0/10
-early           3      100.0%       10/10
-established     5      100.0%       10/10
-proven          10     100.0%       10/10
-mature          20     100.0%       10/10
-
-==================================================
-IMPROVEMENT: 0.0% -> 100.0% (+100.0 pts)
-==================================================
-
-PER-DOMAIN ACCURACY (Mature Level):
-  crypto      : 100.0%
-  finance     : 100.0%
-  health      : 100.0%
-  nutrition   : 100.0%
-  tech        : 100.0%
-
-Results saved to: C:\roampal-core\dev\benchmarks\learning_curve_data\learning_curve_results.json
-
-================================================================================
-CONCLUSION
-================================================================================
-
-  [PASS] LEARNING CURVE VALIDATED
-    Accuracy improved by +100.0 percentage points
-    from cold start (0.0%) to mature (100.0%)
-
-  This proves: More outcome history = better adversarial resistance

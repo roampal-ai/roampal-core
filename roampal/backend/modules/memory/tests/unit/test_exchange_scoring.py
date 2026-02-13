@@ -4,7 +4,7 @@ Unit Tests for Exchange Scoring - v0.2.9.2 fix.
 Tests the fix that re-enables exchange scoring which was accidentally
 removed in v0.2.3's performance optimization.
 
-The fix ensures that when score_response(outcome="worked") is called,
+The fix ensures that when score_memories(outcome="worked") is called,
 the previous exchange's doc_id gets that outcome applied.
 """
 

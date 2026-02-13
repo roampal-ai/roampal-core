@@ -431,17 +431,17 @@ class SearchService:
 
             if uses >= 3:
                 # Calculate Wilson score from memory's own outcomes
-                wilson = success_count / uses if uses > 0 else 0.5
-                # 80% quality + 20% Wilson
-                blended_score = 0.8 * quality_score + 0.2 * wilson
+                wilson = wilson_score_lower(success_count, uses)
+                # v0.3.6: 50% quality + 50% Wilson
+                blended_score = 0.5 * quality_score + 0.5 * wilson
             else:
                 # Not enough data - use quality only (cold start protection)
                 blended_score = quality_score
 
             # Quality boost (lower distance = better ranking)
-            metadata_boost = 1.0 - blended_score * 0.8
-            entity_boost = self._calculate_entity_boost(query, result.get("id", ""))
-            result["distance"] = result.get("distance", 1.0) * metadata_boost / entity_boost
+            # v0.3.6: reduced from 0.8 to 0.4 — still meaningful boost, doesn't obliterate other collections
+            metadata_boost = 1.0 - blended_score * 0.4
+            result["distance"] = result.get("distance", 1.0) * metadata_boost
 
             # Doc effectiveness boost (cross-doc pattern tracking)
             doc_id = result.get("id") or result.get("doc_id")
@@ -469,6 +469,11 @@ class SearchService:
                 if eff and eff.get("total_uses", 0) >= 3:
                     eff_multiplier = 0.7 + eff["success_rate"] * 0.6
                     result["distance"] = result.get("distance", 1.0) / eff_multiplier
+
+        # v0.3.6: Entity boost for ALL collections (was memory_bank only)
+        entity_boost = self._calculate_entity_boost(query, result.get("id", ""))
+        if entity_boost > 1.0:
+            result["distance"] = result.get("distance", 1.0) / entity_boost
 
     def _add_recency_metadata(self, results: List[Dict]):
         """Add recency metadata to working memory results."""
@@ -511,8 +516,8 @@ class SearchService:
         """
         Calculate quality boost based on Content KG entities.
 
-        Only applies to memory_bank searches - boosts documents containing
-        high-quality entities that match query concepts.
+        v0.3.6: Applies to ALL collections (was memory_bank only).
+        Boosts documents containing high-quality entities that match query concepts.
 
         Returns:
             Boost multiplier (1.0 = no boost, up to 1.5 = 50% boost)

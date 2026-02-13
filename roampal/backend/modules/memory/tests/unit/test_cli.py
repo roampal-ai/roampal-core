@@ -254,7 +254,7 @@ class TestConfigureOpencode:
         plugin_dir = config_dir / "plugin"
         plugin_dir.mkdir()
 
-        # Pre-create matching config
+        # Pre-create matching config (must include ROAMPAL_PLATFORM for v0.3.6+)
         roampal_root = str(Path(roampal.cli.__file__).parent.parent.resolve())
         config = {
             "mcp": {
@@ -262,7 +262,7 @@ class TestConfigureOpencode:
                     "type": "local",
                     "command": [sys.executable, "-m", "roampal.mcp.server"],
                     "enabled": True,
-                    "environment": {"PYTHONPATH": roampal_root}
+                    "environment": {"PYTHONPATH": roampal_root, "ROAMPAL_PLATFORM": "opencode"}
                 }
             }
         }
@@ -346,7 +346,7 @@ class TestConfigureClaudeCode:
         allow_list = settings.get("permissions", {}).get("allow", [])
         assert "mcp__roampal-core__search_memory" in allow_list
         assert "mcp__roampal-core__record_response" in allow_list
-        assert "mcp__roampal-core__score_response" in allow_list
+        assert "mcp__roampal-core__score_memories" in allow_list
 
     def test_creates_mcp_in_claude_json(self, tmp_path):
         """configure_claude_code writes MCP server to ~/.claude.json."""

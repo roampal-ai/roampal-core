@@ -127,7 +127,7 @@ class TestRecordOutcome:
 
     @pytest.mark.asyncio
     async def test_unknown_outcome_all_collections(self, service, mock_collections):
-        """v0.2.9: unknown = +1 use, +0.25 success for ALL collections."""
+        """v0.3.6: unknown = +1 use, +0.25 success, -0.05 raw score for ALL collections."""
         # Test unknown outcome on working collection
         result = await service.record_outcome(
             doc_id="working_test123",
@@ -136,7 +136,7 @@ class TestRecordOutcome:
         assert result is not None
         assert result["uses"] == 1  # Incremented
         assert result["success_count"] == 0.25  # v0.2.9: unknown = 0.25 success for all collections
-        assert result["score"] == 0.5  # Raw score unchanged
+        assert result["score"] == 0.45  # v0.3.6: -0.05 raw score penalty (0.5 - 0.05)
 
     @pytest.mark.asyncio
     async def test_not_found(self, service, mock_collections):
@@ -188,35 +188,6 @@ class TestRecordOutcome:
         assert contexts[0]["topic"] == "test"
 
 
-class TestTimeWeighting:
-    """Test time-weighted score updates."""
-
-    @pytest.fixture
-    def service(self):
-        return OutcomeService(collections={})
-
-    def test_recent_full_weight(self, service):
-        """Recent items should have full weight."""
-        weight = service._calculate_time_weight(datetime.now().isoformat())
-        assert weight > 0.9
-
-    def test_old_reduced_weight(self, service):
-        """Old items should have reduced weight."""
-        old_time = (datetime.now() - timedelta(days=30)).isoformat()
-        weight = service._calculate_time_weight(old_time)
-        assert 0.4 < weight < 0.6  # ~0.5 after 30 days
-
-    def test_none_full_weight(self, service):
-        """None should return full weight."""
-        weight = service._calculate_time_weight(None)
-        assert weight == 1.0
-
-    def test_invalid_full_weight(self, service):
-        """Invalid timestamp should return full weight."""
-        weight = service._calculate_time_weight("invalid")
-        assert weight == 1.0
-
-
 class TestScoreCalculation:
     """Test score calculation logic."""
 
@@ -227,7 +198,7 @@ class TestScoreCalculation:
     def test_worked_increases_score(self, service):
         """Worked should increase score."""
         delta, new_score, uses, success_delta = service._calculate_score_update(
-            "worked", 0.5, 0, 1.0
+            "worked", 0.5, 0
         )
         assert delta > 0
         assert new_score > 0.5
@@ -237,7 +208,7 @@ class TestScoreCalculation:
     def test_failed_decreases_score(self, service):
         """Failed should decrease score."""
         delta, new_score, uses, success_delta = service._calculate_score_update(
-            "failed", 0.5, 0, 1.0
+            "failed", 0.5, 0
         )
         assert delta < 0
         assert new_score < 0.5
@@ -247,7 +218,7 @@ class TestScoreCalculation:
     def test_partial_slightly_increases(self, service):
         """Partial should slightly increase score."""
         delta, new_score, uses, success_delta = service._calculate_score_update(
-            "partial", 0.5, 0, 1.0
+            "partial", 0.5, 0
         )
         assert delta > 0
         assert delta < 0.1  # Small increase
@@ -258,23 +229,16 @@ class TestScoreCalculation:
     def test_score_capped_at_1(self, service):
         """Score should not exceed 1.0."""
         delta, new_score, uses, _ = service._calculate_score_update(
-            "worked", 0.95, 0, 1.0
+            "worked", 0.95, 0
         )
         assert new_score <= 1.0
 
     def test_score_capped_at_0(self, service):
         """Score should not go below 0.0."""
         delta, new_score, uses, _ = service._calculate_score_update(
-            "failed", 0.1, 0, 1.0
+            "failed", 0.1, 0
         )
         assert new_score >= 0.0
-
-    def test_time_weight_affects_delta(self, service):
-        """Time weight should affect score delta."""
-        delta_full, _, _, _ = service._calculate_score_update("worked", 0.5, 0, 1.0)
-        delta_half, _, _, _ = service._calculate_score_update("worked", 0.5, 0, 0.5)
-
-        assert abs(delta_half - delta_full * 0.5) < 0.01
 
 
 class TestCountSuccesses:

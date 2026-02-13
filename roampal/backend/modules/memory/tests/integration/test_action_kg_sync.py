@@ -89,7 +89,7 @@ class TestActionKGSync:
         # Record multiple outcomes
         for i in range(3):
             action = ActionOutcome(
-                action_type="score_response",
+                action_type="score_memories",
                 context_type="general",
                 outcome="worked" if i < 2 else "failed",
                 doc_id=f"doc_{i}",
@@ -98,7 +98,7 @@ class TestActionKGSync:
             await ums.record_action_outcome(action)
 
         # Check _kg_service sees all outcomes
-        key = "general|score_response|history"
+        key = "general|score_memories|history"
         stats = ums._kg_service.knowledge_graph["context_action_effectiveness"][key]
 
         assert stats["successes"] == 2

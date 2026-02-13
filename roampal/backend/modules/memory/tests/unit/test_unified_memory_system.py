@@ -564,7 +564,7 @@ class TestMemoryBankWilsonBlend:
 
     @pytest.mark.asyncio
     async def test_memory_bank_wilson_blend_after_3_uses(self, mock_ums):
-        """Memory bank items with 3+ uses should blend 80% quality + 20% Wilson."""
+        """v0.3.6: Memory bank items with 3+ uses should blend 50% quality + 50% Wilson."""
         mock_collection = MagicMock()
         mock_collection.query_vectors = AsyncMock(return_value=[
             {
@@ -596,13 +596,12 @@ class TestMemoryBankWilsonBlend:
         assert len(results) == 1
 
         base_quality = 0.9 * 0.8  # 0.72
-        # v0.3.2: Uses real Wilson lower bound (~0.49 for 8/10 at 95% CI),
-        # not simple ratio (0.8). Wilson is conservative with small samples.
-        # Expected: 0.8 * 0.72 + 0.2 * wilson_lower(8,10) ≈ 0.674
+        # v0.3.6: Uses 50/50 blend instead of 80/20
+        # Expected: 0.5 * 0.72 + 0.5 * wilson_lower(8,10) ≈ 0.605
         quality = results[0]["quality"]
         assert quality < base_quality  # Wilson blend pulls below pure quality
-        assert quality > 0.6  # But not unreasonably low for 80% success rate
-        assert abs(quality - 0.674) < 0.02  # ~0.674 with real Wilson
+        assert quality > 0.5  # But not unreasonably low for 80% success rate
+        assert abs(quality - 0.605) < 0.02  # ~0.605 with 50/50 Wilson blend
 
     @pytest.mark.asyncio
     async def test_memory_bank_wilson_blend_low_success_reduces_quality(self, mock_ums):
