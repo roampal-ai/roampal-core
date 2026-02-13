@@ -42,7 +42,7 @@ roampal init --opencode   # Or configure explicitly
 
 ## Hook-Based Outcome Scoring
 
-The key innovation: **hooks prompt the LLM to call score_response()** via soft enforcement - no blocking, just prompt injection.
+The key innovation: **hooks prompt the LLM to call score_memories()** via soft enforcement - no blocking, just prompt injection.
 
 ### Completion-Aware Scoring
 
@@ -75,7 +75,7 @@ This distinction prevents forcing the LLM to score when the user is just providi
 │    <roampal-score-required>                                  │
 │    Previous: User asked "..." You answered "..."             │
 │    Current user message: "..."                               │
-│    Call score_response(outcome="...") FIRST                  │
+│    Call score_memories(outcome="...") FIRST                  │
 │    </roampal-score-required>                                 │
 │                                                              │
 │    ═══ KNOWN CONTEXT ═══                                     │
@@ -84,12 +84,12 @@ This distinction prevents forcing the LLM to score when the user is just providi
 │                                                              │
 │    Original user message                                     │
 │    ↓                                                         │
-│ 4. LLM calls score_response(outcome) then responds           │
+│ 4. LLM calls score_memories(outcome) then responds           │
 │    ↓                                                         │
 │ 5. HOOK: Stop (calls /api/hooks/stop)                       │
 │    - Stores exchange with doc_id                             │
 │    - Sets assistant_completed=True for next turn             │
-│    - SOFT ENFORCE: logs warning if score_response not called │
+│    - SOFT ENFORCE: logs warning if score_memories not called │
 │    ↓                                                         │
 │ 6. OUTCOME RECORDED → Score updates applied                  │
 │    - Previous exchange scored                                │
@@ -134,7 +134,7 @@ Based on the user's current message, evaluate if your previous answer helped:
 - "partial" = lukewarm response, "kind of", "I guess"
 - "unknown" = no clear signal
 
-Call score_response(outcome="...", related=["doc_ids that were relevant"]) FIRST.
+Call score_memories(outcome="...", related=["doc_ids that were relevant"]) FIRST.
 - related is optional: omit to score all, or list only the memories you actually used
 
 Separately, record_response(key_takeaway="...") is OPTIONAL - only for significant learnings.
@@ -256,7 +256,7 @@ working → history → patterns
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/hooks/get-context` | POST | 4-slot context injection: reserved working + reserved history + 2 best matches (Wilson-ranked). Returns `scoring_prompt`, `context_only`, and backward-compatible `formatted_injection`. |
-| `/api/hooks/stop` | POST | Stores exchange, logs if score_response not called |
+| `/api/hooks/stop` | POST | Stores exchange, logs if score_memories not called |
 | `/api/record-outcome` | POST | Records outcome, updates scores |
 
 ### Memory API
@@ -288,19 +288,19 @@ The MCP server provides 7 tools for deep memory access:
 | `add_to_memory_bank` | Store permanent user facts |
 | `update_memory` | Update existing memories |
 | `delete_memory` | Delete outdated memories |
-| `score_response` | **SOFT ENFORCED** - Score the previous exchange (worked/failed/partial/unknown) |
+| `score_memories` | **SOFT ENFORCED** - Score the previous exchange (worked/failed/partial/unknown) |
 | `record_response` | **OPTIONAL** - Store key takeaways when transcript won't capture learning |
 
 ### Recommended Workflow
 
 ```
 1. Hook injects context + previous exchange for scoring
-2. score_response(outcome) → Score the previous exchange
+2. score_memories(outcome) → Score the previous exchange
 3. Respond to user
 4. record_response(key_takeaway) → OPTIONAL, only for significant learnings
 ```
 
-### score_response (Soft Enforced)
+### score_memories (Soft Enforced)
 
 ```json
 {
@@ -330,7 +330,7 @@ The hook presents the previous exchange, cached memories, and current user messa
 
 Example: 4 memories surfaced, 2 were helpful, 1 was misleading, 1 unused:
 ```
-score_response(
+score_memories(
   outcome="worked",
   memory_scores={
     "mem_abc123": "worked",    // +0.20
@@ -368,7 +368,7 @@ Most routine exchanges don't need this - the transcript is enough.
 
 ### Doc ID Caching
 
-Both hook injection and `search_memory` cache doc_ids by session_id. When `score_response` is called, it:
+Both hook injection and `search_memory` cache doc_ids by session_id. When `score_memories` is called, it:
 1. Scores the most recent unscored exchange
 2. Uses `memory_scores` dict to score each cached memory individually
 3. Applies per-memory outcomes (+0.20 for worked, -0.30 for failed, 0 for unknown)
@@ -378,7 +378,7 @@ Both hook injection and `search_memory` cache doc_ids by session_id. When `score
 The hook prompt lists all cached memories with their doc_ids. The LLM scores each one:
 
 ```python
-score_response(
+score_memories(
     outcome="worked",
     memory_scores={
         "doc_id_1": "worked",   # +0.20 — was helpful
@@ -398,7 +398,7 @@ This ensures:
 
 ## Score Updates
 
-When `score_response(outcome)` is called:
+When `score_memories(outcome)` is called:
 
 | Outcome | Score Delta | Effect |
 |---------|-------------|--------|
@@ -476,9 +476,9 @@ While `memory_bank` and `books` don't get individual doc-level scoring (they're 
 
 **Action KG (`record_action_outcome`):**
 ```python
-# Tracks: "In coding context, score_response on memory_bank worked"
+# Tracks: "In coding context, score_memories on memory_bank worked"
 # Key format: "{context_type}|{action_type}|{collection}"
-# Example: "coding|score_response|memory_bank" → 85% success rate
+# Example: "coding|score_memories|memory_bank" → 85% success rate
 ```
 
 **Routing KG (`_update_kg_routing`):**
@@ -660,7 +660,7 @@ Automatically detects and configures installed tools. Use `--claude-code` or `--
       "mcp__roampal-core__delete_memory",
       "mcp__roampal-core__get_context_insights",
       "mcp__roampal-core__record_response",
-      "mcp__roampal-core__score_response"
+      "mcp__roampal-core__score_memories"
     ]
   }
 }
@@ -700,7 +700,7 @@ Plugin installed to `~/.config/opencode/plugins/roampal.ts`. Context injection i
 - `chat.message` → fetches context + caches scoring data
 - `experimental.chat.system.transform` → injects memory context into system prompt
 - `experimental.chat.messages.transform` → injects scoring prompt via deep-cloned user message (clone avoids mutating UI-visible objects)
-- `session.idle` → stores exchange, then runs sidecar scoring ONLY if main LLM didn't call `score_response` (prevents double-scoring memories)
+- `session.idle` → stores exchange, then runs sidecar scoring ONLY if main LLM didn't call `score_memories` (prevents double-scoring memories)
 
 ---
 
@@ -708,14 +708,14 @@ Plugin installed to `~/.config/opencode/plugins/roampal.ts`. Context injection i
 
 ### 1. Soft Enforcement via Hook Prompting
 
-**Problem:** LLMs don't reliably call score_response() without prompting.
+**Problem:** LLMs don't reliably call score_memories() without prompting.
 
 **Solution:**
 - UserPromptSubmit hook injects scoring prompt with previous exchange
-- Hook prompt tells LLM to call score_response(outcome) FIRST
+- Hook prompt tells LLM to call score_memories(outcome) FIRST
 - Stop hook logs warning if not called (soft enforcement)
 - Prompt injection does 95% of the work - no hard blocking needed
-- Separate tools: score_response (scoring) vs record_response (key takeaways)
+- Separate tools: score_memories (scoring) vs record_response (key takeaways)
 
 ### 2. Automatic Context vs MCP Tools
 

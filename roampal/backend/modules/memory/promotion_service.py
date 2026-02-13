@@ -146,9 +146,8 @@ class PromotionService:
         metadata["promotion_history"] = json.dumps(promotion_history)
         metadata["promoted_from"] = "working"
 
-        # v0.2.9: Reset counters on history entry - memory must prove itself fresh
-        metadata["success_count"] = 0.0
-        metadata["uses"] = 0
+        # v0.3.6: Carry Wilson forward — memory already proved itself via reserved slot scoring
+        # No reset. success_count and uses carry through from working → history → patterns.
         metadata["promoted_to_history_at"] = datetime.now().isoformat()
 
         # Get text for embedding
@@ -350,7 +349,8 @@ class PromotionService:
                             **metadata,
                             "promoted_from": "working",
                             "promotion_time": datetime.now().isoformat(),
-                            "promotion_reason": "batch_promotion"
+                            "promotion_reason": "batch_promotion",
+                            "promoted_to_history_at": datetime.now().isoformat()  # v0.3.6: parity with outcome path
                         }]
                     )
 

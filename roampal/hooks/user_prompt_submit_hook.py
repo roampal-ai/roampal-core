@@ -160,6 +160,10 @@ def check_for_updates_cached() -> tuple:
         return (False, "", "")
 
 
+# v0.3.6: _fire_sidecar_background() removed — main LLM handles summarization
+# via score_memories (Claude Code) or sidecar on session.idle (OpenCode)
+
+
 # Fix Windows encoding issues with unicode characters
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding='utf-8')
@@ -216,7 +220,10 @@ def main():
         # Check for updates (cached - only hits PyPI once per session)
         update_available, current, latest = check_for_updates_cached()
         if update_available:
-            print(f"\n<roampal-update-available>Roampal update: {current} -> {latest}. Run: pip install --upgrade roampal</roampal-update-available>")
+            print(f"\n<roampal-update-available>Roampal update: {current} -> {latest}. Run: pip install --upgrade roampal && roampal init --force</roampal-update-available>")
+
+        # v0.3.6: Sidecar summarization moved server-side (asyncio.create_task in get-context)
+        # No more fire-and-forget subprocess — server handles it
 
         # Exit 0 = success, stdout added as context
 

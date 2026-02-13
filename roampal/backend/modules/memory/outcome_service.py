@@ -58,7 +58,7 @@ class OutcomeService:
     async def record_outcome(
         self,
         doc_id: str,
-        outcome: Literal["worked", "failed", "partial"],
+        outcome: Literal["worked", "failed", "partial", "unknown"],
         failure_reason: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
@@ -115,10 +115,8 @@ class OutcomeService:
         uses = metadata.get("uses", 0)
         success_count = metadata.get("success_count", 0.0)  # v0.2.8: Track cumulative successes
 
-        # Time-weighted score update
-        time_weight = self._calculate_time_weight(metadata.get("last_used"))
         score_delta, new_score, uses, success_delta = self._calculate_score_update(
-            outcome, current_score, uses, time_weight
+            outcome, current_score, uses
         )
         success_count += success_delta  # v0.2.8: Accumulate successes (no cap)
 
@@ -159,7 +157,7 @@ class OutcomeService:
 
         logger.info(
             f"Score update [{collection_name}]: {current_score:.2f} -> {new_score:.2f} "
-            f"(outcome={outcome}, delta={score_delta:+.2f}, time_weight={time_weight:.2f}, uses={uses})"
+            f"(outcome={outcome}, delta={score_delta:+.2f}, uses={uses})"
         )
 
         # ========== FAST PATH COMPLETE (v0.2.3) ==========
@@ -238,23 +236,11 @@ class OutcomeService:
         except Exception as e:
             logger.error(f"[Background] Deferred learning error for {doc_id}: {e}")
 
-    def _calculate_time_weight(self, last_used: Optional[str]) -> float:
-        """Calculate time weight for score updates."""
-        if not last_used:
-            return 1.0
-
-        try:
-            age_days = (datetime.now() - datetime.fromisoformat(last_used)).days
-            return 1.0 / (1 + age_days / 30)  # Decay over month
-        except:
-            return 1.0
-
     def _calculate_score_update(
         self,
         outcome: str,
         current_score: float,
         uses: int,
-        time_weight: float
     ) -> tuple:
         """
         Calculate score delta and new values.
@@ -263,33 +249,33 @@ class OutcomeService:
             Tuple of (score_delta, new_score, new_uses, success_delta)
 
         v0.2.8: Added success_delta for Wilson score tracking.
-        - worked: +1.0 success, +1 use
-        - partial: +0.5 success, +1 use
-        - failed: +0.0 success, +1 use
+        - worked: +0.2 raw, +1.0 success, +1 use
+        - partial: +0.05 raw, +0.5 success, +1 use
+        - failed: -0.3 raw, +0.0 success, +1 use
 
         v0.2.9: unknown handling (all collections).
-        - unknown: +0.25 success, +1 use (weak negative signal for natural selection)
+        - unknown: -0.05 raw, +0.25 success, +1 use
+
+        v0.3.6: Removed time_weight. A score is a score regardless of memory age.
         """
         if outcome == "worked":
-            score_delta = 0.2 * time_weight
+            score_delta = 0.2
             new_score = min(1.0, current_score + score_delta)
             uses += 1
             success_delta = 1.0
         elif outcome == "failed":
-            score_delta = -0.3 * time_weight
+            score_delta = -0.3
             new_score = max(0.0, current_score + score_delta)
-            uses += 1  # v0.2.8: Fixed - failed should increment uses
+            uses += 1
             success_delta = 0.0
-        elif outcome == "partial":  # v0.2.8.1: explicit partial check
-            score_delta = 0.05 * time_weight
+        elif outcome == "partial":
+            score_delta = 0.05
             new_score = min(1.0, current_score + score_delta)
             uses += 1
             success_delta = 0.5
         elif outcome == "unknown":
-            # v0.2.9: unknown = surfaced but not used (all collections)
-            # Weak negative signal: 0.25 success creates gradual drift for noise
-            score_delta = 0.0  # Don't change raw score
-            new_score = current_score
+            score_delta = -0.05
+            new_score = max(0.0, current_score + score_delta)
             uses += 1
             success_delta = 0.25
         else:
@@ -339,7 +325,7 @@ class OutcomeService:
             self.kg_service.update_success_rate(doc_id, outcome)
 
             # Track problem-solution mapping
-            await self._track_problem_solution(doc_id, metadata, context)
+            await self._track_problem_solution(doc_id, metadata, context, outcome="worked")
 
         elif outcome == "failed":
             # Track failure
@@ -350,8 +336,18 @@ class OutcomeService:
                     failure_reason[:50], doc_id, problem_text[:100]
                 )
 
+            # v0.3.6: Track failed solutions too — knowing what didn't work prevents re-surfacing bad advice
+            await self._track_problem_solution(doc_id, metadata, context, outcome="failed")
+
         elif outcome == "partial":
             self.kg_service.update_success_rate(doc_id, outcome)
+            # v0.3.6: Track partial solutions
+            await self._track_problem_solution(doc_id, metadata, context, outcome="partial")
+
+        elif outcome == "unknown":
+            # v0.3.6: Track unknown patterns — reveals which memories keep surfacing irrelevantly
+            self.kg_service.update_success_rate(doc_id, outcome)
+            await self._track_problem_solution(doc_id, metadata, context, outcome="unknown")
 
         # Save KG (debounced)
         await self.kg_service.debounced_save_kg()
@@ -360,9 +356,10 @@ class OutcomeService:
         self,
         doc_id: str,
         metadata: Dict[str, Any],
-        context: Optional[Dict[str, Any]]
+        context: Optional[Dict[str, Any]],
+        outcome: str = "worked"
     ):
-        """Track successful problem->solution patterns for future reuse."""
+        """Track problem->solution patterns for future reuse."""
         if not self.kg_service:
             return
 
@@ -394,7 +391,7 @@ class OutcomeService:
                 pattern_hash=pattern_hash,
                 problem_text=problem_text,
                 solution_text=solution_text,
-                outcome="worked"
+                outcome=outcome
             )
 
             logger.info(f"Tracked problem->solution: {problem_signature[:30]}... -> {doc_id}")

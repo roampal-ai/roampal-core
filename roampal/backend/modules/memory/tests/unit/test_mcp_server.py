@@ -528,7 +528,7 @@ class TestToolHandlers:
         with patch.object(server_module, '_ensure_server_running', return_value=True), \
              patch.object(server_module, '_api_call', mock_api):
             result = await tool_handler("add_to_memory_bank", {
-                "content": "User's name is Logan",
+                "content": "User's name is Alex",
                 "tags": ["identity"],
                 "always_inject": True
             })
@@ -599,18 +599,18 @@ class TestToolHandlers:
 
         assert "not found" in result[0].text
 
-    # ---- score_response ----
+    # ---- score_memories ----
 
     @pytest.mark.asyncio
-    async def test_score_response_with_memory_scores(self, tool_handler):
-        """score_response sends per-memory scores."""
+    async def test_score_memories_with_memory_scores(self, tool_handler):
+        """score_memories sends per-memory scores."""
         import roampal.mcp.server as server_module
 
         mock_api = AsyncMock(return_value={"documents_scored": 3})
 
         with patch.object(server_module, '_ensure_server_running', return_value=True), \
              patch.object(server_module, '_api_call', mock_api):
-            result = await tool_handler("score_response", {
+            result = await tool_handler("score_memories", {
                 "outcome": "worked",
                 "memory_scores": {
                     "patterns_abc": "worked",
@@ -626,25 +626,25 @@ class TestToolHandlers:
         assert call_payload["memory_scores"]["patterns_abc"] == "worked"
 
     @pytest.mark.asyncio
-    async def test_score_response_backward_compat_related(self, tool_handler):
-        """score_response supports deprecated 'related' parameter."""
+    async def test_score_memories_backward_compat_related(self, tool_handler):
+        """score_memories silently ignores deprecated 'related' parameter (v0.3.6)."""
         import roampal.mcp.server as server_module
 
         mock_api = AsyncMock(return_value={"documents_scored": 1})
 
         with patch.object(server_module, '_ensure_server_running', return_value=True), \
              patch.object(server_module, '_api_call', mock_api):
-            result = await tool_handler("score_response", {
+            result = await tool_handler("score_memories", {
                 "outcome": "failed",
                 "memory_scores": {},
                 "related": ["doc_123"]
             })
 
-        # When memory_scores is empty but related is provided, related should be used
-        # Actually, looking at the code: if memory_scores (truthy), use that.
-        # Empty dict is falsy, so related branch kicks in
+        # v0.3.6: 'related' is silently ignored for backward compat
+        # With empty memory_scores (falsy), payload only has conversation_id + outcome
         call_payload = mock_api.call_args[0][2]
-        assert "related" in call_payload
+        assert "related" not in call_payload
+        assert "outcome" in call_payload
 
     # ---- record_response ----
 
@@ -675,62 +675,9 @@ class TestToolHandlers:
         assert "Error" in result[0].text
         assert "key_takeaway" in result[0].text
 
-    # ---- get_context_insights ----
-
-    @pytest.mark.asyncio
-    async def test_get_context_insights_success(self, tool_handler):
-        """get_context_insights returns formatted context."""
-        import roampal.mcp.server as server_module
-
-        mock_api = AsyncMock(return_value={
-            "user_facts": [{"content": "User is a developer"}],
-            "relevant_memories": [
-                {"content": "Previous testing work", "collection": "working",
-                 "metadata": {"score": 0.8}}
-            ],
-            "doc_ids": ["working_abc", "patterns_def"]
-        })
-
-        with patch.object(server_module, '_ensure_server_running', return_value=True), \
-             patch.object(server_module, '_api_call', mock_api), \
-             patch.object(server_module, '_get_update_notice', return_value=""):
-            result = await tool_handler("get_context_insights", {"query": "testing"})
-
-        text = result[0].text
-        assert "Known Context" in text
-        assert "Memory Bank" in text
-        assert "developer" in text
-        assert "Relevant Memories" in text
-        assert "Cached 2 doc_ids" in text
-
-    @pytest.mark.asyncio
-    async def test_get_context_insights_empty_query(self, tool_handler):
-        """get_context_insights rejects empty query."""
-        import roampal.mcp.server as server_module
-
-        with patch.object(server_module, '_ensure_server_running', return_value=True):
-            result = await tool_handler("get_context_insights", {"query": ""})
-
-        assert "Error" in result[0].text
-        assert "query" in result[0].text
-
-    @pytest.mark.asyncio
-    async def test_get_context_insights_no_context(self, tool_handler):
-        """get_context_insights handles no matching context."""
-        import roampal.mcp.server as server_module
-
-        mock_api = AsyncMock(return_value={
-            "user_facts": [],
-            "relevant_memories": [],
-            "doc_ids": []
-        })
-
-        with patch.object(server_module, '_ensure_server_running', return_value=True), \
-             patch.object(server_module, '_api_call', mock_api), \
-             patch.object(server_module, '_get_update_notice', return_value=""):
-            result = await tool_handler("get_context_insights", {"query": "new topic"})
-
-        assert "No relevant context" in result[0].text
+    # ---- get_context_insights REMOVED (v0.3.6) ----
+    # Context is now injected automatically by hooks/plugin before the model responds.
+    # The tool was redundant (same server call twice) and caused weaker models to loop.
 
     # ---- unknown tool ----
 
@@ -759,6 +706,92 @@ class TestToolHandlers:
 
         assert "Error" in result[0].text
         assert "unexpected crash" in result[0].text
+
+
+# ============================================================================
+# Tool Registration Tests (v0.3.6)
+# ============================================================================
+
+class TestToolRegistration:
+    """Verify MCP tool names and schemas match v0.3.6 spec.
+
+    v0.3.6: score_response renamed to score_memories. This test ensures
+    the old name doesn't accidentally reappear.
+    """
+
+    @pytest.fixture
+    def tool_list(self):
+        """Capture the list_tools handler and get tool definitions."""
+        import roampal.mcp.server as server_module
+
+        captured = {}
+
+        class FakeServer:
+            def __init__(self, name):
+                self.name = name
+
+            def list_prompts(self):
+                return lambda fn: fn
+
+            def list_resources(self):
+                return lambda fn: fn
+
+            def list_tools(self):
+                def deco(fn):
+                    captured['list_tools'] = fn
+                    return fn
+                return deco
+
+            def call_tool(self):
+                return lambda fn: fn
+
+            def create_initialization_options(self):
+                return {}
+
+            async def run(self, *a, **kw):
+                pass
+
+        with patch('roampal.mcp.server.Server', FakeServer), \
+             patch('roampal.mcp.server.stdio_server'), \
+             patch.object(server_module, '_start_fastapi_server'), \
+             patch('asyncio.run'):
+            server_module.run_mcp_server(dev=False)
+
+        return captured['list_tools']
+
+    @pytest.mark.asyncio
+    async def test_score_memories_in_tool_list(self, tool_list):
+        """v0.3.6: Tool list includes score_memories (not score_response)."""
+        tools = await tool_list()
+        tool_names = [t.name for t in tools]
+        assert "score_memories" in tool_names
+        assert "score_response" not in tool_names
+
+    @pytest.mark.asyncio
+    async def test_all_expected_tools_registered(self, tool_list):
+        """All 6 MCP tools are registered (get_context_insights removed in v0.3.6)."""
+        tools = await tool_list()
+        tool_names = {t.name for t in tools}
+        expected = {
+            "search_memory",
+            "add_to_memory_bank",
+            "update_memory",
+            "delete_memory",
+            "score_memories",
+            "record_response",
+        }
+        assert expected == tool_names
+        # v0.3.6: get_context_insights removed — hooks/plugin inject context automatically
+        assert "get_context_insights" not in tool_names
+
+    @pytest.mark.asyncio
+    async def test_score_memories_schema_has_memory_scores(self, tool_list):
+        """v0.3.6: score_memories requires memory_scores, not outcome."""
+        tools = await tool_list()
+        score_tool = next(t for t in tools if t.name == "score_memories")
+        schema = score_tool.inputSchema
+        assert "memory_scores" in schema["properties"]
+        assert "memory_scores" in schema["required"]
 
 
 # ============================================================================

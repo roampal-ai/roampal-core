@@ -57,7 +57,9 @@ def is_dev_mode(args=None) -> bool:
 
 
 def get_port(args=None) -> int:
-    """Get port based on DEV/PROD mode. Uses is_dev_mode() for consistency."""
+    """Get port based on DEV/PROD mode. Respects explicit --port override."""
+    if args and hasattr(args, 'port') and isinstance(getattr(args, 'port', None), int):
+        return args.port
     return DEV_PORT if is_dev_mode(args) else PROD_PORT
 
 
@@ -117,7 +119,7 @@ def print_banner():
     print(f"""
 {BLUE}{BOLD}+---------------------------------------------------+
 |                   ROAMPAL                         |
-|     Persistent Memory for AI Coding Tools         |
+|    Outcome-Based Memory for AI Coding Tools       |
 +---------------------------------------------------+{RESET}
 """)
 
@@ -450,6 +452,11 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
     submit_cmd = _build_hook_command("user_prompt_submit_hook", is_dev)
     stop_cmd = _build_hook_command("stop_hook", is_dev)
 
+    # v0.3.6: Sidecar scoring moved server-side (no more --from-hook in Stop hook)
+    context_cmd = "roampal context --recent-exchanges"
+    if is_dev:
+        context_cmd = f"ROAMPAL_DEV=1 {context_cmd}"
+
     settings["hooks"] = {
         "UserPromptSubmit": [
             {
@@ -470,6 +477,22 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
                     }
                 ]
             }
+        ],
+        "SessionStart": [
+            {
+                "matcher": "compact",
+                "hooks": [{
+                    "type": "command",
+                    "command": context_cmd
+                }]
+            },
+            {
+                "matcher": "startup",
+                "hooks": [{
+                    "type": "command",
+                    "command": context_cmd
+                }]
+            }
         ]
     }
 
@@ -486,9 +509,8 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
         "mcp__roampal-core__add_to_memory_bank",
         "mcp__roampal-core__update_memory",
         "mcp__roampal-core__delete_memory",
-        "mcp__roampal-core__get_context_insights",
         "mcp__roampal-core__record_response",
-        "mcp__roampal-core__score_response"
+        "mcp__roampal-core__score_memories"
     ]
 
     for perm in roampal_perms:
@@ -498,7 +520,8 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
     settings_path.write_text(json.dumps(settings, indent=2))
     print(f"  {GREEN}Created settings: {settings_path}{RESET}")
     print(f"  {GREEN}  - UserPromptSubmit hook (injects scoring + memories){RESET}")
-    print(f"  {GREEN}  - Stop hook (enforces record_response){RESET}")
+    print(f"  {GREEN}  - Stop hook (enforces scoring + sidecar summarization){RESET}")
+    print(f"  {GREEN}  - SessionStart hook (compaction recovery){RESET}")
     print(f"  {GREEN}  - Auto-allowed MCP permissions{RESET}")
 
     # =========================================================================
@@ -812,7 +835,7 @@ def configure_opencode(is_dev: bool = False, force: bool = False):
     # Ensure PYTHONPATH includes roampal's parent dir so the module is found
     # regardless of OpenCode's cwd (which may differ from the install location)
     roampal_root = str(Path(__file__).parent.parent.resolve())
-    expected_env = {"PYTHONPATH": roampal_root}
+    expected_env = {"PYTHONPATH": roampal_root, "ROAMPAL_PLATFORM": "opencode"}
     if is_dev:
         expected_env["ROAMPAL_DEV"] = "1"
     roampal_mcp_config = {
@@ -1545,12 +1568,581 @@ def cmd_books(args):
         print()
 
 
+def cmd_score(args):
+    """Score the last exchange using the sidecar (Haiku via claude CLI)."""
+    import hashlib
+    import httpx
+
+    port = get_port(args)
+    base_url = f"http://127.0.0.1:{port}"
+
+    # Lock file to prevent concurrent sidecar processes from racing
+    lock_dir = Path.home() / ".cache" / "roampal"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = lock_dir / "sidecar.lock"
+
+    try:
+        # Check if another sidecar is already running
+        if lock_file.exists():
+            try:
+                lock_data = json.loads(lock_file.read_text())
+                lock_pid = lock_data.get("pid", 0)
+                lock_time = lock_data.get("time", 0)
+                import time as _time
+                # If lock is older than 3 minutes, it's stale — ignore it
+                if _time.time() - lock_time < 180:
+                    # Check if the PID is still alive
+                    try:
+                        os.kill(lock_pid, 0)
+                        logger.debug(f"Sidecar already running (pid={lock_pid}), skipping")
+                        return
+                    except (OSError, ProcessLookupError):
+                        pass  # Process dead, lock is stale
+            except (json.JSONDecodeError, ValueError):
+                pass  # Corrupted lock file, proceed
+
+        # Acquire lock
+        import time as _time
+        lock_file.write_text(json.dumps({"pid": os.getpid(), "time": _time.time()}))
+    except Exception:
+        pass  # If locking fails, continue anyway — dedup check is the safety net
+
+    try:
+        _cmd_score_inner(args, base_url, port)
+    finally:
+        # Release lock
+        try:
+            lock_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _cmd_score_inner(args, base_url, port):
+    """Inner scoring logic, called under lock."""
+    import hashlib
+    import httpx
+
+    if args.from_hook:
+        # Read Claude Code Stop hook event data from stdin
+        import sys
+        try:
+            hook_data = json.loads(sys.stdin.read())
+        except (json.JSONDecodeError, Exception) as e:
+            logger.error(f"Failed to read hook data from stdin: {e}")
+            return
+
+        transcript_path = hook_data.get("transcript_path", "")
+        session_id = hook_data.get("session_id", "default")
+
+        if not transcript_path:
+            logger.error("No transcript_path in hook data")
+            return
+
+        # Parse transcript for last user + assistant messages
+        user_msg, assistant_msg, followup = _parse_last_exchange(transcript_path)
+        if not user_msg or not assistant_msg:
+            logger.debug("No complete exchange found in transcript")
+            return
+    else:
+        # Background sidecar or manual mode
+        transcript_arg = getattr(args, 'transcript', None)
+        session_id = getattr(args, 'session_id', None) or "default"
+        try:
+            if transcript_arg and Path(transcript_arg).exists():
+                transcript_path = transcript_arg
+            else:
+                transcript_path = _find_latest_transcript(session_id if session_id != "default" else None)
+            if not transcript_path:
+                logger.debug("No Claude Code transcript found")
+                return
+            if not getattr(args, 'from_hook', False) and session_id == "default":
+                print(f"{YELLOW}Scoring from transcript: {Path(transcript_path).name}{RESET}")
+            user_msg, assistant_msg, followup = _parse_last_exchange(transcript_path)
+            if not user_msg or not assistant_msg:
+                logger.debug("No complete exchange found in transcript")
+                return
+        except Exception as e:
+            logger.error(f"Score error: {e}")
+            return
+
+    # Fingerprint check — skip if this exchange was already summarized
+    fingerprint = hashlib.md5(f"{user_msg[:200]}:{assistant_msg[:200]}".encode()).hexdigest()[:12]
+
+    try:
+        check_resp = httpx.post(
+            f"{base_url}/api/search",
+            json={
+                "query": "",
+                "collections": ["working"],
+                "limit": 1,
+                "sort_by": "recency",
+                "metadata_filters": {"exchange_fingerprint": fingerprint}
+            },
+            timeout=5.0
+        )
+        if check_resp.status_code == 200 and check_resp.json().get("count", 0) > 0:
+            logger.debug(f"Exchange already summarized (fingerprint={fingerprint}), skipping")
+            return
+    except Exception:
+        pass  # If check fails, proceed with scoring
+
+    # Call sidecar to summarize + score
+    from roampal.sidecar_service import summarize_and_score
+
+    result = summarize_and_score(user_msg, assistant_msg, followup=followup)
+    if not result:
+        logger.error("Sidecar failed to summarize/score exchange")
+        return
+
+    summary = result.get("summary", "")
+    outcome = result.get("outcome", "unknown")
+
+    # Store the summary as a working memory via the server
+    try:
+        store_resp = httpx.post(
+            f"{base_url}/api/hooks/stop",
+            json={
+                "conversation_id": session_id,
+                "user_message": user_msg[:200],
+                "assistant_response": summary,
+                "metadata": {
+                    "memory_type": "exchange_summary",
+                    "sidecar_outcome": outcome,
+                    "exchange_fingerprint": fingerprint,
+                    "original_user_msg_length": len(user_msg),
+                    "original_assistant_msg_length": len(assistant_msg)
+                }
+            },
+            timeout=10.0
+        )
+
+        if store_resp.status_code == 200:
+            store_data = store_resp.json()
+            doc_id = store_data.get("doc_id", "")
+
+            # Score the exchange if we got a doc_id
+            if doc_id and outcome != "unknown":
+                httpx.post(
+                    f"{base_url}/api/record-outcome",
+                    json={
+                        "conversation_id": session_id,
+                        "outcome": outcome,
+                        "memory_scores": {doc_id: outcome}
+                    },
+                    timeout=10.0
+                )
+
+            if not args.from_hook:
+                print(f"{GREEN}Scored: {outcome}{RESET}")
+                print(f"Summary: {summary}")
+        else:
+            logger.error(f"Failed to store exchange: {store_resp.status_code}")
+
+    except httpx.ConnectError:
+        logger.error("Roampal server not running")
+    except Exception as e:
+        logger.error(f"Error storing exchange: {e}")
+
+
+def _parse_last_exchange(transcript_path: str) -> tuple:
+    """Parse a Claude Code JSONL transcript for the last COMPLETE user+assistant exchange.
+
+    Returns (user_msg, assistant_msg, followup):
+    - user_msg: The user message that the assistant was responding to
+    - assistant_msg: The assistant's full response (all text blocks from that turn)
+    - followup: The user's next message (for scoring context), may be empty
+
+    Uses a turn-based approach: each user string message starts a new turn.
+    All assistant text blocks between two user messages belong to one turn.
+
+    Handles:
+    - Real user messages: type="user", content is a plain string
+    - Tool results: type="user", content is a list → SKIP (not a turn boundary)
+    - Real assistant text: type="assistant", content has type="text" entries
+    - Tool calls/thinking: type="assistant", no substantive text → SKIP
+    - Noise types: progress, system, file-history-snapshot, queue-operation → SKIP
+    - System-reminder/hook injection tags in user messages → STRIPPED
+    """
+    import re
+
+    try:
+        with open(transcript_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        # Build turns: each turn = (user_text, assistant_text)
+        # A new turn starts when we see a real user message (string content)
+        turns = []  # List of {"user": str, "assistant": str}
+        current_turn = None
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                msg_type = entry.get("type", "")
+
+                if msg_type not in ("user", "assistant"):
+                    continue
+
+                content = entry.get("message", {}).get("content", [])
+
+                if msg_type == "user" and isinstance(content, str):
+                    text = content.strip()
+                    if not text:
+                        continue
+                    # Strip hook injection tags
+                    text = re.sub(r'<system-reminder>.*?</system-reminder>', '', text, flags=re.DOTALL).strip()
+                    text = re.sub(r'<task-notification>.*?</task-notification>', '', text, flags=re.DOTALL).strip()
+                    text = re.sub(r'<roampal-[^>]*>.*?</roampal-[^>]*>', '', text, flags=re.DOTALL).strip()
+                    if not text or len(text) < 2:
+                        continue
+
+                    # Save previous turn and start a new one
+                    if current_turn is not None:
+                        turns.append(current_turn)
+                    current_turn = {"user": text, "assistant": ""}
+
+                elif msg_type == "assistant" and isinstance(content, list) and current_turn is not None:
+                    # Accumulate all substantive text for this turn
+                    for p in content:
+                        if isinstance(p, dict) and p.get("type") == "text":
+                            t = p.get("text", "").strip()
+                            if t and t not in ("\n\n", "\n"):
+                                if current_turn["assistant"]:
+                                    current_turn["assistant"] += " " + t
+                                else:
+                                    current_turn["assistant"] = t
+
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+        # Don't forget the last in-progress turn
+        if current_turn is not None:
+            turns.append(current_turn)
+
+        if not turns:
+            return "", "", ""
+
+        # Find the last turn with a substantive assistant response
+        last_complete = None
+        followup_turn = None
+
+        for i in range(len(turns) - 1, -1, -1):
+            if turns[i]["assistant"] and len(turns[i]["assistant"]) >= 10:
+                last_complete = turns[i]
+                # If there's a turn after this one, it's the follow-up
+                if i + 1 < len(turns):
+                    followup_turn = turns[i + 1]
+                break
+
+        if not last_complete:
+            return "", "", ""
+
+        user_msg = last_complete["user"]
+        assistant_msg = last_complete["assistant"]
+        followup = followup_turn["user"] if followup_turn else ""
+
+        return user_msg, assistant_msg, followup
+
+    except Exception as e:
+        logger.error(f"Failed to parse transcript: {e}")
+        return "", "", ""
+
+
+def _find_latest_transcript(session_id: str = None) -> str:
+    """Find a Claude Code transcript file.
+
+    If session_id is provided, find the exact transcript for that session.
+    Otherwise fall back to most recent (WARNING: may pick up sidecar transcripts).
+    """
+    claude_dir = Path.home() / ".claude" / "projects"
+    if not claude_dir.exists():
+        return ""
+
+    if session_id:
+        # Session ID IS the transcript filename in Claude Code
+        matches = list(claude_dir.rglob(f"{session_id}.jsonl"))
+        if matches:
+            return str(matches[0])
+        logger.warning(f"No transcript found for session {session_id}")
+
+    # Fallback: most recent, but skip tiny files (likely sidecar/haiku transcripts)
+    transcripts = sorted(claude_dir.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for t in transcripts:
+        # Skip files under ~5KB — real sessions are much larger, haiku transcripts are tiny
+        if t.stat().st_size > 5000:
+            return str(t)
+    return str(transcripts[0]) if transcripts else ""
+
+
+def cmd_summarize(args):
+    """Summarize existing long memories using the sidecar."""
+    import httpx
+
+    port = get_port(args)
+    base_url = f"http://127.0.0.1:{port}"
+    max_chars = args.max_chars
+    collections_to_scan = [args.collection] if args.collection else ["working", "history"]
+    dry_run = args.dry_run
+
+    print_banner()
+    print(f"{BOLD}Summarizing memories over {max_chars} characters{RESET}")
+    if dry_run:
+        print(f"{YELLOW}DRY RUN — no changes will be made{RESET}")
+
+    from roampal.sidecar_service import get_backend_info
+    backend = get_backend_info()
+    print(f"Backend: {GREEN}{backend}{RESET}")
+
+    if backend == "none available":
+        print(f"\n{RED}No summarization backend available.{RESET}")
+        print()
+        print(f"  {BOLD}What was checked:{RESET}")
+        print(f"    ROAMPAL_SUMMARIZE_MODEL  {RED}not set{RESET}  (opt-in to main model)")
+        print(f"    ROAMPAL_SIDECAR_URL      {RED}not set{RESET}  (custom OpenAI-compatible API)")
+        print(f"    ANTHROPIC_API_KEY         {RED}not set{RESET}  (Haiku direct)")
+        print(f"    Zen free models           {RED}unavailable{RESET} (CLI only works inside OpenCode)")
+        print(f"    Ollama                    {RED}not running{RESET} (http://localhost:11434)")
+        print(f"    LM Studio                 {RED}not running{RESET} (http://localhost:1234)")
+        print(f"    claude CLI                {RED}not found{RESET}")
+        print()
+        print(f"  {BOLD}Options (pick one):{RESET}")
+        print(f"    1. {GREEN}Install Ollama{RESET} (recommended, free, local, ~14s/memory)")
+        print(f"       ollama.com → install → ollama pull llama3.2:3b")
+        print(f"    2. {GREEN}Set ANTHROPIC_API_KEY{RESET} (~$0.001/memory via Haiku)")
+        print(f"       export ANTHROPIC_API_KEY=sk-ant-...")
+        print(f"    3. {GREEN}Set ROAMPAL_SUMMARIZE_MODEL{RESET} (use your main model)")
+        print(f"       export ROAMPAL_SUMMARIZE_MODEL=claude-sonnet-4-5-20250929")
+        print(f"       export ANTHROPIC_API_KEY=sk-ant-...")
+        print(f"    4. {GREEN}Set ROAMPAL_SIDECAR_URL{RESET} (any OpenAI-compatible endpoint)")
+        print(f"       export ROAMPAL_SIDECAR_URL=https://api.groq.com/openai/v1")
+        print(f"       export ROAMPAL_SIDECAR_KEY=your-key")
+        print(f"       export ROAMPAL_SIDECAR_MODEL=llama-3.3-70b-versatile")
+        print()
+        print(f"  {YELLOW}Note:{RESET} OpenCode users don't need this — memories auto-summarize")
+        print(f"  during normal use via the plugin (1 per exchange, zero config).")
+        return
+    elif "claude -p" in backend:
+        print(f"{YELLOW}Warning: claude -p is slow (~30-60s/memory) and unreliable (~40% success rate).{RESET}")
+        print(f"For better results, install Ollama (ollama.com) or set ROAMPAL_SIDECAR_URL.{RESET}")
+
+    # Small model disclaimer
+    if "Ollama" in backend or "LM Studio" in backend:
+        print(f"{YELLOW}Note: Local models may struggle with very long memories (>5000 chars).{RESET}")
+        print(f"Those will be skipped if summarization fails. Use a larger model or API for best results.{RESET}")
+
+    print()
+
+    # Check server is running
+    try:
+        httpx.get(f"{base_url}/api/health", timeout=5.0)
+    except Exception:
+        print(f"{RED}Server not running. Start with: roampal start{RESET}")
+        return
+
+    from roampal.sidecar_service import summarize_only
+
+    # Scan all collections first to count available memories
+    all_candidates = []  # list of (coll_name, mem) tuples
+    for coll_name in collections_to_scan:
+        try:
+            resp = httpx.post(
+                f"{base_url}/api/search",
+                json={
+                    "query": "",
+                    "collections": [coll_name],
+                    "limit": 500,
+                    "sort_by": "recency"
+                },
+                timeout=30.0
+            )
+
+            if resp.status_code != 200:
+                print(f"{RED}Failed to search {coll_name}: {resp.status_code}{RESET}")
+                continue
+
+            results = resp.json().get("results", [])
+            for r in results:
+                content = r.get("content", "")
+                metadata = r.get("metadata", {})
+                # Skip already-summarized memories (have summarized_at timestamp)
+                if metadata.get("summarized_at"):
+                    continue
+                if len(content) > max_chars:
+                    all_candidates.append((coll_name, r))
+
+        except Exception as e:
+            print(f"{RED}Error scanning {coll_name}: {e}{RESET}")
+
+    if not all_candidates:
+        print(f"{GREEN}No memories need summarization.{RESET}")
+        return
+
+    # Show count and prompt for limit
+    print(f"{BOLD}{len(all_candidates)} memories available for summarization{RESET}")
+
+    # Group by collection for display
+    by_coll = {}
+    for coll_name, mem in all_candidates:
+        by_coll.setdefault(coll_name, []).append(mem)
+    for coll_name, mems in by_coll.items():
+        print(f"  {coll_name}: {len(mems)} memories over {max_chars} chars")
+
+    # Determine batch limit
+    batch_limit = args.limit
+    if batch_limit is not None and batch_limit <= 0:
+        print(f"Nothing to do (limit={batch_limit}).")
+        return
+    if batch_limit is None and not dry_run:
+        # Interactive: ask user how many
+        print()
+        try:
+            user_input = input(f"How many to summarize? (Enter for all {len(all_candidates)}, or a number): ").strip()
+            if user_input:
+                batch_limit = int(user_input)
+                if batch_limit <= 0:
+                    print(f"Cancelled.")
+                    return
+                print(f"Summarizing {batch_limit} memories...")
+            else:
+                print(f"Summarizing all {len(all_candidates)} memories...")
+        except (ValueError, EOFError):
+            print(f"Summarizing all {len(all_candidates)} memories...")
+
+    print()
+
+    total_summarized = 0
+    total_skipped = 0
+    batch_count = 0
+
+    for i, (coll_name, mem) in enumerate(all_candidates):
+        if batch_limit is not None and batch_count >= batch_limit:
+            remaining = len(all_candidates) - i
+            print(f"  {YELLOW}Batch limit reached ({batch_limit}). {remaining} remaining — run again to continue.{RESET}")
+            break
+
+        content = mem.get("content", "")
+        doc_id = mem.get("id", mem.get("doc_id", ""))
+
+        if dry_run:
+            print(f"  [{i+1}/{len(all_candidates)}] {doc_id}: {len(content)} chars -> would summarize")
+            if i < 3:  # Show sample previews for first 3
+                print(f"    {YELLOW}(generating preview...){RESET}")
+                try:
+                    summary = summarize_only(content)
+                    if summary:
+                        print(f"    Preview: {summary[:100]}...")
+                except Exception as e:
+                    print(f"    {YELLOW}Preview failed: {e}{RESET}")
+            total_summarized += 1
+            batch_count += 1
+            continue
+
+        # Summarize
+        summary = summarize_only(content)
+        if not summary:
+            print(f"  {YELLOW}[{i+1}] Failed to summarize {doc_id} ({len(content)} chars), skipping{RESET}")
+            total_skipped += 1
+            continue
+
+        # Enforce summary length — if LLM returned >max_chars, truncate to prevent re-summarization loop
+        if len(summary) > max_chars:
+            summary = summary[:max_chars - 20] + "... [truncated]"
+
+        # Update the memory with the summary
+        try:
+            update_resp = httpx.post(
+                f"{base_url}/api/memory/update-content",
+                json={
+                    "doc_id": doc_id,
+                    "collection": coll_name,
+                    "new_content": summary
+                },
+                timeout=10.0
+            )
+
+            if update_resp.status_code == 200:
+                total_summarized += 1
+                batch_count += 1
+                print(f"  [{i+1}/{len(all_candidates)}] {doc_id}: {len(content)} -> {len(summary)} chars")
+            else:
+                total_skipped += 1
+                print(f"  {YELLOW}[{i+1}] Failed to update {doc_id}: {update_resp.status_code}{RESET}")
+        except Exception as e:
+            total_skipped += 1
+            print(f"  {RED}[{i+1}] Error updating {doc_id}: {e}{RESET}")
+
+    print()
+    if dry_run:
+        print(f"{YELLOW}DRY RUN: Would summarize {total_summarized} memories{RESET}")
+    else:
+        print(f"{GREEN}Summarized {total_summarized} memories{RESET}")
+        if total_skipped > 0:
+            print(f"{YELLOW}Skipped {total_skipped} (failed or too long for model){RESET}")
+
+
+def cmd_context(args):
+    """Output recent exchange context for platform hooks."""
+    import httpx
+
+    port = get_port(args)
+    base_url = f"http://127.0.0.1:{port}"
+
+    if args.recent_exchanges:
+        try:
+            # Search for recent exchange summaries
+            resp = httpx.post(
+                f"{base_url}/api/search",
+                json={
+                    "query": "",
+                    "collections": ["working"],
+                    "limit": 4,
+                    "sort_by": "recency",
+                    "metadata_filters": {"memory_type": "exchange_summary"}
+                },
+                timeout=10.0
+            )
+
+            if resp.status_code != 200:
+                return
+
+            results = resp.json().get("results", [])
+            if not results:
+                return
+
+            # Format output for platform hook injection
+            print("RECENT EXCHANGES (last 4):")
+            for i, r in enumerate(results, 1):
+                content = r.get("content", "")
+                metadata = r.get("metadata", {})
+                recency = metadata.get("recency", "")
+                time_str = f"[{recency}] " if recency else ""
+                # Truncate to keep output compact
+                summary = content[:200] if content else "No content"
+                print(f"{i}. {time_str}{summary}")
+
+        except httpx.ConnectError:
+            pass  # Server not running, fail silently for hooks
+        except Exception:
+            pass  # Fail silently for hooks
+
+
 def main():
     """Main CLI entry point."""
+    from roampal import __version__
+
     parser = argparse.ArgumentParser(
-        description="Roampal - Persistent Memory for AI Coding Tools",
+        prog="roampal",
+        description="roampal - Persistent memory for AI coding assistants",
+        epilog="""Examples:
+  roampal init --claude-code    Set up for Claude Code
+  roampal start                 Start the server
+  roampal stats                 See memory statistics
+  roampal doctor                Diagnose installation issues""",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    parser.add_argument("--version", action="version", version=f"roampal {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -1601,9 +2193,36 @@ def main():
     # books command
     books_parser = subparsers.add_parser("books", help="List all books in memory")
 
+    # score command (v0.3.6)
+    score_parser = subparsers.add_parser("score", help="Score the last exchange using sidecar (Haiku)")
+    score_parser.add_argument("--from-hook", action="store_true", help="Read Stop hook event data from stdin")
+    score_parser.add_argument("--session-id", type=str, default=None, help="Claude Code session ID (transcript filename)")
+    score_parser.add_argument("--transcript", type=str, default=None, help="Direct path to transcript file")
+    score_parser.add_argument("--last", action="store_true", help="Score the most recent exchange manually")
+    score_parser.add_argument("--dev", action="store_true", help="Use dev server")
+    score_parser.add_argument("--port", type=int, default=None, help="Server port")
+
+    # summarize command (v0.3.6)
+    summarize_parser = subparsers.add_parser("summarize", help="Summarize existing long memories")
+    summarize_parser.add_argument("--dry-run", action="store_true", help="Preview without making changes")
+    summarize_parser.add_argument("--max-chars", type=int, default=400, help="Summarize memories over this length (default: 400)")
+    summarize_parser.add_argument("--collection", choices=["working", "history"], help="Target specific collection")
+    summarize_parser.add_argument("--limit", type=int, default=None, help="Max memories to summarize (for batching)")
+    summarize_parser.add_argument("--dev", action="store_true", help="Use dev server")
+    summarize_parser.add_argument("--port", type=int, default=None, help="Server port")
+
+    # context command (v0.3.6)
+    context_parser = subparsers.add_parser("context", help="Output recent exchange context")
+    context_parser.add_argument("--recent-exchanges", action="store_true", help="Output last 4 exchange summaries")
+    context_parser.add_argument("--dev", action="store_true", help="Use dev server")
+    context_parser.add_argument("--port", type=int, default=None, help="Server port")
+
     # doctor command
     doctor_parser = subparsers.add_parser("doctor", help="Diagnose installation and configuration")
     doctor_parser.add_argument("--dev", action="store_true", help="Check dev mode configuration")
+
+    # help command (alias for --help)
+    subparsers.add_parser("help", help="Show this help message")
 
     args = parser.parse_args()
 
@@ -1623,8 +2242,16 @@ def main():
         cmd_remove(args)
     elif args.command == "books":
         cmd_books(args)
+    elif args.command == "score":
+        cmd_score(args)
+    elif args.command == "summarize":
+        cmd_summarize(args)
+    elif args.command == "context":
+        cmd_context(args)
     elif args.command == "doctor":
         cmd_doctor(args)
+    elif args.command == "help":
+        parser.print_help()
     else:
         parser.print_help()
 

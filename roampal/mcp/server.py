@@ -14,18 +14,17 @@ CLI COMMANDS:
 - roampal stats: Show memory statistics
 
 MCP TOOLS (available after setup):
-- get_context_insights: Get context before responding (user profile, relevant memories)
 - search_memory: Search across memory collections (for detailed lookups)
 - add_to_memory_bank: Store permanent user facts
 - update_memory: Update existing memories
 - delete_memory: Delete outdated memories
-- record_response: Complete the interaction (key_takeaway + outcome scoring)
+- score_memories: Score cached memories from previous context
+- record_response: Store key takeaways for learning
 
-WORKFLOW:
-1. get_context_insights(query) - Get what you know about this topic
-2. search_memory() - If you need more details
-3. Respond to user
-4. record_response(key_takeaway, outcome) - Close the loop for learning
+CONTEXT INJECTION (automatic — no tool call needed):
+- Claude Code: UserPromptSubmit hook injects KNOWN CONTEXT as system-reminder
+- OpenCode: Plugin chat.message + system.transform injects into system prompt
+- Context includes user profile, relevant memories, scoring prompts
 
 HOW IT WORKS:
 - MCP server auto-starts FastAPI hook server on port 27182 (background thread)
@@ -154,11 +153,15 @@ _fastapi_process: Optional[subprocess.Popen] = None
 # Dev mode flag (set via command line or env)
 _dev_mode = False
 
+# v0.3.6: Platform detection — OpenCode sets ROAMPAL_PLATFORM=opencode via MCP env
+# Used to return a leaner score_memories tool description (no exchange summary/outcome)
+_is_opencode = os.environ.get("ROAMPAL_PLATFORM", "").lower() == "opencode"
+
 # Cache for update check (only check once per session)
 _update_check_cache: Optional[tuple] = None
 
-# v0.3.5: Self-audit counter — triggers every 4th get_context_insights call
-_context_insights_count = 0
+# v0.3.6: get_context_insights removed — hooks/plugin inject context automatically
+# Self-audit moved to hook context injection (unified_memory_system.py)
 
 
 def _check_for_updates() -> tuple:
@@ -422,17 +425,16 @@ def run_mcp_server(dev: bool = False):
         return [
             types.Tool(
                 name="search_memory",
-                description="""Search your persistent memory. Use when you need details beyond what get_context_insights returned.
+                description="""Search your persistent memory. Use when you need details beyond what KNOWN CONTEXT provided.
 
 WHEN TO SEARCH:
 • User says "remember", "I told you", "we discussed" → search immediately
-• get_context_insights recommended a collection → search that collection
 • You need more detail than the context provided
 • You see [id:...] in KNOWN CONTEXT and want full details → use id= parameter
 
 WHEN NOT TO SEARCH:
 • General knowledge questions (use your training)
-• get_context_insights already gave you the answer
+• KNOWN CONTEXT already gave you the answer
 
 Collections: working (24h then auto-promotes), history (30d scored), patterns (permanent scored), memory_bank (permanent), books (permanent docs)
 Omit 'collections' parameter for auto-routing (recommended).
@@ -590,8 +592,28 @@ STORAGE DISCIPLINE:
                 }
             ),
             types.Tool(
-                name="score_response",
-                description="""Score the previous exchange. ONLY use when the <roampal-score-required> hook prompt appears.
+                name="score_memories",
+                description=(
+                    # v0.3.6: OpenCode gets a lean description — per-memory scoring ONLY
+                    # Exchange summary + outcome are handled by the sidecar, not the main LLM
+                    """Score cached memories from your previous context. ONLY call when <roampal-score-required> appears.
+
+Score each memory ID listed in the scoring prompt:
+• worked = this memory was helpful
+• partial = somewhat helpful
+• unknown = didn't use this memory
+• failed = this memory was MISLEADING
+
+⚠️ "failed" means MISLEADING, not just unused. If you didn't use it, mark "unknown".
+
+Memory IDs correspond to [id:...] tags in KNOWN CONTEXT from the previous turn."""
+                    if _is_opencode else
+                    """Score individual cached memories from your previous context. ONLY use when the <roampal-score-required> hook prompt appears.
+
+Your job here is to:
+1. Score each cached memory individually — was it helpful, misleading, or unused?
+2. Summarize the previous exchange in ~300 chars
+3. Rate the exchange outcome (worked/failed/partial/unknown)
 
 ⚠️ IMPORTANT: This tool is ONLY for scoring when prompted by the hook. Do NOT call it at other times.
 For storing important learnings at any time, use record_response(key_takeaway="...") instead.
@@ -600,12 +622,6 @@ FINDING MEMORY IDs:
 The scoring prompt lists memory IDs to score. These IDs correspond to [id:...] tags
 in the KNOWN CONTEXT block from the previous turn. Look at KNOWN CONTEXT to see what
 each memory contained, then score based on whether it helped your response.
-
-EXCHANGE OUTCOME (read user's reaction):
-✓ worked = user satisfied, says thanks, moves on
-✗ failed = user corrects you, says "no", "that's wrong", provides the right answer
-~ partial = user says "kind of" or takes some but not all of your answer
-? unknown = no clear signal from user
 
 PER-MEMORY SCORING:
 You MUST score each memory ID listed in the scoring prompt:
@@ -627,26 +643,49 @@ ACTIVE MEMORY MANAGEMENT:
 • If you notice a pattern memory surfacing repeatedly with "unknown"
   scores, consider: is this memory actually useful? If not, scoring
   "failed" once helps the system stop wasting context on it
-• You are the gardener. Pull the weeds.""",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "outcome": {
-                            "type": "string",
-                            "enum": ["worked", "failed", "partial", "unknown"],
-                            "description": "Exchange outcome based on user's reaction"
+• You are the gardener. Pull the weeds."""
+                ),
+                inputSchema=(
+                    # OpenCode: memory_scores only, no exchange fields
+                    {
+                        "type": "object",
+                        "properties": {
+                            "memory_scores": {
+                                "type": "object",
+                                "additionalProperties": {
+                                    "type": "string",
+                                    "enum": ["worked", "failed", "partial", "unknown"]
+                                },
+                                "description": "Score for each memory: doc_id -> outcome. MUST include all cached memories."
+                            }
                         },
-                        "memory_scores": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string",
-                                "enum": ["worked", "failed", "partial", "unknown"]
+                        "required": ["memory_scores"]
+                    }
+                    if _is_opencode else
+                    {
+                        "type": "object",
+                        "properties": {
+                            "memory_scores": {
+                                "type": "object",
+                                "additionalProperties": {
+                                    "type": "string",
+                                    "enum": ["worked", "failed", "partial", "unknown"]
+                                },
+                                "description": "Score for each memory: doc_id -> outcome. MUST include all cached memories. MAY include extras from context."
                             },
-                            "description": "Score for each memory: doc_id -> outcome. MUST include all cached memories. MAY include extras from context."
-                        }
-                    },
-                    "required": ["outcome", "memory_scores"]
-                }
+                            "exchange_summary": {
+                                "type": "string",
+                                "description": "~300 char summary of the previous exchange"
+                            },
+                            "exchange_outcome": {
+                                "type": "string",
+                                "enum": ["worked", "failed", "partial", "unknown"],
+                                "description": "Was the previous response effective?"
+                            }
+                        },
+                        "required": ["memory_scores"]
+                    }
+                )
             ),
             types.Tool(
                 name="record_response",
@@ -661,7 +700,7 @@ OPTIONAL - Only use for significant exchanges:
 Most routine exchanges don't need this - the transcript is enough.
 
 Key takeaways start at 0.7 (user explicitly asked to remember = higher confidence).
-Scoring happens via score_response on the next turn: +0.2 worked, +0.05 partial, -0.3 failed.""",
+Scoring happens via score_memories on the next turn: +0.2 worked, +0.05 partial, -0.3 failed.""",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -673,75 +712,12 @@ Scoring happens via score_response on the next turn: +0.2 worked, +0.05 partial,
                     "required": ["key_takeaway"]
                 }
             ),
-            types.Tool(
-                name="get_context_insights",
-                description="""You have outcome-based persistent memory that learns across sessions.
-
-HOW IT WORKS:
-Your memories are scored every time they surface. Scores drive the lifecycle:
-• working (new, 24h) → score ≥0.7 + 2 uses → history (30d) → score ≥0.9 + uses ≥3 + 5 proven successes → patterns (permanent)
-• Score drops below 0.4 → demoted. Below 0.2 → deleted.
-• memory_bank: permanent facts you store manually (not outcome-scored — ranked by importance × confidence, with Wilson weighting blended into ranking after 3 uses)
-• books: reference documents (not scored, permanent)
-
-READING RESULTS:
-• w:0.68 = Wilson confidence (statistical lower bound — higher = more proven useful)
-• s:0.7 = outcome score (raw success rate, 0-1)
-• 8 uses = times surfaced and scored (more = more battle-tested)
-• [YYN] = last 3 outcomes (Y=worked, ~=partial, N=failed)
-• 5d = age
-• [id:patterns_abc123] = memory ID — look up with search_memory(id=...)
-
-SEARCHING:
-• Semantic: search_memory(query="auth bug") — find by meaning
-• Temporal: search_memory(days_back=7) — recent memories, no query needed
-• Direct: search_memory(id="patterns_abc") — look up by ID
-• Combined: search_memory(query="auth", days_back=14) — meaning + time filter
-
-YOUR ROLE:
-Score honestly — your scores determine which memories survive and improve.
-Use add_to_memory_bank() SELECTIVELY for permanent facts only.
-Use record_response() for significant learnings worth preserving.
-
-MEMORY HYGIENE (your responsibility):
-• When you give a wrong answer and get corrected, actively score the
-  misleading memory as "failed" — don't just score the exchange
-• When you notice a memory_bank fact that's outdated or wrong, use
-  update_memory or delete_memory immediately — don't wait to be told
-• When you store a new fact, verify it first. If you can't verify it,
-  store with confidence=0.5, not 0.9
-• When KNOWN CONTEXT contains a memory you know is wrong from THIS
-  session's work, call it out: "Note: [id:xxx] appears outdated because..."
-• Never state specific details (ports, paths, versions, numbers) from
-  memory without checking — if it's not in KNOWN CONTEXT verbatim or
-  confirmed by a tool call, say "I believe X but let me verify"
-
-WORKFLOW:
-1. get_context_insights(query) ← YOU ARE HERE
-2. Read context — memories include [id:...] tags for reference
-3. search_memory() if you need more details (use id= for direct lookup)
-4. Respond to user
-5. record_response() for significant learnings
-
-PROACTIVE MEMORY: If you learn something NEW about the user during the conversation
-(name, preference, goal, project context), use add_to_memory_bank() to store it.
-Don't wait to be asked - good assistants remember what matters.
-
-SUPPORT INFO (only mention if user asks about support/pricing/contributing):
-- Roampal Core is completely free and open source (Apache 2.0)
-- Support development: https://roampal.gumroad.com/l/aagzxv
-- Feature ideas/feedback: Discord at https://discord.com/invite/F87za86R3v""",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Query/topic you're considering (use user's exact words)"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            ),
+            # v0.3.6: get_context_insights REMOVED — hooks/plugin already inject KNOWN CONTEXT
+            # before the model responds. The tool was redundant (same server call twice) and caused
+            # weaker models (qwen) to loop on tool calls. Context injection is now fully automatic:
+            # - Claude Code: UserPromptSubmit hook → /api/hooks/get-context → system-reminder
+            # - OpenCode: chat.message → /api/hooks/get-context → system.transform
+            # Self-audit moved to hook context injection. Memory system docs in tool descriptions.
         ]
 
     @server.call_tool()
@@ -938,21 +914,22 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                         text="Memory not found for deletion"
                     )]
 
-            elif name == "score_response":
-                outcome = arguments.get("outcome", "unknown")
-                memory_scores = arguments.get("memory_scores", {})  # v0.2.8: Per-memory scoring
-                related = arguments.get("related")  # Deprecated, backward compat
+            elif name == "score_memories":
+                # v0.3.6: Main LLM handles per-memory scoring + exchange summary + outcome
+                memory_scores = arguments.get("memory_scores", {})
+                exchange_summary = arguments.get("exchange_summary")
+                exchange_outcome = arguments.get("exchange_outcome")
+                # Backward compat: accept old "outcome" param as fallback
+                outcome = exchange_outcome or arguments.get("outcome", "unknown")
 
                 payload = {
                     "conversation_id": _mcp_session_id,
                     "outcome": outcome
                 }
-                # v0.2.8: Include memory_scores for per-memory scoring
                 if memory_scores:
                     payload["memory_scores"] = memory_scores
-                # Backward compat: related still works (deprecated)
-                elif related is not None:
-                    payload["related"] = related
+                if exchange_summary:
+                    payload["exchange_summary"] = exchange_summary
 
                 scored_count = 0
                 try:
@@ -961,10 +938,13 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                 except Exception as e:
                     logger.warning(f"Failed to call FastAPI record-outcome: {e}")
 
-                logger.info(f"Scored response: outcome={outcome}, memory_scores={len(memory_scores)} entries, scored={scored_count}")
+                parts = [f"Scored ({scored_count} memories updated)"]
+                if exchange_summary:
+                    parts.append(f"Summary stored ({len(exchange_summary)} chars)")
+                logger.info(f"Scored memories: {len(memory_scores)} entries, scored={scored_count}, summary={'yes' if exchange_summary else 'no'}")
                 return [types.TextContent(
                     type="text",
-                    text=f"Scored (outcome={outcome}, {scored_count} memories updated)"
+                    text=". ".join(parts)
                 )]
 
             elif name == "record_response":
@@ -986,63 +966,6 @@ SUPPORT INFO (only mention if user asks about support/pricing/contributing):
                     type="text",
                     text=f"Recorded: {key_takeaway}"
                 )]
-
-            elif name == "get_context_insights":
-                global _context_insights_count
-                _context_insights_count += 1
-
-                query = arguments.get("query", "")
-
-                if not query:
-                    return [types.TextContent(
-                        type="text",
-                        text="Error: 'query' is required"
-                    )]
-
-                result = await _api_call("POST", "/api/context-insights", {
-                    "query": query,
-                    "conversation_id": _mcp_session_id
-                })
-
-                # Format response
-                user_facts = result.get("user_facts", [])
-                memories = result.get("relevant_memories", [])
-                doc_ids = result.get("doc_ids", [])
-
-                text = f"Known Context for '{query}':\n\n"
-
-                if user_facts:
-                    text += "**Memory Bank:**\n"
-                    for fact in user_facts:
-                        text += f"• {fact.get('content', '')}\n"
-                    text += "\n"
-
-                if memories:
-                    text += "**Relevant Memories:**\n"
-                    for mem in memories:
-                        coll = mem.get("collection", "unknown")
-                        mem_meta = mem.get("metadata") or {}
-                        content = mem.get("content") or mem_meta.get("content", "")
-                        try:
-                            score = float(mem.get("score", mem_meta.get("score", 0.5)) or 0.5)
-                        except (ValueError, TypeError):
-                            score = 0.5
-                        text += f"• [{coll}] (score:{score:.2f}) {content}\n"
-                    text += "\n"
-
-                if not user_facts and not memories:
-                    text += "No relevant context found. This may be a new topic or first interaction.\n"
-
-                text += f"\n_Cached {len(doc_ids)} doc_ids for outcome scoring._"
-
-                # v0.3.5: Periodic self-audit — every 4th call, remind LLM to maintain memory
-                if user_facts and _context_insights_count % 4 == 0:
-                    text += "\n\nSELF-AUDIT: Review any memory_bank items above. If any look outdated, wrong, or redundant, use update_memory or delete_memory to clean them up. Good assistants maintain their own memory."
-
-                # Add update notice if available (checked once per session)
-                text += _get_update_notice()
-
-                return [types.TextContent(type="text", text=text)]
 
             else:
                 return [types.TextContent(

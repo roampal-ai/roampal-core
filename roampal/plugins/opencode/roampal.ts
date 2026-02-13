@@ -10,11 +10,14 @@
  *
  * Both Claude Code and OpenCode share the same server (27182/27183) to avoid ChromaDB locking.
  *
+ * v0.3.6: Sidecar now summarizes + scores (matching Claude Code sidecar_service.py).
+ *         Prompt updated to first-person voice. Summary stored as exchange_summary working memory.
+ *         Compaction recovery via session.compacted + experimental.session.compacting events.
  * v0.3.4: Fix #1 — scoring prompt injection uses deep clone instead of in-place mutation.
  *         OpenCode holds refs to original message objects for UI rendering; mutating them
  *         caused garbled text in the input box. Clone goes to LLM, original stays in UI.
  *         Also: sidecar scoring deferred from chat.message to session.idle to prevent
- *         double-scoring memories (sidecar only runs if main LLM didn't call score_response).
+ *         double-scoring memories (sidecar only runs if main LLM didn't call score_memories).
  * v0.3.2: Fixed event handler to use correct OpenCode event structure (event.properties.*)
  *         Added message.part.updated handling for assistant text capture
  */
@@ -73,7 +76,7 @@ const assistantMessageIds = new Map<string, Set<string>>()
 // Map<sessionID, Map<partID, fullText>>
 const assistantTextParts = new Map<string, Map<string, string>>()
 
-// Track whether main LLM called score_response this turn (per session)
+// Track whether main LLM called score_memories this turn (per session)
 // If true, skip independent scoring — main LLM already provided precise per-memory scores
 const mainLLMScored = new Map<string, boolean>()
 
@@ -84,7 +87,14 @@ let pendingScoringPrompt: string | null = null
 // Mutex for independent scoring — only one scoring call at a time to avoid 429 pile-ups
 let scoringInFlight = false
 
-// Zen proxy — always used for scoring to save API credits (even for paid users).
+// User-configurable sidecar (env vars match Python sidecar_service.py)
+// Set ROAMPAL_SIDECAR_URL + ROAMPAL_SIDECAR_KEY + ROAMPAL_SIDECAR_MODEL
+// to use any OpenAI-compatible endpoint (Groq, Together, OpenRouter, Ollama, LM Studio, etc.)
+const CUSTOM_SIDECAR_URL = process.env.ROAMPAL_SIDECAR_URL || ""
+const CUSTOM_SIDECAR_KEY = process.env.ROAMPAL_SIDECAR_KEY || ""
+const CUSTOM_SIDECAR_MODEL = process.env.ROAMPAL_SIDECAR_MODEL || ""
+
+// Zen proxy — default for scoring to save API credits (even for paid users).
 // Defaults hardcoded; dynamically updated if "opencode" provider seen in chat.params.
 const ZEN_FALLBACK_URL = "https://opencode.ai/zen/v1"
 const ZEN_FALLBACK_KEY = "public"
@@ -96,9 +106,10 @@ let zenApiKey = ZEN_FALLBACK_KEY
 // Verified models: glm-4.7-free (reasoning), kimi-k2.5-free, gpt-5-nano (reasoning)
 const ZEN_SCORING_MODELS = ["glm-4.7-free", "kimi-k2.5-free", "gpt-5-nano"]
 
-// Max time (ms) the entire scoring function can block before giving up.
-// Prevents UI freezes if models are slow/down. Context injection still works.
-const MAX_SCORING_TIME_MS = 8000
+// Max time (ms) the entire scoring+summarization function can block before giving up.
+// Prevents UI freezes if models are slow/down. 20s total / 8s per attempt = 2-3 models tried.
+// v0.3.6: Per-request timeout bumped from 4s to 8s for larger per-memory scoring prompt.
+const MAX_SCORING_TIME_MS = 20000
 
 // Deferred retry queue — if scoring fails, store the payload and retry next message.
 // Ensures scoring data is NEVER lost even if all models are temporarily down.
@@ -117,6 +128,9 @@ const pendingScoringData = new Map<string, {
   exchange: { user: string; assistant: string }
   memories: Array<{ id: string; content: string }> | null
 }>()
+
+// v0.3.6: Post-compaction flag — inject recent exchanges on next system.transform
+const includeRecentOnNextTurn = new Map<string, boolean>()
 
 // Cached context from chat.message for system.transform to use (avoids double-fetch)
 // Map<sessionID, { contextOnly, scoringPrompt, scoringPromptSimple, scoringExchange, scoringMemories, timestamp }>
@@ -400,12 +414,15 @@ function extractTextFromParts(parts: any[]): string {
 // ============================================================================
 
 /**
- * Make an independent LLM call to score the previous exchange outcome.
+ * Make an independent LLM call to summarize + score the previous exchange.
  * Always uses Zen free models — saves paid users' API credits.
  * Falls through model list if one is unavailable (resilient to Zen updates).
  *
- * Only scores exchange outcome (worked/failed/partial/unknown).
- * Per-memory scoring is handled by the main LLM via score_response MCP tool.
+ * v0.3.6: Now produces both a ~300 char first-person summary AND an outcome score,
+ * matching the Claude Code sidecar (sidecar_service.py). The summary is stored as
+ * a working memory with memory_type: "exchange_summary" metadata.
+ *
+ * Per-memory scoring is handled by the main LLM via score_memories MCP tool.
  * If the main LLM doesn't score individual memories, all surfaced memories
  * inherit the exchange outcome as a fallback signal.
  */
@@ -423,84 +440,135 @@ async function scoreExchangeViaLLM(
   scoringInFlight = true
 
   try {
-    const scoringPrompt = `Score this conversation exchange. Return ONLY valid JSON, nothing else.
+    // v0.3.6: First-person prompt matching Claude Code sidecar (sidecar_service.py).
+    // Asks for summary, outcome, and per-memory scores in one call.
+    // Per-memory scoring uses relevance heuristic — sidecar can judge topic relevance
+    // but not actual usage, so irrelevant memories get "unknown" instead of inheriting
+    // unearned exchange outcomes. Conservative: defaults to "unknown" when unsure.
+    const memorySection = memories?.length
+      ? `\nThese memories were injected into your context for this exchange:\n${memories.map(m => `- ${m.id}: "${m.content.slice(0, 200)}"`).join("\n")}\n`
+      : ""
 
-Previous exchange:
-- User asked: "${exchange.user}"
-- Assistant answered: "${exchange.assistant}"
+    const memoryScoreSection = memories?.length
+      ? `\n"memory_scores": { ${memories.map(m => `"${m.id}": "<score>"`).join(", ")} }`
+      : ""
 
-User's follow-up: "${currentUserMessage}"
+    const memoryInstructions = memories?.length
+      ? `
+MEMORY SCORES: For each memory, judge based on topic relevance and exchange outcome.
+1. Memory is NOT about the topic discussed → "unknown"
+2. Memory IS about the topic AND outcome is "worked" → "worked"
+3. Memory IS about the topic AND outcome is "failed":
+   - Your response echoed/relied on info from this memory → "failed"
+   - The failure seems unrelated to this memory's content → "unknown"
+4. Memory IS about the topic AND outcome is "partial" → "partial"
+5. Your response contradicts what the memory says and the exchange worked → "unknown"
+6. Memory contains good advice/instructions the response IGNORED (didn't follow) → "unknown" not "failed". "failed" means the memory's content was WRONG and caused a bad response, not that the model failed to follow good advice.
+7. When in doubt → "unknown"`
+      : ""
 
-Based on the user's follow-up reaction, what was the outcome?
-- "worked" = user satisfied, says thanks, moves on
-- "failed" = user corrects, says no/wrong, repeats question
-- "partial" = lukewarm, "kind of", takes some but not all
-- "unknown" = no clear signal
+    const scoringPrompt = `You are part of a memory system for an AI assistant. You ARE the main AI in this system — write as if you are making a note for your future self.
 
-Return JSON: {"outcome": "worked"}`
+The user said:
+"${exchange.user}"
 
-    // Always use Zen free models — saves paid users' API credits, avoids rate
-    // limit collision with main model. Filter out the main model if it's a Zen model.
+You responded:
+"${exchange.assistant}"
+
+The user then followed up with:
+"${currentUserMessage}"
+${memorySection}
+Respond with ONLY a JSON object:
+{ "summary": "<~300 chars>", "outcome": "<worked|failed|partial|unknown>"${memoryScoreSection} }
+
+SUMMARY: Write a first-person note to your future self (~300 chars). Capture the important details — what the user needed, what you did, and any key specifics worth remembering.
+
+OUTCOME: Based on the user's follow-up:
+- worked: user confirmed, moved on, or was satisfied
+- failed: user corrected you, got frustrated, or asked to redo
+- partial: helped but incomplete or needed adjustment
+- unknown: no clear signal
+${memoryInstructions}`
+
+    // Build model queue: custom endpoint first (if configured), then Zen free models.
+    // Custom endpoint uses ROAMPAL_SIDECAR_URL/KEY/MODEL env vars — same as Python sidecar.
+    // Zen defaults save paid users' API credits; custom lets users choose their own backend.
+    interface ScoringTarget { url: string; key: string; model: string; label: string }
+    const targets: ScoringTarget[] = []
+
+    // 0. Custom endpoint (user-configured — takes priority)
+    if (CUSTOM_SIDECAR_URL && CUSTOM_SIDECAR_MODEL) {
+      targets.push({
+        url: CUSTOM_SIDECAR_URL,
+        key: CUSTOM_SIDECAR_KEY,
+        model: CUSTOM_SIDECAR_MODEL,
+        label: `custom(${CUSTOM_SIDECAR_MODEL})`
+      })
+    }
+
+    // 1. Zen free models (default fallback)
     const mainModel = capturedProvider?.modelID || ""
-    const modelQueue = ZEN_SCORING_MODELS.filter(m => m !== mainModel)
-    if (modelQueue.length === 0) modelQueue.push(...ZEN_SCORING_MODELS)
+    const zenModels = ZEN_SCORING_MODELS.filter(m => m !== mainModel)
+    if (zenModels.length === 0) zenModels.push(...ZEN_SCORING_MODELS)
+    for (const m of zenModels) {
+      targets.push({ url: zenBaseURL, key: zenApiKey, model: m, label: `zen(${m})` })
+    }
 
-    // Try each model in the fallback chain. Skip to next on 404/500 (model
-    // removed or broken). Retry same model on 429 (rate limit, temporary).
-    // Total timeout prevents UI freezes if all models are slow/down.
+    // Try each target in order. Skip to next on 404/500 (model removed or broken).
+    // Retry same target on 429 (rate limit, temporary).
+    // Total timeout prevents UI freezes if all targets are slow/down.
     const startTime = Date.now()
 
-    for (const scoringModelID of modelQueue) {
+    for (const target of targets) {
       if (Date.now() - startTime > MAX_SCORING_TIME_MS) {
         debugLog(`scoreExchange TIMEOUT — ${Date.now() - startTime}ms elapsed, giving up`)
         break
       }
-      debugLog(`scoreExchange trying ${scoringModelID} via ${zenBaseURL}`)
+      debugLog(`scoreExchange trying ${target.label} via ${target.url}`)
 
       for (let attempt = 0; attempt < 2; attempt++) {
         if (Date.now() - startTime > MAX_SCORING_TIME_MS) break
 
         try {
-          // All Zen free models use OpenAI-compatible /chat/completions
-          // Higher max_tokens (500) for reasoning models that burn tokens thinking
-          const resp = await fetch(`${zenBaseURL}/chat/completions`, {
+          // All targets use OpenAI-compatible /chat/completions
+          // Higher max_tokens (800) for reasoning models that burn tokens thinking + summary output
+          const headers: Record<string, string> = { "Content-Type": "application/json" }
+          if (target.key) headers["Authorization"] = `Bearer ${target.key}`
+
+          const resp = await fetch(`${target.url}/chat/completions`, {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${zenApiKey}`
-            },
+            headers,
             body: JSON.stringify({
-              model: scoringModelID,
+              model: target.model,
               messages: [
-                { role: "system", content: "You are a scoring classifier. Return ONLY valid JSON." },
+                { role: "system", content: "You are part of a memory system. Return ONLY valid JSON with summary, outcome, and memory_scores fields. No other text." },
                 { role: "user", content: scoringPrompt }
               ],
-              max_tokens: 500
+              max_tokens: 800
             }),
-            signal: AbortSignal.timeout(6000)
+            signal: AbortSignal.timeout(8000)
           })
 
           if (resp.status === 429) {
             const retryAfter = resp.headers.get("retry-after")
             const delay = Math.min(retryAfter ? parseInt(retryAfter) * 1000 : 2000, 2000)
-            debugLog(`scoreExchange 429 on ${scoringModelID} — retry ${attempt + 1} in ${delay}ms`)
+            debugLog(`scoreExchange 429 on ${target.label} — retry ${attempt + 1} in ${delay}ms`)
             await new Promise(resolve => setTimeout(resolve, delay))
-            continue  // retry same model
+            continue  // retry same target
           }
 
           if (resp.status === 404 || resp.status >= 500) {
-            // Model removed or broken — try next model in fallback chain
-            debugLog(`scoreExchange ${scoringModelID} returned ${resp.status} — trying next model`)
+            debugLog(`scoreExchange ${target.label} returned ${resp.status} — trying next`)
             break
           }
 
           if (!resp.ok) {
-            debugLog(`scoreExchange ${scoringModelID} returned ${resp.status}`)
-            break  // unexpected error — try next model
+            debugLog(`scoreExchange ${target.label} returned ${resp.status}`)
+            break  // unexpected error — try next target
           }
 
           const data = await resp.json()
-          debugLog(`scoreExchange raw (${scoringModelID}): ${JSON.stringify(data).slice(0, 500)}`)
+          debugLog(`scoreExchange raw (${target.label}): ${JSON.stringify(data).slice(0, 500)}`)
 
           // Handle standard content + reasoning models (glm puts answer in reasoning_content)
           const responseText = data.choices?.[0]?.message?.content
@@ -510,45 +578,157 @@ Return JSON: {"outcome": "worked"}`
           // Parse JSON from response
           const jsonMatch = responseText.match(/\{[\s\S]*\}/)
           if (!jsonMatch) {
-            debugLog(`scoreExchange no JSON from ${scoringModelID}: ${responseText.slice(0, 100)}`)
+            debugLog(`scoreExchange no JSON from ${target.label}: ${responseText.slice(0, 100)}`)
             break  // bad output — try next model
           }
 
           const result = JSON.parse(jsonMatch[0])
           const outcome = result.outcome
           if (!["worked", "failed", "partial", "unknown"].includes(outcome)) {
-            debugLog(`scoreExchange invalid outcome from ${scoringModelID}: ${outcome}`)
+            debugLog(`scoreExchange invalid outcome from ${target.label}: ${outcome}`)
             break  // bad output — try next model
           }
 
-          // All surfaced memories inherit the exchange outcome as fallback
+          const summary = typeof result.summary === "string" ? result.summary : ""
+
+          // v0.3.6: Per-memory scoring from sidecar when available.
+          // Falls back to blanket exchange outcome if model didn't return memory_scores.
           const memoryScores: Record<string, string> = {}
           if (memories?.length) {
+            const llmScores = result.memory_scores && typeof result.memory_scores === "object"
+              ? result.memory_scores as Record<string, string>
+              : null
+
+            let perMemoryCount = 0
             for (const mem of memories) {
-              memoryScores[mem.id] = outcome
+              const llmScore = llmScores?.[mem.id]
+              if (llmScore && ["worked", "failed", "partial", "unknown"].includes(llmScore)) {
+                memoryScores[mem.id] = llmScore
+                perMemoryCount++
+              } else {
+                memoryScores[mem.id] = outcome  // fallback to blanket
+              }
+            }
+
+            if (perMemoryCount > 0) {
+              debugLog(`scoreExchange per-memory: ${perMemoryCount}/${memories.length} scored individually`)
+              debugLog(`scoreExchange per-memory scores: ${JSON.stringify(memoryScores)}`)
             }
           }
 
-          // Send scoring result to roampal server
-          const scoreResp = await fetch(`${ROAMPAL_HOOK_URL.replace("/hooks", "")}/record-outcome`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              conversation_id: sessionId,
-              outcome,
-              memory_scores: Object.keys(memoryScores).length > 0 ? memoryScores : null
+          // Send scoring result to roampal server (all outcomes including unknown)
+          if (Object.keys(memoryScores).length > 0) {
+            const scoreResp = await fetch(`${ROAMPAL_HOOK_URL.replace("/hooks", "")}/record-outcome`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                conversation_id: sessionId,
+                outcome,
+                memory_scores: memoryScores
+              })
             })
-          })
 
-          if (scoreResp.ok) {
-            debugLog(`scoreExchange SUCCESS: ${outcome} via ${scoringModelID}, ${Object.keys(memoryScores).length} memories`)
+            if (scoreResp.ok) {
+              debugLog(`scoreExchange SUCCESS: ${outcome} via ${target.label}, ${Object.keys(memoryScores).length} memories`)
+            } else {
+              debugLog(`scoreExchange post failed: ${scoreResp.status}`)
+            }
           } else {
-            debugLog(`scoreExchange post failed: ${scoreResp.status}`)
+            debugLog(`scoreExchange SUCCESS: ${outcome} via ${target.label} (no memory scoring — no memories surfaced)`)
           }
+
+          // v0.3.6: Store exchange summary as working memory (matches Claude Code sidecar)
+          // This creates a separate compact entry alongside the full exchange from storeExchange()
+          if (summary) {
+            try {
+              // Fingerprint: simple hash of first 200 chars of user+assistant (matches cli.py format)
+              // cli.py uses MD5 — we use djb2 hash since crypto is heavy in plugin context.
+              // Cross-implementation dedup isn't needed (user uses one client per exchange),
+              // but format is kept compact (12 chars) for consistent metadata sizing.
+              const fpInput = `${exchange.user.slice(0, 200)}:${exchange.assistant.slice(0, 200)}`
+              let fpHash = 5381
+              for (let i = 0; i < fpInput.length; i++) {
+                fpHash = ((fpHash << 5) + fpHash + fpInput.charCodeAt(i)) | 0
+              }
+              const fingerprint = Math.abs(fpHash).toString(16).padStart(8, '0').slice(0, 12)
+
+              // Dedup check: skip if this exchange was already summarized (matches cli.py)
+              try {
+                const dedupResp = await fetch(`${ROAMPAL_HOOK_URL.replace('/hooks', '/search')}`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    query: "",
+                    collections: ["working"],
+                    limit: 1,
+                    sort_by: "recency",
+                    metadata_filters: { exchange_fingerprint: fingerprint }
+                  }),
+                  signal: AbortSignal.timeout(3000)
+                })
+                if (dedupResp.ok) {
+                  const dedupData = await dedupResp.json() as { count?: number }
+                  if ((dedupData.count || 0) > 0) {
+                    debugLog(`scoreExchange SUMMARY skipped — already exists (fingerprint=${fingerprint})`)
+                    return true
+                  }
+                }
+              } catch {
+                // If dedup check fails, proceed with storing (better duplicate than lost)
+              }
+
+              const summaryResp = await fetch(`${ROAMPAL_HOOK_URL}/stop`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  conversation_id: sessionId,
+                  user_message: exchange.user.slice(0, 200),
+                  assistant_response: summary,
+                  metadata: {
+                    memory_type: "exchange_summary",
+                    sidecar_outcome: outcome,
+                    exchange_fingerprint: fingerprint,
+                    original_user_msg_length: exchange.user.length,
+                    original_assistant_msg_length: exchange.assistant.length
+                  }
+                }),
+                signal: AbortSignal.timeout(5000)
+              })
+
+              if (summaryResp.ok) {
+                const storeData = await summaryResp.json() as { doc_id?: string }
+                const docId = storeData.doc_id || ""
+                debugLog(`scoreExchange SUMMARY stored: ${summary.length} chars, doc_id=${docId}`)
+
+                // Score the summary itself with the exchange outcome (matches cli.py)
+                if (docId && outcome !== "unknown") {
+                  try {
+                    await fetch(`${ROAMPAL_HOOK_URL.replace("/hooks", "")}/record-outcome`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        conversation_id: sessionId,
+                        outcome,
+                        memory_scores: { [docId]: outcome }
+                      }),
+                      signal: AbortSignal.timeout(3000)
+                    })
+                  } catch {
+                    // Best effort — summary is stored regardless
+                  }
+                }
+              } else {
+                debugLog(`scoreExchange summary store failed: ${summaryResp.status}`)
+              }
+            } catch (err) {
+              debugLog(`scoreExchange summary store error: ${err}`)
+            }
+          }
+
           return true  // Done — exit all loops
 
         } catch (error) {
-          debugLog(`scoreExchange error on ${scoringModelID} (attempt ${attempt}): ${error}`)
+          debugLog(`scoreExchange error on ${target.label} (attempt ${attempt}): ${error}`)
           if (attempt === 1) break  // exhausted retries — try next model
         }
       }
@@ -562,11 +742,153 @@ Return JSON: {"outcome": "worked"}`
 }
 
 // ============================================================================
+// Auto-Summarize Old Memories (v0.3.6 Change 10)
+// ============================================================================
+
+/**
+ * Summarize one old long memory during idle. Sidecar-first, Zen fallback.
+ *
+ * 1. Call POST /api/memory/auto-summarize-one on the server
+ * 2. If server returns {summarized: true} → done
+ * 3. If server returns {summarized: false, reason: "backend_failed"} → fall back to Zen
+ * 4. If server returns {summarized: false, reason: "no_candidates"} → silently return
+ * 5. On any error: log warning, don't retry (next idle picks it up)
+ */
+async function autoSummarizeOldMemory(): Promise<void> {
+  try {
+    const resp = await fetch(`${ROAMPAL_HOOK_URL.replace('/hooks', '/memory/auto-summarize-one')}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(15000)  // 15s — sidecar can be slow
+    })
+
+    if (!resp.ok) {
+      debugLog(`autoSummarize: server returned ${resp.status}`)
+      return
+    }
+
+    const data = await resp.json() as {
+      summarized: boolean
+      reason?: string
+      doc_id?: string
+      collection?: string
+      content?: string
+      old_len?: number
+      new_len?: number
+    }
+
+    if (data.summarized) {
+      debugLog(`autoSummarize: SUCCESS ${data.doc_id} (${data.old_len} -> ${data.new_len} chars)`)
+      return
+    }
+
+    if (data.reason === "no_candidates") {
+      // Nothing to summarize — all caught up
+      return
+    }
+
+    if (data.reason === "backend_failed" && data.content && data.doc_id && data.collection) {
+      // Server's sidecar failed — fall back to Zen directly from plugin
+      debugLog(`autoSummarize: sidecar failed for ${data.doc_id}, trying Zen fallback`)
+
+      const summarizePrompt = `You are part of a memory system for an AI assistant. You ARE the main AI — write a first-person note to your future self (~300 chars). Capture the important details from this exchange.
+
+Exchange:
+"${data.content}"
+
+Respond with ONLY a JSON object:
+{"summary": "<~300 chars>"}`
+
+      // Try Zen models (same rotation as scoring)
+      const zenModels = [...ZEN_SCORING_MODELS]
+      for (const model of zenModels) {
+        try {
+          const headers: Record<string, string> = { "Content-Type": "application/json" }
+          if (zenApiKey) headers["Authorization"] = `Bearer ${zenApiKey}`
+
+          const zenResp = await fetch(`${zenBaseURL}/chat/completions`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              model,
+              messages: [
+                { role: "system", content: "You are part of a memory system. Return ONLY valid JSON with a summary field." },
+                { role: "user", content: summarizePrompt }
+              ],
+              max_tokens: 800
+            }),
+            signal: AbortSignal.timeout(8000)
+          })
+
+          if (!zenResp.ok) {
+            debugLog(`autoSummarize: Zen ${model} returned ${zenResp.status}`)
+            continue
+          }
+
+          const zenData = await zenResp.json()
+          const responseText = zenData.choices?.[0]?.message?.content
+            || zenData.choices?.[0]?.message?.reasoning_content
+            || ""
+
+          const jsonMatch = responseText.match(/\{[\s\S]*\}/)
+          if (!jsonMatch) {
+            debugLog(`autoSummarize: Zen ${model} no JSON in response`)
+            continue
+          }
+
+          const result = JSON.parse(jsonMatch[0])
+          const summary = typeof result.summary === "string" ? result.summary : ""
+          if (!summary) {
+            debugLog(`autoSummarize: Zen ${model} empty summary`)
+            continue
+          }
+
+          // Enforce length to prevent re-summarization loops
+          const finalSummary = summary.length > 400 ? summary.slice(0, 380) + "... [truncated]" : summary
+
+          // Save via update-content endpoint
+          const updateResp = await fetch(`${ROAMPAL_HOOK_URL.replace('/hooks', '/memory/update-content')}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              doc_id: data.doc_id,
+              collection: data.collection,
+              new_content: finalSummary
+            }),
+            signal: AbortSignal.timeout(5000)
+          })
+
+          if (updateResp.ok) {
+            debugLog(`autoSummarize: Zen ${model} SUCCESS ${data.doc_id} (${data.old_len} -> ${finalSummary.length} chars)`)
+          } else {
+            debugLog(`autoSummarize: update-content failed ${updateResp.status}`)
+          }
+          return  // Done regardless of update success
+
+        } catch (err) {
+          debugLog(`autoSummarize: Zen ${model} error: ${err}`)
+          continue
+        }
+      }
+
+      debugLog(`autoSummarize: all Zen models failed for ${data.doc_id}`)
+      return
+    }
+
+    // Other reasons (memory_not_ready, etc.) — silently skip
+    debugLog(`autoSummarize: skipped (${data.reason})`)
+
+  } catch (err) {
+    debugLog(`autoSummarize: error: ${err}`)
+  }
+}
+
+// ============================================================================
 // Plugin Export
 // ============================================================================
 
 export const RoampalPlugin: Plugin = async ({ client }) => {
-  debugLog(`Plugin loaded (${ROAMPAL_DEV ? "DEV" : "PROD"} mode, port ${ROAMPAL_PORT})`)
+  debugLog(`Plugin loaded (${ROAMPAL_DEV ? "DEV" : "PROD"} mode, port ${ROAMPAL_PORT})${CUSTOM_SIDECAR_URL ? `, custom sidecar: ${CUSTOM_SIDECAR_MODEL}@${CUSTOM_SIDECAR_URL}` : ""}`)
 
   // Discover available Zen free models at startup — replaces hardcoded list.
   // If discovery fails, the hardcoded fallback list is used.
@@ -696,7 +1018,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
 
       // Cache scoring data for session.idle — sidecar scoring is DEFERRED until
       // after the main LLM responds so we can check mainLLMScored first.
-      // This prevents double-scoring: if the main LLM calls score_response with
+      // This prevents double-scoring: if the main LLM calls score_memories with
       // per-memory scores, the sidecar's uniform scoring is skipped entirely.
       if (scoringRequired && scoringExchange) {
         pendingScoringData.set(sessionId, {
@@ -737,6 +1059,17 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           debugLog(`system.transform: Injected SCORING REFERENCE with ${cached.scoringMemories.length} memories`)
         }
 
+        // v0.3.6: Inject scoring prompt into system prompt (not user message)
+        // Claude Code injects via system-reminder hook; OpenCode must do the same
+        // so the model treats it as system instructions, not user conversation.
+        // Previously injected into user message via messages.transform clone,
+        // which caused models to respond ABOUT scoring instead of silently handling it.
+        const scoringPrompt = cached.scoringPromptSimple || cached.scoringPrompt || null
+        if (scoringPrompt) {
+          output.system.push(scoringPrompt)
+          debugLog(`system.transform: Injected ${scoringPrompt.length} chars scoring prompt into system prompt`)
+        }
+
         if (cached.contextOnly) {
           output.system.push(cached.contextOnly)
           debugLog(`system.transform: Injected ${cached.contextOnly.length} chars context into system prompt (cached)`)
@@ -752,52 +1085,57 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
         output.system.push(contextOnly)
         debugLog(`system.transform: Injected ${contextOnly.length} chars context into system prompt (fresh fetch)`)
       }
+
+      // v0.3.6: Post-compaction recovery — inject recent exchanges
+      if (includeRecentOnNextTurn.get(sessionId)) {
+        includeRecentOnNextTurn.delete(sessionId)
+        try {
+          const recentResp = await fetch(`${ROAMPAL_HOOK_URL.replace('/hooks', '/search')}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              query: "recent exchange",
+              collections: ["working"],
+              limit: 4,
+              sort_by: "recency",
+              metadata_filters: { memory_type: "exchange_summary" }
+            }),
+            signal: AbortSignal.timeout(5000)
+          })
+          if (recentResp.ok) {
+            const data = await recentResp.json() as { results: Array<{ content: string; metadata: { recency?: string } }> }
+            if (data.results?.length > 0) {
+              const lines = data.results
+                .map((r, i) => `${i + 1}. ${r.metadata?.recency ? `[${r.metadata.recency}] ` : ""}${r.content?.slice(0, 200) || ""}`)
+                .join("\n")
+              output.system.push(`RECENT EXCHANGES (last ${data.results.length}):\n${lines}`)
+              debugLog(`system.transform: Injected ${data.results.length} recent exchanges (post-compaction recovery)`)
+            }
+          }
+        } catch (err) {
+          debugLog(`system.transform: Failed to inject recent exchanges: ${err}`)
+        }
+      }
     },
 
     // ========================================================================
-    // Hook 2b: Inject scoring prompt into message history (invisible in UI)
+    // Hook 2b: messages.transform — scoring prompt moved to system.transform
     //
-    // experimental.chat.messages.transform fires right before the LLM API call.
-    // We DEEP CLONE the user message before modifying it — OpenCode holds
-    // direct references to the original objects for UI rendering, so mutating
-    // in place causes garbled text in the input box (GitHub issue #1).
-    // The clone goes to the LLM; the original stays untouched in the UI.
+    // v0.3.6: Scoring prompt now injected via system.transform (system-level)
+    // instead of user message clone. This matches Claude Code behavior where
+    // hooks inject as system-reminders. Models treat system instructions as
+    // directives to follow silently, not as user conversation to respond to.
+    //
+    // The deep clone approach (v0.3.4) is preserved here as a no-op for
+    // reference — may be useful for future non-scoring user message transforms.
     // ========================================================================
     "experimental.chat.messages.transform": async (
       input: { sessionID?: string },
       output: { messages: Array<{ info: any; parts: Array<{ type: string; text?: string; [key: string]: any }> }> }
     ) => {
       const sessionId = input.sessionID
-      debugLog(`messages.transform: sessionID=${sessionId}, messageCount=${output.messages?.length}, pendingPrompt=${pendingScoringPrompt?.length || 0}`)
-
-      // Try session-keyed cache first, fall back to session-independent variable
-      let prompt: string | null = null
-      if (sessionId) {
-        const cached = cachedContext.get(sessionId)
-        prompt = cached?.scoringPromptSimple || cached?.scoringPrompt || null
-      }
-      if (!prompt) {
-        prompt = pendingScoringPrompt
-      }
-
-      if (!prompt) return
-
-      // Find the last user message and inject via DEEP CLONE (not mutation)
-      for (let i = output.messages.length - 1; i >= 0; i--) {
-        const msg = output.messages[i]
-        if (msg.info?.role === "user") {
-          const textPartIndex = msg.parts.findIndex((p: any) => p.type === "text" && p.text)
-          if (textPartIndex >= 0) {
-            // Deep clone the entire message to avoid mutating UI-visible objects
-            const cloned = JSON.parse(JSON.stringify(msg))
-            cloned.parts[textPartIndex].text = prompt + "\n\n" + cloned.parts[textPartIndex].text
-            output.messages[i] = cloned
-            debugLog(`messages.transform: INJECTED ${prompt.length} chars via clone into user message`)
-            pendingScoringPrompt = null
-          }
-          break
-        }
-      }
+      debugLog(`messages.transform: sessionID=${sessionId}, messageCount=${output.messages?.length}, pendingPrompt=0 (moved to system.transform)`)
+      // Scoring prompt injection now handled by system.transform
     },
 
     // ========================================================================
@@ -823,6 +1161,9 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           const sid = event.properties?.info?.id
           if (!sid) break
           sessionContextMap.set(sid, { sessionId: sid, userPrompt: "" })
+          // v0.3.6: Cold start — inject recent exchanges on first system.transform
+          // Same mechanism as compaction recovery (reuses includeRecentOnNextTurn flag)
+          includeRecentOnNextTurn.set(sid, true)
           debugLog(`Session created: ${sid}`)
           break
         }
@@ -844,7 +1185,8 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           const part = event.properties?.part
 
           // DEBUG: Log RAW part data BEFORE any guards filter it out
-          if (part && part.type !== "text") {
+          // Skip reasoning parts — they fire per-token and flood the log (1000s of lines)
+          if (part && part.type !== "text" && part.type !== "reasoning") {
             debugLog(`part.updated RAW: type=${part.type}, name=${part.name}, toolName=${part.toolName}, tool=${part.tool}, sessionID=${part.sessionID}, messageID=${part.messageID}, keys=${Object.keys(part).join(",")}`)
           }
 
@@ -852,13 +1194,13 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
 
           const sid = part.sessionID
 
-          // Track tool invocations — detect if main LLM called score_response
+          // Track tool invocations — detect if main LLM called score_memories
           // Check multiple possible field names for tool call detection
-          const toolName = part.name || part.toolName || part.tool
-          const isToolPart = part.type === "tool-invocation" || part.type === "tool-call" || part.type === "tool_invocation" || part.type === "tool_call"
-          if (isToolPart && toolName === "score_response") {
+          const toolName = part.name || part.toolName || part.tool || ""
+          const isToolPart = part.type === "tool-invocation" || part.type === "tool-call" || part.type === "tool_invocation" || part.type === "tool_call" || part.type === "tool"
+          if (isToolPart && (toolName === "score_memories" || toolName.endsWith("_score_memories"))) {
             mainLLMScored.set(sid, true)
-            debugLog(`Main LLM called score_response for session ${sid} (part.type=${part.type})`)
+            debugLog(`Main LLM called score_memories for session ${sid} (part.type=${part.type})`)
             break
           }
 
@@ -918,45 +1260,52 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
             }
           }
 
-          // Sidecar scoring for CURRENT exchange — ONLY if main LLM did NOT call score_response.
-          // This prevents double-scoring: main LLM provides per-memory scores,
-          // sidecar provides uniform fallback. Never both.
+          // Sidecar: ALWAYS summarizes the exchange. Only scores memories if main LLM didn't.
+          // OpenCode architecture: main LLM = per-memory scoring, sidecar = summarization + outcome.
+          // Claude Code is different — main LLM does everything (no sidecar).
           const scoringData = pendingScoringData.get(sid)
           if (scoringData) {
             pendingScoringData.delete(sid)
 
-            // v0.3.6: Server-side check — ask the server if score_response was already called.
-            // This replaces the broken client-side mainLLMScored detection (message.part.updated
-            // never fires for MCP tool calls in OpenCode).
-            let serverSaysScored = false
+            // Check if main LLM already scored per-memory (server-side check is authoritative —
+            // client-side mainLLMScored is unreliable because message.part.updated never fires
+            // for MCP tool calls in OpenCode).
+            let mainLLMScoredMemories = mainLLMScored.get(sid) || false
             try {
               const checkResp = await fetch(`${ROAMPAL_HOOK_URL}/check-scored?conversation_id=${encodeURIComponent(sid)}`, {
                 signal: AbortSignal.timeout(3000)
               })
               if (checkResp.ok) {
                 const checkData = await checkResp.json() as { scored: boolean }
-                serverSaysScored = checkData.scored
+                if (checkData.scored) mainLLMScoredMemories = true
               }
             } catch (err) {
               debugLog(`session.idle: check-scored failed (${err}), assuming not scored`)
             }
 
-            if (mainLLMScored.get(sid) || serverSaysScored) {
-              debugLog(`session.idle: Main LLM already scored — skipping sidecar for ${sid} (client=${mainLLMScored.get(sid) || false}, server=${serverSaysScored})`)
-            } else {
-              // Main LLM didn't score — run sidecar with uniform scoring
-              debugLog(`session.idle: Main LLM did NOT score — running sidecar for ${sid}`)
-              try {
-                const ok = await scoreExchangeViaLLM(sid, scoringData.userMessage, scoringData.exchange, scoringData.memories)
-                if (!ok) {
-                  pendingScoring = { sessionId: sid, ...scoringData }
-                  debugLog(`session.idle: Sidecar failed — queued for deferred retry`)
-                }
-              } catch (err) {
+            // Sidecar ALWAYS runs for summarization.
+            // If main LLM scored memories → pass null memories (summary only, no memory scoring).
+            // If main LLM didn't score → full sidecar (summary + uniform memory scoring).
+            const memories = mainLLMScoredMemories ? null : scoringData.memories
+            debugLog(`session.idle: Running sidecar for ${sid} (summaryOnly=${mainLLMScoredMemories}, memories=${memories?.length || 0})`)
+            try {
+              const ok = await scoreExchangeViaLLM(sid, scoringData.userMessage, scoringData.exchange, memories)
+              if (!ok) {
                 pendingScoring = { sessionId: sid, ...scoringData }
-                debugLog(`session.idle: Sidecar error — queued for deferred retry: ${err}`)
+                debugLog(`session.idle: Sidecar failed — queued for deferred retry`)
               }
+            } catch (err) {
+              pendingScoring = { sessionId: sid, ...scoringData }
+              debugLog(`session.idle: Sidecar error — queued for deferred retry: ${err}`)
             }
+          }
+
+          // v0.3.6: Auto-summarize one old memory during idle (Change 10)
+          // Sidecar-first on server, Zen fallback in plugin. One per idle cycle.
+          try {
+            await autoSummarizeOldMemory()
+          } catch (err) {
+            debugLog(`session.idle: autoSummarize error: ${err}`)
           }
 
           // Clear state for next exchange
@@ -964,6 +1313,53 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           assistantTextParts.delete(sid)
           mainLLMScored.delete(sid)
           cachedContext.delete(sid)
+          break
+        }
+
+        // v0.3.6: Compaction recovery — inject recent exchanges on next turn
+        case "session.compacted": {
+          const sid = event.properties?.sessionID || event.properties?.info?.id
+          if (!sid) break
+          includeRecentOnNextTurn.set(sid, true)
+          debugLog(`session.compacted: Flagged ${sid} for recent exchange injection on next turn`)
+          break
+        }
+
+        case "experimental.session.compacting": {
+          // Fire BEFORE compaction — can inject context INTO the compaction prompt
+          // so the model's own summary includes recent exchanges
+          const sid = event.properties?.sessionID || event.properties?.info?.id
+          if (!sid) break
+          debugLog(`experimental.session.compacting: Injecting recent exchanges into compaction for ${sid}`)
+          try {
+            const recentResp = await fetch(`${ROAMPAL_HOOK_URL.replace('/hooks', '/search')}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                query: "recent exchange",
+                collections: ["working"],
+                limit: 4,
+                sort_by: "recency"
+              }),
+              signal: AbortSignal.timeout(5000)
+            })
+            if (recentResp.ok) {
+              const data = await recentResp.json() as { results: Array<{ content: string; metadata: { recency?: string } }> }
+              if (data.results?.length > 0) {
+                const recentText = data.results
+                  .map((r, i) => `${i + 1}. ${r.metadata?.recency ? `[${r.metadata.recency}] ` : ""}${r.content?.slice(0, 200) || ""}`)
+                  .join("\n")
+                // Inject into compaction context if the event supports output
+                const output = (event as any).output
+                if (output?.context && Array.isArray(output.context)) {
+                  output.context.push(`<recent-exchanges>\n${recentText}\n</recent-exchanges>`)
+                  debugLog(`experimental.session.compacting: Injected ${data.results.length} recent exchanges`)
+                }
+              }
+            }
+          } catch (err) {
+            debugLog(`experimental.session.compacting: Failed to fetch recent exchanges: ${err}`)
+          }
           break
         }
 
@@ -978,6 +1374,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           mainLLMScored.delete(sid)
           cachedContext.delete(sid)
           pendingScoringData.delete(sid)
+          includeRecentOnNextTurn.delete(sid)
           debugLog(`Session deleted: ${sid}`)
           break
         }

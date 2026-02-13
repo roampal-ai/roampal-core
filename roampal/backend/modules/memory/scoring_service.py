@@ -281,8 +281,8 @@ class ScoringService:
         if collection == "memory_bank":
             quality = importance * confidence
             if uses >= 3:
-                # 80% quality + 20% Wilson (cold start protection: quality only below 3 uses)
-                learned_score = 0.8 * quality + 0.2 * wilson_score
+                # v0.3.6: 50% quality + 50% Wilson (cold start protection: quality only below 3 uses)
+                learned_score = 0.5 * quality + 0.5 * wilson_score
             else:
                 learned_score = quality
 

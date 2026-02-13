@@ -31,7 +31,7 @@ class ContentGraph:
     Graph structure:
     {
         "entities": {
-            "logan": {
+            "alice": {
                 "mentions": 12,
                 "collections": {"memory_bank": 12},
                 "documents": ["doc_id_1", "doc_id_2", ...],
@@ -40,8 +40,8 @@ class ContentGraph:
             }
         },
         "relationships": {
-            "logan__everbright": {
-                "entities": ["logan", "everbright"],
+            "alice__acme_corp": {
+                "entities": ["alice", "acme_corp"],
                 "strength": 8.0,
                 "co_occurrences": 8,
                 "documents": ["doc_id_1", "doc_id_2", ...],
@@ -176,11 +176,11 @@ class ContentGraph:
             timestamp: ISO timestamp for tracking
 
         Example:
-            If doc contains ["logan", "everbright", "operations_manager"],
+            If doc contains ["alice", "acme_corp", "operations_manager"],
             creates relationships:
-            - logan <-> everbright
-            - logan <-> operations_manager
-            - everbright <-> operations_manager
+            - alice <-> acme_corp
+            - alice <-> operations_manager
+            - acme_corp <-> operations_manager
         """
         # Create pairwise relationships (undirected)
         unique_entities = list(set(entities))
@@ -288,10 +288,10 @@ class ContentGraph:
             List of relationships with connected entities and metadata
 
         Example:
-            >>> cg.get_entity_relationships("logan", min_strength=2.0)
+            >>> cg.get_entity_relationships("alice", min_strength=2.0)
             [
                 {
-                    "related_entity": "everbright",
+                    "related_entity": "acme_corp",
                     "strength": 5.66,
                     "co_occurrences": 8,
                     "documents": ["mem_001", "mem_003", ...],
@@ -345,11 +345,11 @@ class ContentGraph:
             List of entities forming path, or None if no path found
 
         Example:
-            >>> cg.find_path("logan", "everbright", max_depth=3)
-            ["logan", "everbright"]  # Direct connection
+            >>> cg.find_path("alice", "acme_corp", max_depth=3)
+            ["alice", "acme_corp"]  # Direct connection
 
-            >>> cg.find_path("logan", "solar_energy", max_depth=3)
-            ["logan", "everbright", "solar_energy"]  # 2-hop connection
+            >>> cg.find_path("alice", "solar_energy", max_depth=3)
+            ["alice", "acme_corp", "solar_energy"]  # 2-hop connection
         """
         if from_entity not in self.entities or to_entity not in self.entities:
             logger.debug(f"Entity not found: from='{from_entity}' to='{to_entity}'")

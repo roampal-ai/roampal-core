@@ -149,25 +149,13 @@ class TestStopHook:
                 stop_hook.main()
             assert exc.value.code == 0
 
-    def test_empty_messages_exits_0(self):
-        """No messages found exits cleanly."""
-        from roampal.hooks import stop_hook
-
-        with patch('sys.stdin', io.StringIO(json.dumps({
-            "session_id": "test",
-            "transcript_path": ""
-        }))):
-            with pytest.raises(SystemExit) as exc:
-                stop_hook.main()
-            assert exc.value.code == 0
-
-    def test_successful_exchange_storage(self):
-        """Successful exchange storage exits 0."""
+    def test_state_management_only(self):
+        """v0.3.6: Stop hook sends conversation_id only (no exchange storage)."""
         from roampal.hooks import stop_hook
 
         response_data = json.dumps({
-            "stored": True,
-            "doc_id": "working_123",
+            "stored": False,
+            "doc_id": "",
             "scoring_complete": False,
             "should_block": False
         }).encode("utf-8")
@@ -179,27 +167,33 @@ class TestStopHook:
 
         input_data = json.dumps({
             "session_id": "test",
-            "user_message": "hello",
-            "assistant_response": "hi there"
         })
 
         with patch('sys.stdin', io.StringIO(input_data)), \
-             patch("urllib.request.urlopen", return_value=mock_resp), \
+             patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen, \
              patch('builtins.print'):
             with pytest.raises(SystemExit) as exc:
                 stop_hook.main()
             assert exc.value.code == 0
+            # v0.3.6: Stop hook always sends lifecycle_only=True with exchange data
+            # (empty when no transcript_path provided)
+            call_args = mock_urlopen.call_args
+            sent_data = json.loads(call_args[0][0].data.decode("utf-8"))
+            assert sent_data["conversation_id"] == "test"
+            assert sent_data["lifecycle_only"] is True
+            assert sent_data["user_message"] == ""
+            assert sent_data["assistant_response"] == ""
 
     def test_blocking_exit_code_2(self):
         """should_block=True causes exit code 2."""
         from roampal.hooks import stop_hook
 
         response_data = json.dumps({
-            "stored": True,
-            "doc_id": "working_123",
+            "stored": False,
+            "doc_id": "",
             "scoring_complete": False,
             "should_block": True,
-            "block_message": "Please score the previous exchange"
+            "block_message": "Please score the cached memories"
         }).encode("utf-8")
 
         mock_resp = MagicMock()
@@ -209,8 +203,6 @@ class TestStopHook:
 
         input_data = json.dumps({
             "session_id": "block_test",
-            "user_message": "hello",
-            "assistant_response": "hi"
         })
 
         with patch('sys.stdin', io.StringIO(input_data)), \
@@ -223,12 +215,9 @@ class TestStopHook:
     def test_server_error_exits_0(self):
         """Stop hook never blocks on server errors."""
         from roampal.hooks import stop_hook
-        import urllib.error
 
         input_data = json.dumps({
             "session_id": "error_test",
-            "user_message": "hello",
-            "assistant_response": "hi"
         })
 
         with patch('sys.stdin', io.StringIO(input_data)), \
@@ -261,23 +250,21 @@ class TestTranscriptReading:
             transcript_path = f.name
 
         try:
-            user_msg, assistant_msg, transcript = read_transcript(transcript_path)
+            user_msg, assistant_msg = read_transcript(transcript_path)
             assert "Python" in user_msg
             assert "programming language" in assistant_msg
-            assert "User:" in transcript
-            assert "Assistant:" in transcript
         finally:
             os.unlink(transcript_path)
 
     def test_read_tool_calls_in_transcript(self):
-        """Tool calls are captured in transcript text."""
+        """Tool call text parts are captured, tool_use names are not (only text blocks extracted)."""
         from roampal.hooks.stop_hook import read_transcript
 
         lines = [
             json.dumps({"type": "user", "message": {"content": [{"type": "text", "text": "score this"}]}}),
             json.dumps({"type": "assistant", "message": {"content": [
                 {"type": "text", "text": "Scoring now"},
-                {"type": "tool_use", "name": "score_response"}
+                {"type": "tool_use", "name": "score_memories"}
             ]}}),
         ]
 
@@ -287,15 +274,15 @@ class TestTranscriptReading:
             transcript_path = f.name
 
         try:
-            _, assistant_msg, transcript = read_transcript(transcript_path)
-            assert "score_response" in assistant_msg or "score_response" in transcript
+            _, assistant_msg = read_transcript(transcript_path)
+            assert "Scoring now" in assistant_msg
         finally:
             os.unlink(transcript_path)
 
     def test_nonexistent_file(self):
         """Missing file returns empty strings."""
         from roampal.hooks.stop_hook import read_transcript
-        user_msg, assistant_msg, transcript = read_transcript("/nonexistent/path.jsonl")
+        user_msg, assistant_msg = read_transcript("/nonexistent/path.jsonl")
         assert user_msg == ""
         assert assistant_msg == ""
 
@@ -307,7 +294,7 @@ class TestTranscriptReading:
             transcript_path = f.name
 
         try:
-            user_msg, assistant_msg, transcript = read_transcript(transcript_path)
+            user_msg, assistant_msg = read_transcript(transcript_path)
             assert user_msg == ""
             assert assistant_msg == ""
         finally:

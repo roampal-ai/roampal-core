@@ -53,7 +53,7 @@ The core loop is identical — both platforms inject context, capture exchanges,
 | Scoring | Main LLM prompted via hooks | Main LLM prompted + independent sidecar fallback |
 | Self-healing | Hooks auto-restart server on failure | Plugin auto-restarts server on failure |
 
-Both platforms prompt the main LLM to score each exchange. OpenCode adds an independent sidecar call (using free models) as a fallback — sidecar only runs if the main LLM doesn't call `score_response`, so memories are never double-scored.
+Both platforms prompt the main LLM to score each exchange. OpenCode adds an independent sidecar call (using free models) as a fallback — sidecar only runs if the main LLM doesn't call `score_memories`, so memories are never double-scored.
 </details>
 
 ## How It Works
@@ -106,6 +106,9 @@ roampal stop                # Stop the HTTP server
 roampal status              # Check if server is running
 roampal stats               # View memory statistics
 roampal doctor              # Diagnose installation issues
+roampal summarize           # Summarize long memories (retroactive cleanup)
+roampal score               # Score the last exchange (manual/testing)
+roampal context             # Output recent exchange context
 roampal ingest <file>       # Add documents to books collection
 roampal books               # List all ingested books
 roampal remove <title>      # Remove a book by title
@@ -113,16 +116,15 @@ roampal remove <title>      # Remove a book by title
 
 ## MCP Tools
 
-Your AI gets 7 memory tools:
+Your AI gets 6 memory tools:
 
 | Tool | Description |
 |------|-------------|
-| `get_context_insights` | Quick topic lookup — user profile + relevant memories |
 | `search_memory` | Deep search across all collections |
 | `add_to_memory_bank` | Store permanent facts (identity, preferences, goals) |
 | `update_memory` | Correct or update existing memories |
 | `delete_memory` | Remove outdated info |
-| `score_response` | Score previous exchange — prompted automatically by hooks |
+| `score_memories` | Score previous exchange — prompted automatically by hooks |
 | `record_response` | Store key takeaways from significant exchanges |
 
 ## What's Different?

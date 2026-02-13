@@ -4,8 +4,8 @@ Tests for FastAPI endpoints (server/main.py).
 Tests the HTTP API layer that all clients (Claude Code, Cursor, OpenCode)
 proxy through. Uses FastAPI TestClient with mocked memory/session backends.
 
-v0.3.2: Covers all endpoints including new /api/record-response,
-/api/context-insights, and split delivery fields (scoring_prompt, context_only).
+v0.3.2: Covers all endpoints including /api/record-response and split delivery fields.
+v0.3.6: /api/context-insights removed (hooks/plugin inject context automatically).
 """
 
 import sys
@@ -62,7 +62,7 @@ def mock_session_manager():
     sm.check_and_clear_completed = MagicMock(return_value=False)
     sm.get_previous_exchange = AsyncMock(return_value=None)
     sm.build_scoring_prompt = MagicMock(return_value="<score>Score this</score>")
-    sm.build_scoring_prompt_simple = MagicMock(return_value="REQUIRED: Call score_response to score if these memories were helpful.")
+    sm.build_scoring_prompt_simple = MagicMock(return_value="REQUIRED: Call score_memories to score if these memories were helpful.")
     sm.set_scoring_required = MagicMock()
     sm.store_exchange = AsyncMock()
     sm.was_scoring_required = MagicMock(return_value=False)
@@ -262,6 +262,29 @@ class TestGetContextEndpoint:
 
 class TestStopHookEndpoint:
     """Test /api/hooks/stop endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_only_skips_chromadb(self, async_client):
+        """lifecycle_only=True stores in JSONL but skips ChromaDB."""
+        ac, mock_mem, mock_sm = async_client
+        response = await ac.post("/api/hooks/stop", json={
+            "conversation_id": "lifecycle_test",
+            "user_message": "What is Python?",
+            "assistant_response": "Python is a programming language.",
+            "lifecycle_only": True
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["stored"] is False  # No ChromaDB doc_id
+        # ChromaDB store_working must NOT be called
+        mock_mem.store_working.assert_not_called()
+        # But session JSONL store_exchange MUST be called
+        mock_sm.store_exchange.assert_called_once_with(
+            conversation_id="lifecycle_test",
+            user_message="What is Python?",
+            assistant_response="Python is a programming language.",
+            doc_id=""
+        )
 
     @pytest.mark.asyncio
     async def test_stores_exchange(self, async_client):
@@ -641,42 +664,9 @@ class TestRecordResponseEndpoint:
 
 
 # ============================================================================
-# Context Insights Endpoint (v0.3.2)
+# Context Insights Endpoint — REMOVED in v0.3.6
+# /api/context-insights removed: hooks/plugin inject context automatically
 # ============================================================================
-
-class TestContextInsightsEndpoint:
-    """Test /api/context-insights endpoint."""
-
-    @pytest.mark.asyncio
-    async def test_get_context_insights(self, async_client):
-        """Get context insights returns user facts and memories."""
-        ac, _, _ = async_client
-        response = await ac.post("/api/context-insights", json={
-            "query": "test topic",
-            "conversation_id": "insights_test"
-        })
-        assert response.status_code == 200
-        data = response.json()
-        assert "user_facts" in data
-        assert "relevant_memories" in data
-        assert "doc_ids" in data
-
-    @pytest.mark.asyncio
-    async def test_context_insights_caches_doc_ids(self, async_client):
-        """Context insights caches doc_ids for scoring."""
-        from roampal.server import main
-
-        ac, _, _ = async_client
-        response = await ac.post("/api/context-insights", json={
-            "query": "cache test",
-            "conversation_id": "insights_cache"
-        })
-        assert response.status_code == 200
-
-        cached = main._search_cache.get("insights_cache")
-        assert cached is not None
-        assert cached["source"] == "context_insights"
-        main._search_cache.pop("insights_cache", None)
 
 
 # ============================================================================
@@ -729,6 +719,102 @@ class TestBooksEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
+
+
+# ============================================================================
+# Check-Scored Endpoint (v0.3.6)
+# ============================================================================
+
+class TestCheckScoredEndpoint:
+    """Test /api/hooks/check-scored endpoint.
+
+    v0.3.6: OpenCode plugin calls this to detect if the main LLM already
+    called score_memories, so the sidecar can skip double-scoring.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_not_scored(self, async_client):
+        """Default state: no scoring has happened this turn."""
+        ac, _, mock_sm = async_client
+        mock_sm.was_scored_this_turn.return_value = False
+
+        response = await ac.get("/api/hooks/check-scored", params={
+            "conversation_id": "test_session"
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["scored"] is False
+        mock_sm.was_scored_this_turn.assert_called_once_with("test_session")
+
+    @pytest.mark.asyncio
+    async def test_returns_true_after_scoring(self, async_client):
+        """Returns true after record-outcome was called for this conversation."""
+        ac, _, mock_sm = async_client
+        mock_sm.was_scored_this_turn.return_value = True
+
+        response = await ac.get("/api/hooks/check-scored", params={
+            "conversation_id": "scored_session"
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["scored"] is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_session_manager_none(self, async_client):
+        """Graceful fallback when session manager not initialized."""
+        from roampal.server import main
+        ac, _, _ = async_client
+
+        original = main._session_manager
+        main._session_manager = None
+        try:
+            response = await ac.get("/api/hooks/check-scored", params={
+                "conversation_id": "no_sm"
+            })
+            assert response.status_code == 200
+            data = response.json()
+            assert data["scored"] is False
+        finally:
+            main._session_manager = original
+
+    @pytest.mark.asyncio
+    async def test_empty_conversation_id(self, async_client):
+        """Empty conversation_id still returns valid response."""
+        ac, _, mock_sm = async_client
+        mock_sm.was_scored_this_turn.return_value = False
+
+        response = await ac.get("/api/hooks/check-scored")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["scored"] is False
+
+    @pytest.mark.asyncio
+    async def test_scoring_lifecycle_integration(self, async_client):
+        """Full lifecycle: check-scored false -> record-outcome -> check-scored true."""
+        ac, mock_mem, mock_sm = async_client
+
+        # Step 1: Not scored yet
+        mock_sm.was_scored_this_turn.return_value = False
+        response = await ac.get("/api/hooks/check-scored", params={
+            "conversation_id": "lifecycle_test"
+        })
+        assert response.json()["scored"] is False
+
+        # Step 2: Score via record-outcome
+        response = await ac.post("/api/record-outcome", json={
+            "conversation_id": "lifecycle_test",
+            "outcome": "worked",
+            "memory_scores": {"working_abc": "worked"}
+        })
+        assert response.status_code == 200
+        mock_sm.set_scored_this_turn.assert_called_with("lifecycle_test", True)
+
+        # Step 3: Now check-scored should reflect the scoring
+        mock_sm.was_scored_this_turn.return_value = True
+        response = await ac.get("/api/hooks/check-scored", params={
+            "conversation_id": "lifecycle_test"
+        })
+        assert response.json()["scored"] is True
 
 
 if __name__ == "__main__":

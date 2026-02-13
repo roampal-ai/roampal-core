@@ -403,11 +403,12 @@ The memories injected last turn had IDs shown in [id:...] tags in KNOWN CONTEXT.
 
 Score each memory:
 
-Call score_response(
-    outcome="worked|failed|partial|unknown",
+Call score_memories(
     memory_scores={{
 {memory_scores_template}
-    }}
+    }},
+    exchange_summary="<~300 char summary of the previous exchange>",
+    exchange_outcome="worked|failed|partial|unknown"
 )
 
 SCORING GUIDE:
@@ -418,6 +419,9 @@ SCORING GUIDE:
 
 You MUST score every memory listed above.
 You MAY also score any other memory visible in KNOWN CONTEXT or earlier conversation.
+
+exchange_summary: Write a ~300 char note about what happened in the previous exchange.
+exchange_outcome: Based on the user's follow-up, was your previous response effective?
 
 Separately, record_response(key_takeaway="...") is OPTIONAL - only for significant learnings.
 </roampal-score-required>
@@ -430,7 +434,11 @@ Score the previous exchange before responding.
 
 Look at your previous response and the user's follow-up below.
 
-Call score_response(outcome="worked|failed|partial|unknown", memory_scores={})
+Call score_memories(
+    memory_scores={},
+    exchange_summary="<~300 char summary of the previous exchange>",
+    exchange_outcome="worked|failed|partial|unknown"
+)
 
 Separately, record_response(key_takeaway="...") is OPTIONAL - only for significant learnings.
 </roampal-score-required>
@@ -462,8 +470,7 @@ Separately, record_response(key_takeaway="...") is OPTIONAL - only for significa
 Score the memories that may have influenced your previous response.
 These memories were in your context last turn — see SCORING REFERENCE in system prompt.
 
-Call score_response(
-    outcome="worked|failed|partial|unknown",
+Call score_memories(
     memory_scores={memory_scores_str}
 )
 

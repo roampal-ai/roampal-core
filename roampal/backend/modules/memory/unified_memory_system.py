@@ -51,7 +51,7 @@ class ActionOutcome:
 
     Context is detected from conversation (coding, fitness, finance, creative_writing, etc.)
     """
-    action_type: str  # Tool name: "search_memory", "create_memory", "score_response", etc.
+    action_type: str  # Tool name: "search_memory", "create_memory", "score_memories", etc.
     context_type: ContextType  # Topic: "coding", "fitness", "finance", etc.
     outcome: Literal["worked", "failed", "partial"]
     timestamp: datetime = field(default_factory=datetime.now)
@@ -763,6 +763,18 @@ class UnifiedMemorySystem:
                 vectors=[embedding],
                 metadatas=[final_metadata]
             )
+
+            # v0.3.6: Extract entities for KG-powered entity boost
+            if hasattr(self, '_kg_service') and self._kg_service:
+                try:
+                    self._kg_service.add_entities_from_text(
+                        text=text,
+                        doc_id=doc_id,
+                        collection=collection
+                    )
+                except Exception as e:
+                    logger.warning(f"Entity extraction failed for {doc_id}: {e}")
+
             return doc_id
         else:
             # Unknown collection - default to working
@@ -794,13 +806,27 @@ class UnifiedMemorySystem:
         if not self.initialized:
             await self.initialize()
 
-        return await self._memory_bank_service.store(
+        doc_id = await self._memory_bank_service.store(
             text=text,
             tags=tags or [],
             importance=importance,
             confidence=confidence,
             always_inject=always_inject
         )
+
+        # v0.3.6: Extract entities for KG-powered entity boost
+        if hasattr(self, '_kg_service') and self._kg_service:
+            try:
+                self._kg_service.add_entities_from_text(
+                    text=text,
+                    doc_id=doc_id,
+                    collection="memory_bank",
+                    quality_score=importance * confidence
+                )
+            except Exception as e:
+                logger.warning(f"Entity extraction failed for {doc_id}: {e}")
+
+        return doc_id
 
     async def update_memory_bank(
         self,
@@ -880,7 +906,7 @@ class UnifiedMemorySystem:
     async def record_outcome(
         self,
         doc_ids: List[str] = None,
-        outcome: Literal["worked", "failed", "partial"] = "worked",
+        outcome: Literal["worked", "failed", "partial", "unknown"] = "worked",
         failure_reason: Optional[str] = None,
         # Desktop-compatible parameters
         doc_id: str = None,
@@ -1535,6 +1561,17 @@ class UnifiedMemorySystem:
             vectors=[embedding],
             metadatas=[meta]
         )
+
+        # v0.3.6: Extract entities for KG-powered entity boost
+        if hasattr(self, '_kg_service') and self._kg_service:
+            try:
+                self._kg_service.add_entities_from_text(
+                    text=content,
+                    doc_id=doc_id,
+                    collection="working"
+                )
+            except Exception as e:
+                logger.warning(f"Entity extraction failed for {doc_id}: {e}")
 
         return doc_id
 
