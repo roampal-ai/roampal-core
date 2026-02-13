@@ -146,7 +146,7 @@ def _get_update_injection() -> Optional[str]:
         return f"""<roampal-update>
 A newer version of roampal is available: {latest} (user has {current}).
 IMPORTANT: Briefly mention this to the user. Say something like:
-"Quick note: roampal {latest} is available. Run `pip install --upgrade roampal` to update."
+"Quick note: roampal {latest} is available. Run `pip install --upgrade roampal && roampal init --force` to update."
 Only mention once per conversation.
 </roampal-update>
 """
