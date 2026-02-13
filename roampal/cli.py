@@ -161,7 +161,7 @@ def print_update_notice():
     update_available, current, latest = check_for_updates()
     if update_available:
         print(f"{YELLOW}[!] Update available: {latest} (you have {current}){RESET}")
-        print(f"    Run: pip install --upgrade roampal\n")
+        print(f"    Run: pip install --upgrade roampal && roampal init --force\n")
 
 
 def collect_email(detected_tools: list):

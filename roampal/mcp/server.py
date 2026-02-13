@@ -208,7 +208,7 @@ def _get_update_notice() -> str:
     """Get update notice string if newer version available, else empty string."""
     update_available, current, latest = _check_for_updates()
     if update_available:
-        return f"\n⚠️ **Update available:** roampal {latest} (you have {current})\n   Run: `pip install --upgrade roampal`\n"
+        return f"\n⚠️ **Update available:** roampal {latest} (you have {current})\n   Run: `pip install --upgrade roampal && roampal init --force`\n"
     return ""
 
 
