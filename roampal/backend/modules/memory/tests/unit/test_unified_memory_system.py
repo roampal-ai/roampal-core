@@ -563,8 +563,8 @@ class TestMemoryBankWilsonBlend:
         assert abs(results[0]["quality"] - 0.72) < 0.01
 
     @pytest.mark.asyncio
-    async def test_memory_bank_wilson_blend_after_3_uses(self, mock_ums):
-        """v0.3.6: Memory bank items with 3+ uses should blend 50% quality + 50% Wilson."""
+    async def test_memory_bank_wilson_only_after_3_uses(self, mock_ums):
+        """v0.3.7: Memory bank items with 3+ uses = pure Wilson score."""
         mock_collection = MagicMock()
         mock_collection.query_vectors = AsyncMock(return_value=[
             {
@@ -596,12 +596,10 @@ class TestMemoryBankWilsonBlend:
         assert len(results) == 1
 
         base_quality = 0.9 * 0.8  # 0.72
-        # v0.3.6: Uses 50/50 blend instead of 80/20
-        # Expected: 0.5 * 0.72 + 0.5 * wilson_lower(8,10) ≈ 0.605
+        # v0.3.7: Pure Wilson for 3+ uses — wilson_lower(8,10) ≈ 0.49
         quality = results[0]["quality"]
-        assert quality < base_quality  # Wilson blend pulls below pure quality
-        assert quality > 0.5  # But not unreasonably low for 80% success rate
-        assert abs(quality - 0.605) < 0.02  # ~0.605 with 50/50 Wilson blend
+        assert quality < base_quality  # Wilson pulls below pure quality
+        assert quality > 0.3  # But not unreasonably low for 80% success rate
 
     @pytest.mark.asyncio
     async def test_memory_bank_wilson_blend_low_success_reduces_quality(self, mock_ums):
@@ -803,24 +801,13 @@ class TestCrossEncoderWiring:
         return UnifiedMemorySystem(data_path=str(tmp_path / "data"))
 
     @pytest.mark.asyncio
-    async def test_initialize_creates_search_service_with_reranker(self, ums):
-        """initialize() should create SearchService and attempt to load CrossEncoder."""
+    async def test_initialize_creates_search_service_no_reranker(self, ums):
+        """v0.3.7: initialize() creates SearchService with reranker=None (cross-encoder removed)."""
         await ums.initialize()
 
         assert ums._search_service is not None
-        # Reranker may or may not be available depending on environment,
-        # but SearchService itself must always be created
         assert hasattr(ums._search_service, 'reranker')
-
-    @pytest.mark.asyncio
-    async def test_initialize_graceful_without_cross_encoder(self, ums):
-        """SearchService should still be created when CrossEncoder import fails."""
-        with patch.dict('sys.modules', {'sentence_transformers': None}):
-            # Force ImportError for sentence_transformers
-            await ums.initialize()
-
-        assert ums._search_service is not None
-        # Reranker should be None since import failed
+        # v0.3.7: Cross-encoder removed, Wilson scoring is the reranker
         assert ums._search_service.reranker is None
 
     @pytest.mark.asyncio
@@ -905,29 +892,15 @@ class TestCrossEncoderWiring:
         assert results[0]["id"] == "fallback_1"
 
     @pytest.mark.asyncio
-    async def test_search_service_receives_reranker(self, ums):
-        """SearchService should receive the reranker passed during initialize()."""
-        # Patch CrossEncoder so we can control what reranker is created
-        mock_reranker = MagicMock()
+    async def test_search_service_receives_none_reranker(self, ums):
+        """v0.3.7: SearchService receives reranker=None (cross-encoder removed)."""
         with patch('roampal.backend.modules.memory.unified_memory_system.SearchService') as MockSS:
             MockSS.return_value = MagicMock()
-            # Patch the CrossEncoder import inside initialize()
-            import builtins
-            original_import = builtins.__import__
-            def mock_import(name, *args, **kwargs):
-                if name == 'sentence_transformers':
-                    mod = MagicMock()
-                    mod.CrossEncoder.return_value = mock_reranker
-                    return mod
-                return original_import(name, *args, **kwargs)
+            await ums.initialize()
 
-            with patch('builtins.__import__', side_effect=mock_import):
-                await ums.initialize()
-
-            # Verify SearchService was called with our mock reranker
             MockSS.assert_called_once()
             call_kwargs = MockSS.call_args.kwargs
-            assert call_kwargs["reranker"] is mock_reranker
+            assert call_kwargs["reranker"] is None
 
 
 if __name__ == "__main__":

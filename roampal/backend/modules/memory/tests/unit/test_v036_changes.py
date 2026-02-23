@@ -55,8 +55,8 @@ class TestCollectionBoostDistanceMultiplier:
         )
         return svc
 
-    def test_memory_bank_50_50_blend_high_quality_bad_wilson(self, search_service):
-        """v0.3.6: 50/50 blend — high quality + bad Wilson penalized."""
+    def test_memory_bank_wilson_only_bad_wilson(self, search_service):
+        """v0.3.7: Pure Wilson for 3+ uses — bad Wilson = weak boost."""
         result = {
             "distance": 1.0,
             "id": "mb_test1",
@@ -69,14 +69,12 @@ class TestCollectionBoostDistanceMultiplier:
         }
         search_service._apply_collection_boost(result, "memory_bank", "test query")
 
-        # quality = 0.9 * 0.9 = 0.81
         # wilson = wilson_score_lower(3.0, 10) ≈ 0.147
-        # blended = 0.5 * 0.81 + 0.5 * 0.147 ≈ 0.479
-        # metadata_boost = 1.0 - 0.479 * 0.4 ≈ 0.808
-        assert 0.7 < result["distance"] < 0.9
+        # metadata_boost = 1.0 - 0.147 * 0.8 ≈ 0.882
+        assert 0.8 < result["distance"] < 0.95
 
-    def test_memory_bank_50_50_blend_high_quality_good_wilson(self, search_service):
-        """v0.3.6: 50/50 blend — high quality + good Wilson = strong boost."""
+    def test_memory_bank_wilson_only_good_wilson(self, search_service):
+        """v0.3.7: Pure Wilson for 3+ uses — good Wilson = strong boost."""
         result = {
             "distance": 1.0,
             "id": "mb_test2",
@@ -89,10 +87,9 @@ class TestCollectionBoostDistanceMultiplier:
         }
         search_service._apply_collection_boost(result, "memory_bank", "test query")
 
-        # quality = 0.81, wilson ≈ 0.74
-        # blended ≈ 0.775
-        # metadata_boost = 1.0 - 0.775 * 0.4 ≈ 0.69
-        assert 0.55 < result["distance"] < 0.75
+        # wilson = wilson_score_lower(9.0, 10) ≈ 0.596
+        # metadata_boost = 1.0 - 0.596 * 0.8 ≈ 0.523
+        assert 0.4 < result["distance"] < 0.6
 
     def test_memory_bank_cold_start_quality_only(self, search_service):
         """Cold start (uses < 3) uses quality only — no Wilson."""
@@ -171,12 +168,12 @@ class TestCollectionBoostDistanceMultiplier:
 
         search_service._apply_collection_boost(result, "memory_bank", "test query")
 
-        # If naive: blended = 0.5 * 0.49 + 0.5 * 1.0 = 0.745
-        # If wilson: wilson(3,3) ≈ 0.438, blended = 0.5 * 0.49 + 0.5 * 0.438 = 0.464
-        # metadata_boost_naive = 1.0 - 0.745 * 0.4 = 0.702
-        # metadata_boost_wilson = 1.0 - 0.464 * 0.4 = 0.814
-        # If using wilson, distance should be > 0.75 (not < 0.75 like naive)
-        assert result["distance"] > 0.75, "Should use wilson_score_lower, not naive ratio"
+        # v0.3.7: Pure Wilson * 0.8 coefficient
+        # If naive ratio: 3/3 = 1.0, boost = 1.0 - 1.0 * 0.8 = 0.2
+        # If wilson: wilson(3,3) ≈ 0.438, boost = 1.0 - 0.438 * 0.8 ≈ 0.649
+        # Wilson is more conservative (higher distance) than naive ratio
+        assert result["distance"] > 0.5, "Should use wilson_score_lower, not naive ratio"
+        assert result["distance"] < 0.8, "Wilson(3,3) should still provide some boost"
 
 
 # ============================================================================

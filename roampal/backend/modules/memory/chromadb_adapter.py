@@ -8,17 +8,11 @@ from chromadb.config import Settings as ChromaSettings
 # BM25 for hybrid search (v2.1 Enhanced Retrieval)
 try:
     from rank_bm25 import BM25Okapi
-    import nltk
-    # Download punkt tokenizer silently if needed
-    try:
-        nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        nltk.download('punkt', quiet=True)
     BM25_AVAILABLE = True
 except ImportError:
     BM25_AVAILABLE = False
     logger = logging.getLogger(__name__)
-    logger.warning("BM25 not available (pip install rank-bm25 nltk)")
+    logger.warning("BM25 not available (pip install rank-bm25)")
 
 # Add the backend directory to sys.path if not already there
 backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -637,5 +631,5 @@ class ChromaDBAdapter:
                 loop = asyncio.new_event_loop()
                 loop.run_until_complete(self.cleanup())
                 loop.close()
-        except:
+        except Exception:
             pass  # Ignore errors in destructor

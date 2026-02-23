@@ -294,8 +294,8 @@ class TestScoringConsistency:
         # Still pure quality below 3 uses: 0.9 * 0.8 = 0.72
         assert abs(result["learned_score"] - 0.72) < 0.01
 
-    def test_memory_bank_wilson_blend_after_3_uses(self, service):
-        """v0.3.6: Memory bank should blend 50% quality + 50% Wilson after 3+ uses."""
+    def test_memory_bank_wilson_only_after_3_uses(self, service):
+        """v0.3.7: Memory bank with 3+ uses = pure Wilson score (no quality blend)."""
         metadata = {
             "score": 0.5,
             "uses": 10,
@@ -305,16 +305,12 @@ class TestScoringConsistency:
             "outcome_history": "[]",
         }
         result = service.calculate_final_score(metadata, distance=0.5, collection="memory_bank")
-        quality = 0.9 * 0.8  # 0.72
         wilson = result["wilson_score"]
-        expected = 0.5 * quality + 0.5 * wilson
-        # Verify the 50/50 blend formula (v0.3.6)
-        assert abs(result["learned_score"] - expected) < 0.01
-        # Verify Wilson actually influenced the score (not pure quality)
-        assert abs(result["learned_score"] - quality) > 0.001
+        # v0.3.7: learned_score IS Wilson score (no quality blend)
+        assert abs(result["learned_score"] - wilson) < 0.01
 
-    def test_memory_bank_wilson_blend_at_threshold(self, service):
-        """v0.3.6: Memory bank should start blending 50/50 at exactly 3 uses."""
+    def test_memory_bank_wilson_only_at_threshold(self, service):
+        """v0.3.7: Memory bank should use pure Wilson at exactly 3 uses."""
         metadata = {
             "score": 0.5,
             "uses": 3,
@@ -324,13 +320,12 @@ class TestScoringConsistency:
             "outcome_history": "[]",
         }
         result = service.calculate_final_score(metadata, distance=0.5, collection="memory_bank")
-        quality = 0.7 * 0.7  # 0.49
         wilson = result["wilson_score"]
-        expected = 0.5 * quality + 0.5 * wilson
-        assert abs(result["learned_score"] - expected) < 0.01
+        # v0.3.7: pure Wilson at 3+ uses
+        assert abs(result["learned_score"] - wilson) < 0.01
 
-    def test_memory_bank_wilson_blend_low_success(self, service):
-        """Memory bank with low success rate should rank lower via Wilson blend."""
+    def test_memory_bank_wilson_only_low_success(self, service):
+        """Memory bank with low success rate ranks by Wilson (below quality)."""
         # High quality memory that keeps failing
         metadata = {
             "score": 0.5,
@@ -342,7 +337,7 @@ class TestScoringConsistency:
         }
         result = service.calculate_final_score(metadata, distance=0.5, collection="memory_bank")
         quality = 0.9 * 0.9  # 0.81
-        # Wilson should pull the score down from 0.81
+        # Wilson (1/10 success) should be well below quality
         assert result["learned_score"] < quality
 
 

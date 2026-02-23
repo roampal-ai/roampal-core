@@ -510,7 +510,7 @@ class KnowledgeGraphService:
                     if doc_id:
                         # Try to find the actual document
                         for coll_name in ["patterns", "history", "memory_bank", "books"]:
-                            if doc_id.startswith(coll_name):
+                            if doc_id.startswith(coll_name + "_"):
                                 doc = get_fragment_fn(coll_name, doc_id)
                                 if doc:
                                     # Boost the score for known solutions
@@ -532,7 +532,7 @@ class KnowledgeGraphService:
                             doc_id = solution.get("doc_id")
                             if doc_id and doc_id not in [s.get("id") for s in known_solutions]:
                                 for coll_name in ["patterns", "history", "memory_bank", "books"]:
-                                    if doc_id.startswith(coll_name):
+                                    if doc_id.startswith(coll_name + "_"):
                                         doc = get_fragment_fn(coll_name, doc_id)
                                         if doc:
                                             doc["distance"] = doc.get("distance", 1.0) * 0.7  # 30% boost

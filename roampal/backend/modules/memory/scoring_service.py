@@ -14,9 +14,27 @@ import math
 import json
 import logging
 from typing import Dict, Any, Tuple, Optional
-from scipy import stats
 
 from .config import MemoryConfig
+
+# Pre-computed z-scores for common confidence levels (replaces scipy dependency)
+_Z_SCORES = {0.90: 1.6449, 0.95: 1.9600, 0.99: 2.5758}
+
+
+def _z_score(confidence: float) -> float:
+    """Get z-score for a given confidence level.
+
+    Uses lookup table for common values, falls back to rational approximation
+    (Abramowitz & Stegun 26.2.23) for edge cases.
+    """
+    if confidence in _Z_SCORES:
+        return _Z_SCORES[confidence]
+    # Rational approximation for arbitrary confidence levels
+    p = (1 - confidence) / 2
+    t = math.sqrt(-2 * math.log(p))
+    return t - (2.515517 + 0.802853 * t + 0.010328 * t * t) / (
+        1 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +67,7 @@ def wilson_score_lower(successes: float, total: int, confidence: float = 0.95) -
         return 0.5  # Neutral score for untested memories
 
     # z-score for confidence level (1.96 for 95% confidence)
-    z = stats.norm.ppf(1 - (1 - confidence) / 2)
+    z = _z_score(confidence)
 
     p = successes / total  # Observed proportion
     n = total
@@ -195,6 +213,10 @@ class ScoringService:
         Returns:
             Tuple of (embedding_weight, learned_weight)
         """
+        if collection == "memory_bank" and uses >= 3:
+            # v0.3.7: 100% Wilson for proven memory_bank facts — track record is the signal
+            return (0.0, 1.0)
+
         if uses >= 5 and learned_score >= 0.8:
             # PROVEN HIGH-VALUE MEMORY
             return (self.config.embedding_weight_proven, self.config.learned_weight_proven)
@@ -277,12 +299,12 @@ class ScoringService:
             raw_score, uses, outcome_history, success_count
         )
 
-        # Special case: memory_bank blends quality with Wilson after 3 uses (v0.2.9)
+        # Special case: memory_bank uses pure Wilson for proven facts (v0.3.7)
         if collection == "memory_bank":
             quality = importance * confidence
             if uses >= 3:
-                # v0.3.6: 50% quality + 50% Wilson (cold start protection: quality only below 3 uses)
-                learned_score = 0.5 * quality + 0.5 * wilson_score
+                # v0.3.7: 100% Wilson — real-world track record is the only signal
+                learned_score = wilson_score
             else:
                 learned_score = quality
 

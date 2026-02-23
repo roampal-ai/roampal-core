@@ -54,6 +54,9 @@ class SessionManager:
         # v0.3.5: Cleanup old session transcripts (7-day TTL)
         self._cleanup_old_transcripts(max_age_days=7)
 
+        # v0.3.7: Cleanup stale exchange cache entries (keep max 50)
+        self._cleanup_exchange_cache(max_entries=50)
+
         logger.info(f"SessionManager initialized: {self.sessions_dir}")
 
     def _cleanup_old_transcripts(self, max_age_days: int = 7) -> int:
@@ -87,6 +90,37 @@ class SessionManager:
             logger.warning(f"Transcript cleanup error: {e}")
 
         return deleted
+
+    def _cleanup_exchange_cache(self, max_entries: int = 50) -> int:
+        """
+        Evict oldest entries from _last_exchange_cache if it exceeds max_entries.
+
+        Called at startup. Prevents unbounded growth across long-running sessions.
+
+        Args:
+            max_entries: Maximum cache entries to keep
+
+        Returns:
+            Number of entries evicted
+        """
+        if len(self._last_exchange_cache) <= max_entries:
+            return 0
+
+        # Sort by timestamp, evict oldest
+        sorted_entries = sorted(
+            self._last_exchange_cache.items(),
+            key=lambda x: x[1].get("timestamp", ""),
+            reverse=True
+        )
+
+        # Keep only the newest max_entries
+        evicted = len(sorted_entries) - max_entries
+        self._last_exchange_cache = dict(sorted_entries[:max_entries])
+
+        if evicted > 0:
+            logger.info(f"Exchange cache cleanup: evicted {evicted} stale entries")
+
+        return evicted
 
     def _get_session_file(self, conversation_id: str) -> Path:
         """Get path to session file."""
@@ -452,13 +486,19 @@ Separately, record_response(key_takeaway="...") is OPTIONAL - only for significa
         surfaced_memories: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """
-        v0.3.5: Lean scoring prompt for OpenCode.
+        v0.3.7: Model-agnostic scoring prompt for OpenCode fallback.
 
-        IDs only — memory content is in SCORING REFERENCE block in the system prompt.
-        No exchange text (LLM just saw it). No memory content (in system prompt).
+        Used when the sidecar is broken (scoringBroken=true) and the main model
+        needs to score memories itself. Plain language, no XML tags — works with
+        any model (DeepSeek, Qwen, Llama, etc.), not just Claude.
+
+        IMPORTANT: OpenCode rebuilds the system prompt every turn. Last turn's
+        KNOWN CONTEXT (where these memories appeared) is GONE. So this prompt
+        must include the memory content inline — the model can't look it up.
         """
-        # Build memory scores template with IDs only
+        # Build memory reference with IDs + content (model can't see last turn's system prompt)
         memory_scores_str = "{}"
+        memory_reference = ""
         if surfaced_memories:
             scores = ", ".join(
                 f'"{mem.get("id", mem.get("doc_id", "unknown"))}": "___"'
@@ -466,25 +506,41 @@ Separately, record_response(key_takeaway="...") is OPTIONAL - only for significa
             )
             memory_scores_str = "{" + scores + "}"
 
-        return f"""<roampal-score-required>
-Score the memories that may have influenced your previous response.
-These memories were in your context last turn — see SCORING REFERENCE in system prompt.
+            # Include memory content so model knows what to score
+            ref_lines = []
+            for mem in surfaced_memories:
+                doc_id = mem.get("id", mem.get("doc_id", "unknown"))
+                content = mem.get("content", mem.get("text", ""))
+                # Truncate to ~120 chars — enough to understand, not bloat the prompt
+                hint = content[:120] + "..." if len(content) > 120 else content
+                ref_lines.append(f"- {doc_id}: {hint}")
+            memory_reference = "\n".join(ref_lines)
 
-Call score_memories(
-    memory_scores={memory_scores_str}
+        return f"""Score the previous exchange before responding.
+
+These memories were injected into your context LAST turn (the system prompt has been rebuilt since then):
+
+{memory_reference}
+
+Score each memory by calling the score_memories tool:
+
+score_memories(
+    memory_scores={memory_scores_str},
+    exchange_summary="<write a ~300 character summary of the previous exchange>",
+    exchange_outcome="worked|failed|partial|unknown"
 )
 
 SCORING GUIDE:
-• worked = this memory was helpful
-• partial = somewhat helpful
-• unknown = didn't use this memory
-• failed = this memory was MISLEADING
+- worked = this memory was helpful to your previous response
+- partial = somewhat helpful
+- unknown = didn't use this memory
+- failed = this memory was MISLEADING (gave bad advice)
 
 You MUST score every memory listed above.
-You MAY also score any other memory visible in KNOWN CONTEXT or earlier conversation.
+exchange_summary: Write a ~300 char note about what happened in the previous exchange.
+exchange_outcome: Based on the user's follow-up, was your previous response effective?
 
-Separately, record_response(key_takeaway="...") is OPTIONAL - only for significant learnings.
-</roampal-score-required>
+record_response(key_takeaway="...") is OPTIONAL - only for significant learnings.
 """
 
     # ========== Completion State Tracking ==========
