@@ -432,15 +432,11 @@ class SearchService:
             if uses >= 3:
                 # Calculate Wilson score from memory's own outcomes
                 wilson = wilson_score_lower(success_count, uses)
-                # v0.3.6: 50% quality + 50% Wilson
-                blended_score = 0.5 * quality_score + 0.5 * wilson
+                # v0.3.7: 100% Wilson for proven facts — pure track record dominates embedding
+                metadata_boost = 1.0 - wilson * 0.8
             else:
                 # Not enough data - use quality only (cold start protection)
-                blended_score = quality_score
-
-            # Quality boost (lower distance = better ranking)
-            # v0.3.6: reduced from 0.8 to 0.4 — still meaningful boost, doesn't obliterate other collections
-            metadata_boost = 1.0 - blended_score * 0.4
+                metadata_boost = 1.0 - quality_score * 0.4
             result["distance"] = result.get("distance", 1.0) * metadata_boost
 
             # Doc effectiveness boost (cross-doc pattern tracking)

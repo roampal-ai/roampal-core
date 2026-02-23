@@ -400,7 +400,7 @@ class ContextService:
     def _get_document(self, doc_id: str) -> Optional[Dict[str, Any]]:
         """Get document from appropriate collection."""
         for coll_name, adapter in self.collections.items():
-            if doc_id.startswith(coll_name):
+            if doc_id.startswith(coll_name + "_"):
                 doc = adapter.get_fragment(doc_id)
                 if doc:
                     return {

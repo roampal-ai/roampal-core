@@ -155,7 +155,7 @@ def normalize_memory(result: Dict, collection: str = None) -> Dict:
         collection = result.get("collection") or ""
         if not collection and result.get("id"):
             for prefix in ["working", "history", "patterns", "memory_bank", "books"]:
-                if result["id"].startswith(prefix):
+                if result["id"].startswith(prefix + "_"):
                     collection = prefix
                     break
     result["collection"] = collection
@@ -503,15 +503,8 @@ class UnifiedMemorySystem:
             config=self.config
         )
 
-        # v0.3.2: SearchService with optional cross-encoder reranking
-        reranker = None
-        try:
-            from sentence_transformers import CrossEncoder
-            reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-            logger.info("Cross-encoder loaded: ms-marco-MiniLM-L-6-v2")
-        except Exception as e:
-            logger.info(f"Cross-encoder not available, search will use vector + Wilson only: {e}")
-
+        # v0.3.7: Cross-encoder removed — Wilson scoring is the reranker now.
+        # Saves ~320 MB RAM. SearchService still accepts reranker= for API compat.
         self._search_service = SearchService(
             collections=self.collections,
             scoring_service=self._scoring_service,
@@ -519,7 +512,7 @@ class UnifiedMemorySystem:
             kg_service=self._kg_service,
             embed_fn=self._embedding_service.embed_text,
             config=self.config,
-            reranker=reranker,
+            reranker=None,
         )
 
         self.initialized = True
@@ -889,7 +882,7 @@ class UnifiedMemorySystem:
         """
         # Determine collection from doc_id prefix
         for coll_name, adapter in self.collections.items():
-            if doc_id.startswith(coll_name):
+            if doc_id.startswith(coll_name + "_"):
                 doc = adapter.get_fragment(doc_id)
                 if doc:
                     result = {
@@ -1085,7 +1078,7 @@ class UnifiedMemorySystem:
             if isinstance(tags_raw, str):
                 try:
                     tags = json.loads(tags_raw) if tags_raw else []
-                except:
+                except (json.JSONDecodeError, ValueError, TypeError):
                     tags = []
             else:
                 tags = tags_raw or []

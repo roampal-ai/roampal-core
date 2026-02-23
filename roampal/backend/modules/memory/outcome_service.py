@@ -79,7 +79,7 @@ class OutcomeService:
         doc = None
 
         for coll_name, adapter in self.collections.items():
-            if doc_id.startswith(coll_name):
+            if doc_id.startswith(coll_name + "_"):
                 collection_name = coll_name
                 doc = adapter.get_fragment(doc_id)
                 break
@@ -436,7 +436,7 @@ class OutcomeService:
             Dict with outcome stats
         """
         for coll_name, adapter in self.collections.items():
-            if doc_id.startswith(coll_name):
+            if doc_id.startswith(coll_name + "_"):
                 doc = adapter.get_fragment(doc_id)
                 if doc:
                     metadata = doc.get("metadata", {})

@@ -189,7 +189,7 @@ roampal-core/
 │   │
 │   ├── mcp/
 │   │   ├── __init__.py
-│   │   └── server.py         # MCP server — thin HTTP client (7 tools)
+│   │   └── server.py         # MCP server — thin HTTP client (6 tools)
 │   │
 │   ├── hooks/
 │   │   ├── __init__.py
@@ -279,19 +279,22 @@ working → history → patterns
 
 ## MCP Tools
 
-The MCP server provides 7 tools for deep memory access:
+The MCP server provides 6 tools for deep memory access:
 
-| Tool | Description |
-|------|-------------|
-| `get_context_insights` | Get user profile + relevant memories (caches doc_ids for scoring) |
-| `search_memory` | Search across memory collections (for detailed lookups) |
-| `add_to_memory_bank` | Store permanent user facts |
-| `update_memory` | Update existing memories |
-| `delete_memory` | Delete outdated memories |
-| `score_memories` | **SOFT ENFORCED** - Score the previous exchange (worked/failed/partial/unknown) |
-| `record_response` | **OPTIONAL** - Store key takeaways when transcript won't capture learning |
+| Tool | Description | Platforms |
+|------|-------------|-----------|
+| `search_memory` | Search across memory collections (for detailed lookups) | Both |
+| `add_to_memory_bank` | Store permanent user facts | Both |
+| `update_memory` | Update existing memories | Both |
+| `delete_memory` | Delete outdated memories | Both |
+| `score_memories` | Score the previous exchange (worked/failed/partial/unknown) | Both (see below) |
+| `record_response` | Store key takeaways when transcript won't capture learning | Both |
 
-### Recommended Workflow
+> **Scoring workflow differs by platform:**
+> - **Claude Code:** Hooks inject a scoring prompt every turn. The main LLM calls `score_memories` as part of its response. This is soft-enforced via the prompt.
+> - **OpenCode:** An independent sidecar scores silently in the background. The main LLM never sees a scoring prompt and never calls `score_memories`. The tool is registered but only invoked if the sidecar breaks.
+
+### Recommended Workflow (Claude Code)
 
 ```
 1. Hook injects context + previous exchange for scoring
@@ -300,7 +303,7 @@ The MCP server provides 7 tools for deep memory access:
 4. record_response(key_takeaway) → OPTIONAL, only for significant learnings
 ```
 
-### score_memories (Soft Enforced)
+### score_memories (Claude Code: Soft Enforced / OpenCode: Sidecar)
 
 ```json
 {
@@ -342,6 +345,8 @@ score_memories(
 ```
 
 **Critical:** Failed outcomes are how bad memories get deleted. Without them, wrong info persists forever.
+
+**OpenCode note:** The sidecar performs this same scoring logic independently — it reads the exchange transcript, evaluates each memory, and calls the server's scoring API. The model is never involved. Configure the sidecar during `roampal init` or via `roampal sidecar setup`.
 
 ### record_response (Optional Key Takeaways)
 
@@ -506,18 +511,43 @@ Patterns learned in Desktop are available to roampal-core and vice versa.
 ## CLI Commands
 
 ```bash
+# Setup
 roampal init                # Auto-detect and configure installed tools
 roampal init --claude-code  # Configure Claude Code explicitly
 roampal init --opencode     # Configure OpenCode explicitly
+roampal init --no-input     # Non-interactive setup (CI/scripts)
+roampal doctor              # Diagnose installation issues
+
+# Server
 roampal start               # Start the HTTP server manually
 roampal stop                # Stop the HTTP server
 roampal status              # Check server status
+roampal status --json       # Machine-readable status (for scripting)
 roampal stats               # Show memory statistics
-roampal doctor              # Diagnose installation issues
+roampal stats --json        # Machine-readable statistics (for scripting)
+
+# Memory
 roampal ingest <file>       # Ingest .txt/.md/.pdf into books collection
 roampal books               # List all ingested books
 roampal remove <title>      # Remove a book by title
+roampal summarize           # Summarize long memories
+
+# Scoring (OpenCode)
+roampal sidecar status      # Check scoring model configuration
+roampal sidecar setup       # Configure scoring model
+roampal sidecar disable     # Remove scoring model configuration
 ```
+
+### CLI Design (v0.3.7)
+
+The CLI follows standard Unix tool conventions:
+- **NO_COLOR**: Respects `NO_COLOR` env var and `TERM=dumb` (no-color.org)
+- **Non-interactive**: `--no-input` flag or non-TTY stdin skips all prompts, uses defaults
+- **Machine-readable**: `--json` flag on `status` and `stats` for scripting
+- **Exit codes**: 0=success, 1=failure across all commands
+- **Secure input**: API key prompts use `getpass` (hidden input)
+- **Cached updates**: PyPI version check cached for 24h (no network on every run)
+- **No banner noise**: Banner only shown on `roampal init`, not on every command
 
 ### Book Management
 
@@ -700,7 +730,29 @@ Plugin installed to `~/.config/opencode/plugins/roampal.ts`. Context injection i
 - `chat.message` → fetches context + caches scoring data
 - `experimental.chat.system.transform` → injects memory context into system prompt
 - `experimental.chat.messages.transform` → injects scoring prompt via deep-cloned user message (clone avoids mutating UI-visible objects)
-- `session.idle` → stores exchange, then runs sidecar scoring ONLY if main LLM didn't call `score_memories` (prevents double-scoring memories)
+- `session.idle` → stores exchange, then runs sidecar scoring (sidecar-only since v0.3.7 — main LLM never sees scoring prompt)
+
+### Sidecar Configuration (OpenCode)
+
+During `roampal init` (or `roampal sidecar setup`), users choose their scoring model. The CLI auto-detects:
+- **Ollama** models via `/api/tags` (default port 11434, respects `OLLAMA_HOST`)
+- **Local inference servers** (LM Studio:1234, LocalAI/llama.cpp:8080, Jan.ai:1337, vLLM:8000, text-generation-webui:5000, GPT4All:4891, KoboldCpp:5001) via `/v1/models`
+- **API models** from `opencode.json` providers section
+
+**Env vars** (set in opencode.json MCP environment by `roampal sidecar setup`, read directly from opencode.json by plugin):
+
+Note: OpenCode passes MCP env vars to MCP server subprocesses but NOT to plugins. The plugin reads sidecar config directly from `opencode.json` via `_loadSidecarConfig()`.
+
+| Var | Purpose |
+|-----|---------|
+| `ROAMPAL_SIDECAR_URL` | Scoring endpoint (e.g. `http://localhost:11434/v1` for Ollama) |
+| `ROAMPAL_SIDECAR_KEY` | API key (optional for local models) |
+| `ROAMPAL_SIDECAR_MODEL` | Model name (e.g. `qwen3:30b-a3b`) |
+| `ROAMPAL_SIDECAR_DISABLED` | `true` to disable all sidecar scoring |
+
+**Scoring chain:** User's chosen model (25s budget) → Zen free models (15s budget, **skipped** when user configured a model).
+
+When user configures a model via `roampal sidecar setup`, Zen is skipped entirely — the user chose that model for a reason, and Zen routes through OpenCode's proxy which may log data. The plugin never scans the full provider config — only the specific model written by sidecar setup is used. No surprise API charges.
 
 ---
 

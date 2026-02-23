@@ -50,10 +50,10 @@ The core loop is identical — both platforms inject context, capture exchanges,
 |--|-------------|----------|
 | Context injection | Hooks (stdout) | Plugin (system prompt) |
 | Exchange capture | Stop hook | Plugin `session.idle` event |
-| Scoring | Main LLM prompted via hooks | Main LLM prompted + independent sidecar fallback |
+| Scoring | Main LLM via `score_memories` tool | Independent sidecar (your chosen model > Zen free) |
 | Self-healing | Hooks auto-restart server on failure | Plugin auto-restarts server on failure |
 
-Both platforms prompt the main LLM to score each exchange. OpenCode adds an independent sidecar call (using free models) as a fallback — sidecar only runs if the main LLM doesn't call `score_memories`, so memories are never double-scored.
+Claude Code prompts the main LLM to score each exchange via the `score_memories` tool. OpenCode uses an independent sidecar — a separate API call that reviews the exchange transcript as a third party, removing self-assessment bias. During `roampal init` or `roampal sidecar setup`, Roampal detects local models (Ollama, LM Studio, etc.) and lets you choose a scoring model. If configured, these take priority (Zen is skipped for privacy). A cheap or local model works great — scoring doesn't need a powerful model. Defaults to Zen free models (remote, best-effort) if you skip setup.
 </details>
 
 ## How It Works
@@ -101,10 +101,13 @@ No manual calls. No workflow changes. It just works.
 roampal init                # Auto-detect and configure installed tools
 roampal init --claude-code  # Configure Claude Code explicitly
 roampal init --opencode     # Configure OpenCode explicitly
+roampal init --no-input     # Non-interactive setup (CI/scripts)
 roampal start               # Start the HTTP server manually
 roampal stop                # Stop the HTTP server
 roampal status              # Check if server is running
+roampal status --json       # Machine-readable status (for scripting)
 roampal stats               # View memory statistics
+roampal stats --json        # Machine-readable statistics (for scripting)
 roampal doctor              # Diagnose installation issues
 roampal summarize           # Summarize long memories (retroactive cleanup)
 roampal score               # Score the last exchange (manual/testing)
@@ -112,20 +115,25 @@ roampal context             # Output recent exchange context
 roampal ingest <file>       # Add documents to books collection
 roampal books               # List all ingested books
 roampal remove <title>      # Remove a book by title
+roampal sidecar status      # Check scoring model configuration (OpenCode)
+roampal sidecar setup       # Configure scoring model (OpenCode)
+roampal sidecar disable     # Remove scoring model configuration (OpenCode)
 ```
 
 ## MCP Tools
 
-Your AI gets 6 memory tools:
+Your AI gets these memory tools:
 
-| Tool | Description |
-|------|-------------|
-| `search_memory` | Deep search across all collections |
-| `add_to_memory_bank` | Store permanent facts (identity, preferences, goals) |
-| `update_memory` | Correct or update existing memories |
-| `delete_memory` | Remove outdated info |
-| `score_memories` | Score previous exchange — prompted automatically by hooks |
-| `record_response` | Store key takeaways from significant exchanges |
+| Tool | Description | Platforms |
+|------|-------------|-----------|
+| `search_memory` | Deep search across all collections | Both |
+| `add_to_memory_bank` | Store permanent facts (identity, preferences, goals) | Both |
+| `update_memory` | Correct or update existing memories | Both |
+| `delete_memory` | Remove outdated info | Both |
+| `score_memories` | Score previous exchange outcomes | Both (see note) |
+| `record_response` | Store key takeaways from significant exchanges | Both |
+
+> **How scoring works:** Claude Code's hooks prompt the main LLM to call `score_memories` every turn. OpenCode uses an independent sidecar that scores silently in the background — the model never sees a scoring prompt and never calls `score_memories`. The tool is registered for both platforms but OpenCode's plugin handles all scoring independently. If the sidecar fails completely, the model is prompted to suggest `roampal sidecar setup`. Choose your scoring model during `roampal init` or via `roampal sidecar setup`.
 
 ## What's Different?
 
@@ -155,7 +163,7 @@ Full benchmark data: [`dev/benchmarks/results/`](dev/benchmarks/results/)
 | Feature | Roampal Core | .cursorrules / CLAUDE.md | Mem0 |
 |---------|-------------|--------------------------|------|
 | Learns from outcomes | Yes — bad advice demoted, good advice promoted | No | No |
-| Zero-config context injection | Yes — hooks inject automatically | Manual file editing | API calls required |
+| Zero-config context injection | Yes — injected automatically (hooks or plugin) | Manual file editing | API calls required |
 | Works across sessions | Yes — 5 memory collections with promotion | Per-project static files | Yes |
 | Fully local / private | Yes — all data on your machine | Yes | Cloud or self-hosted |
 | Open source | Apache 2.0 | N/A | Apache 2.0 |
@@ -181,9 +189,8 @@ Full benchmark data: [`dev/benchmarks/results/`](dev/benchmarks/results/)
 ┌─────────────────────────────────────────────────────────┐
 │  User types message                                     │
 │    → Hook/plugin calls HTTP server for context          │
-│    → Server returns context + scoring prompt            │
-│    → AI sees context, scores previous, responds         │
-│    → Exchange stored for next turn                      │
+│    → AI sees relevant memories, responds                │
+│    → Exchange stored, scored (hooks or sidecar)         │
 └─────────────────────────────────────────────────────────┘
                          │
                          ▼
@@ -194,7 +201,7 @@ Full benchmark data: [`dev/benchmarks/results/`](dev/benchmarks/results/)
 └─────────────────────────────────────────────────────────┘
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for full technical details.
+See [`dev/docs/`](dev/docs/) for full technical details.
 </details>
 
 ## Requirements
@@ -230,7 +237,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for full technical details.
 <details>
 <summary><strong>Server crashes and recovers?</strong></summary>
 
-This is expected. Roampal has self-healing — if the HTTP server stops responding, hooks automatically restart it and retry.
+This is expected. Roampal has self-healing -- if the HTTP server stops responding, it is automatically restarted and retried.
 </details>
 
 **Still stuck?** Ask your AI for help — it can read logs and debug Roampal issues directly.

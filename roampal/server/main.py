@@ -24,6 +24,13 @@ import os
 import sys
 from pathlib import Path
 
+# Handle pythonw.exe (GUI subsystem) where stdout/stderr are None.
+# This happens when the plugin spawns the server via pythonw to avoid console windows.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w')
+
 # Fix Windows encoding issues with unicode characters (emojis, box drawing, etc.)
 if sys.platform == "win32":
     try:
@@ -42,6 +49,7 @@ import uvicorn
 
 # Import memory system and session manager
 from roampal.backend.modules.memory import UnifiedMemorySystem
+from roampal.backend.modules.memory.scoring_service import wilson_score_lower
 from roampal.backend.modules.memory.unified_memory_system import ActionOutcome
 from roampal.backend.modules.memory.content_graph import ContentGraph
 from roampal.hooks import SessionManager
@@ -67,6 +75,43 @@ DEV_PORT = 27183
 
 # Cache for update check (only check once per server session)
 _update_check_cache: Optional[tuple] = None
+
+# Cache TTL: 30 minutes (entries older than this are evicted)
+_CACHE_TTL_SECONDS = 30 * 60
+
+
+def _evict_stale_entries():
+    """Evict stale entries from _search_cache and _injection_map (30-minute TTL)."""
+    now = datetime.now()
+    stale_search_keys = []
+    for key, entry in _search_cache.items():
+        ts = entry.get("timestamp", "")
+        if ts:
+            try:
+                entry_time = datetime.fromisoformat(ts)
+                if (now - entry_time).total_seconds() > _CACHE_TTL_SECONDS:
+                    stale_search_keys.append(key)
+            except (ValueError, TypeError):
+                stale_search_keys.append(key)
+    for key in stale_search_keys:
+        del _search_cache[key]
+
+    stale_injection_keys = []
+    for key, entry in _injection_map.items():
+        ts = entry.get("injected_at", "")
+        if ts:
+            try:
+                entry_time = datetime.fromisoformat(ts)
+                if (now - entry_time).total_seconds() > _CACHE_TTL_SECONDS:
+                    stale_injection_keys.append(key)
+            except (ValueError, TypeError):
+                stale_injection_keys.append(key)
+    for key in stale_injection_keys:
+        del _injection_map[key]
+
+    evicted = len(stale_search_keys) + len(stale_injection_keys)
+    if evicted:
+        logger.info(f"Cache eviction: {len(stale_search_keys)} search + {len(stale_injection_keys)} injection entries")
 
 # Cold start tag priorities - one fact per category (v0.2.7)
 TAG_PRIORITIES = ["identity", "preference", "goal", "project", "system_mastery", "agent_growth"]
@@ -172,15 +217,16 @@ async def _build_cold_start_profile() -> Optional[str]:
         # Get all facts from memory_bank, sorted by quality (importance, confidence)
         all_memory_bank = _memory._memory_bank_service.list_all(include_archived=False)
 
-        # Sort by quality score (importance first, then confidence)
-        sorted_facts = sorted(
-            all_memory_bank,
-            key=lambda f: (
-                f.get("metadata", {}).get("importance", 0.5),
-                f.get("metadata", {}).get("confidence", 0.5)
-            ),
-            reverse=True
-        )
+        # v0.3.7: Proven facts (3+ uses) sort by Wilson; cold facts by quality
+        def _cold_start_sort_key(f):
+            meta = f.get("metadata", {})
+            uses = int(meta.get("uses", 0))
+            if uses >= 3:
+                success_count = float(meta.get("success_count", 0.0))
+                return 2.0 + wilson_score_lower(success_count, uses)
+            return float(meta.get("importance", 0.5)) * float(meta.get("confidence", 0.5))
+
+        sorted_facts = sorted(all_memory_bank, key=_cold_start_sort_key, reverse=True)
 
         # Pick HIGHEST QUALITY fact for EACH tag category (one per tag)
         all_facts = []
@@ -190,7 +236,7 @@ async def _build_cold_start_profile() -> Optional[str]:
             if isinstance(tags_raw, str):
                 try:
                     tags = json.loads(tags_raw) if tags_raw else []
-                except:
+                except (json.JSONDecodeError, ValueError, TypeError):
                     tags = []
             else:
                 tags = tags_raw or []
@@ -214,7 +260,7 @@ async def _build_cold_start_profile() -> Optional[str]:
             if isinstance(tags_raw, str):
                 try:
                     tags = json.loads(tags_raw) if tags_raw else []
-                except:
+                except (json.JSONDecodeError, ValueError, TypeError):
                     tags = []
             else:
                 tags = tags_raw or []
@@ -267,7 +313,7 @@ Keep it conversational - don't interrogate. A simple "I don't think we've met - 
             if isinstance(tags_raw, str):
                 try:
                     tags = json.loads(tags_raw) if tags_raw else []
-                except:
+                except (json.JSONDecodeError, ValueError, TypeError):
                     tags = []
             else:
                 tags = tags_raw or []
@@ -443,7 +489,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Roampal",
         description="Persistent memory for AI coding tools",
-        version="0.3.6",
+        version="0.3.7",
         lifespan=lifespan
     )
 
@@ -473,6 +519,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="Memory system not ready")
 
         try:
+            # Evict stale cache entries (30-minute TTL)
+            _evict_stale_entries()
+
             formatted_parts = []
             scoring_required = False
             scoring_prompt_text = ""  # v0.3.2: track separately for OpenCode split delivery
@@ -1013,7 +1062,7 @@ def create_app() -> FastAPI:
                 # Extract collection from doc_id prefix
                 collection = None
                 for coll_name in ["memory_bank", "books", "working", "history", "patterns"]:
-                    if doc_id.startswith(coll_name):
+                    if doc_id.startswith(coll_name + "_"):
                         collection = coll_name
                         break
 

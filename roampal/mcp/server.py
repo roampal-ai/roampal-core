@@ -154,7 +154,8 @@ _fastapi_process: Optional[subprocess.Popen] = None
 _dev_mode = False
 
 # v0.3.6: Platform detection — OpenCode sets ROAMPAL_PLATFORM=opencode via MCP env
-# Used to return a leaner score_memories tool description (no exchange summary/outcome)
+# v0.3.7: score_memories now always registered (plugin controls when model sees scoring prompt).
+# Variable kept for potential future platform-specific behavior.
 _is_opencode = os.environ.get("ROAMPAL_PLATFORM", "").lower() == "opencode"
 
 # Cache for update check (only check once per session)
@@ -421,8 +422,12 @@ def run_mcp_server(dev: bool = False):
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
-        """List available MCP tools."""
-        return [
+        """List available MCP tools.
+
+        score_memories is always registered but OpenCode scoring is handled
+        entirely by the sidecar (scoreExchangeViaLLM in plugin).
+        """
+        tools = [
             types.Tool(
                 name="search_memory",
                 description="""Search your persistent memory. Use when you need details beyond what KNOWN CONTEXT provided.
@@ -591,24 +596,16 @@ STORAGE DISCIPLINE:
                     "required": ["content"]
                 }
             ),
-            types.Tool(
+        ]
+
+        # score_memories: always registered.
+        # Claude Code: model always scores (hook injects prompt every turn).
+        # OpenCode: sidecar scores silently when working. Plugin injects scoring prompt
+        #           into user message only when sidecar is broken (scoringBroken=true).
+        #           Tool is there as a fallback — plugin controls when model sees the prompt.
+        tools.append(types.Tool(
                 name="score_memories",
-                description=(
-                    # v0.3.6: OpenCode gets a lean description — per-memory scoring ONLY
-                    # Exchange summary + outcome are handled by the sidecar, not the main LLM
-                    """Score cached memories from your previous context. ONLY call when <roampal-score-required> appears.
-
-Score each memory ID listed in the scoring prompt:
-• worked = this memory was helpful
-• partial = somewhat helpful
-• unknown = didn't use this memory
-• failed = this memory was MISLEADING
-
-⚠️ "failed" means MISLEADING, not just unused. If you didn't use it, mark "unknown".
-
-Memory IDs correspond to [id:...] tags in KNOWN CONTEXT from the previous turn."""
-                    if _is_opencode else
-                    """Score individual cached memories from your previous context. ONLY use when the <roampal-score-required> hook prompt appears.
+                description="""Score individual cached memories from your previous context. ONLY use when the <roampal-score-required> hook prompt appears.
 
 Your job here is to:
 1. Score each cached memory individually — was it helpful, misleading, or unused?
@@ -643,53 +640,35 @@ ACTIVE MEMORY MANAGEMENT:
 • If you notice a pattern memory surfacing repeatedly with "unknown"
   scores, consider: is this memory actually useful? If not, scoring
   "failed" once helps the system stop wasting context on it
-• You are the gardener. Pull the weeds."""
-                ),
-                inputSchema=(
-                    # OpenCode: memory_scores only, no exchange fields
-                    {
-                        "type": "object",
-                        "properties": {
-                            "memory_scores": {
-                                "type": "object",
-                                "additionalProperties": {
-                                    "type": "string",
-                                    "enum": ["worked", "failed", "partial", "unknown"]
-                                },
-                                "description": "Score for each memory: doc_id -> outcome. MUST include all cached memories."
-                            }
-                        },
-                        "required": ["memory_scores"]
-                    }
-                    if _is_opencode else
-                    {
-                        "type": "object",
-                        "properties": {
-                            "memory_scores": {
-                                "type": "object",
-                                "additionalProperties": {
-                                    "type": "string",
-                                    "enum": ["worked", "failed", "partial", "unknown"]
-                                },
-                                "description": "Score for each memory: doc_id -> outcome. MUST include all cached memories. MAY include extras from context."
-                            },
-                            "exchange_summary": {
+• You are the gardener. Pull the weeds.""",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "memory_scores": {
+                            "type": "object",
+                            "additionalProperties": {
                                 "type": "string",
-                                "description": "~300 char summary of the previous exchange"
+                                "enum": ["worked", "failed", "partial", "unknown"]
                             },
-                            "exchange_outcome": {
-                                "type": "string",
-                                "enum": ["worked", "failed", "partial", "unknown"],
-                                "description": "Was the previous response effective?"
-                            }
+                            "description": "Score for each memory: doc_id -> outcome. MUST include all cached memories. MAY include extras from context."
                         },
-                        "required": ["memory_scores"]
-                    }
-                )
-            ),
-            types.Tool(
-                name="record_response",
-                description="""Store a key takeaway when the transcript alone won't capture important learning.
+                        "exchange_summary": {
+                            "type": "string",
+                            "description": "~300 char summary of the previous exchange"
+                        },
+                        "exchange_outcome": {
+                            "type": "string",
+                            "enum": ["worked", "failed", "partial", "unknown"],
+                            "description": "Was the previous response effective?"
+                        }
+                    },
+                    "required": ["memory_scores"]
+                }
+            ))
+
+        tools.append(types.Tool(
+            name="record_response",
+            description="""Store a key takeaway when the transcript alone won't capture important learning.
 
 OPTIONAL - Only use for significant exchanges:
 • Major decisions made
@@ -701,24 +680,25 @@ Most routine exchanges don't need this - the transcript is enough.
 
 Key takeaways start at 0.7 (user explicitly asked to remember = higher confidence).
 Scoring happens via score_memories on the next turn: +0.2 worked, +0.05 partial, -0.3 failed.""",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "key_takeaway": {
-                            "type": "string",
-                            "description": "1-2 sentence summary of the important learning"
-                        }
-                    },
-                    "required": ["key_takeaway"]
-                }
-            ),
-            # v0.3.6: get_context_insights REMOVED — hooks/plugin already inject KNOWN CONTEXT
-            # before the model responds. The tool was redundant (same server call twice) and caused
-            # weaker models (qwen) to loop on tool calls. Context injection is now fully automatic:
-            # - Claude Code: UserPromptSubmit hook → /api/hooks/get-context → system-reminder
-            # - OpenCode: chat.message → /api/hooks/get-context → system.transform
-            # Self-audit moved to hook context injection. Memory system docs in tool descriptions.
-        ]
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "key_takeaway": {
+                        "type": "string",
+                        "description": "1-2 sentence summary of the important learning"
+                    }
+                },
+                "required": ["key_takeaway"]
+            }
+        ))
+        # v0.3.6: get_context_insights REMOVED — hooks/plugin already inject KNOWN CONTEXT
+        # before the model responds. The tool was redundant (same server call twice) and caused
+        # weaker models (qwen) to loop on tool calls. Context injection is now fully automatic:
+        # - Claude Code: UserPromptSubmit hook → /api/hooks/get-context → system-reminder
+        # - OpenCode: chat.message → /api/hooks/get-context → system.transform
+        # Self-audit moved to hook context injection. Memory system docs in tool descriptions.
+
+        return tools
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
