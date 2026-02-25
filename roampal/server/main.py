@@ -22,6 +22,7 @@ import json
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 
 # Handle pythonw.exe (GUI subsystem) where stdout/stderr are None.
@@ -73,8 +74,9 @@ _injection_map: Dict[str, Dict[str, Any]] = {}
 PROD_PORT = 27182
 DEV_PORT = 27183
 
-# Cache for update check (only check once per server session)
+# Cache for update check (re-checks after TTL expires)
 _update_check_cache: Optional[tuple] = None
+_update_check_time: float = 0.0
 
 # Cache TTL: 30 minutes (entries older than this are evicted)
 _CACHE_TTL_SECONDS = 30 * 60
@@ -141,43 +143,65 @@ def _first_sentence(text: str, max_chars: int = 300) -> str:
     return text[:max_chars - 3].rsplit(' ', 1)[0] + "..."
 
 
+def _get_installed_version() -> str:
+    """Read the installed version from disk, bypassing Python's module cache.
+
+    In a long-running server, `from roampal import __version__` returns the
+    value loaded at startup. If the user upgrades roampal without restarting
+    the server, the cached import stays stale. Reading __init__.py directly
+    picks up the new version.
+    """
+    try:
+        init_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "__init__.py")
+        with open(init_path, "r") as f:
+            for line in f:
+                if line.startswith("__version__"):
+                    # Parse: __version__ = "0.3.7"
+                    return line.split("=", 1)[1].strip().strip("\"'")
+    except Exception:
+        pass
+    # Fallback to cached import
+    from roampal import __version__
+    return __version__
+
+
 def _check_for_updates() -> tuple:
     """Check if a newer version is available on PyPI.
+
+    Re-checks after _CACHE_TTL_SECONDS expires so that a pip upgrade
+    is picked up without requiring a server restart.
 
     Returns:
         tuple: (update_available: bool, current_version: str, latest_version: str)
     """
-    global _update_check_cache
+    global _update_check_cache, _update_check_time
 
-    # Return cached result if available (only check once per session)
-    if _update_check_cache is not None:
+    # Return cached result if still fresh
+    if _update_check_cache is not None and (time.time() - _update_check_time) < _CACHE_TTL_SECONDS:
         return _update_check_cache
+
+    current = _get_installed_version()
 
     try:
         import urllib.request
-        from roampal import __version__
 
         url = "https://pypi.org/pypi/roampal/json"
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
 
         with urllib.request.urlopen(req, timeout=2) as response:
             data = json.loads(response.read().decode("utf-8"))
-            latest = data.get("info", {}).get("version", __version__)
+            latest = data.get("info", {}).get("version", current)
 
-            # Compare versions (simple tuple comparison works for semver)
-            current_parts = [int(x) for x in __version__.split(".")]
+            current_parts = [int(x) for x in current.split(".")]
             latest_parts = [int(x) for x in latest.split(".")]
             update_available = latest_parts > current_parts
 
-            _update_check_cache = (update_available, __version__, latest)
+            _update_check_cache = (update_available, current, latest)
+            _update_check_time = time.time()
             return _update_check_cache
     except Exception:
-        # Fail silently - don't block on network issues
-        try:
-            from roampal import __version__
-            _update_check_cache = (False, __version__, __version__)
-        except Exception:
-            _update_check_cache = (False, "unknown", "unknown")
+        _update_check_cache = (False, current, current)
+        _update_check_time = time.time()
         return _update_check_cache
 
 
