@@ -1,0 +1,16 @@
+__pycache__
+*.pyc
+*.egg-info
+dist
+build
+.git
+.venv
+venv
+data
+dev
+tools
+*.log
+.claude
+.env
+.env.*
+*.db
