@@ -511,9 +511,7 @@ Separately, record_response(key_takeaway="...") is OPTIONAL - only for significa
             for mem in surfaced_memories:
                 doc_id = mem.get("id", mem.get("doc_id", "unknown"))
                 content = mem.get("content", mem.get("text", ""))
-                # Truncate to ~120 chars — enough to understand, not bloat the prompt
-                hint = content[:120] + "..." if len(content) > 120 else content
-                ref_lines.append(f"- {doc_id}: {hint}")
+                ref_lines.append(f"- {doc_id}: {content}")
             memory_reference = "\n".join(ref_lines)
 
         return f"""Score the previous exchange before responding.

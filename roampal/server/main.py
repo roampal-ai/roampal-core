@@ -899,9 +899,15 @@ def create_app() -> FastAPI:
         if not _memory:
             raise HTTPException(status_code=503, detail="Memory system not ready")
 
+        MAX_MEMORY_CHARS = 2000
+        content = request.content
+        if content and len(content) > MAX_MEMORY_CHARS:
+            content = content[:MAX_MEMORY_CHARS]
+            logger.warning(f"Memory content truncated from {len(request.content)} to {MAX_MEMORY_CHARS} chars (safety cap)")
+
         try:
             doc_id = await _memory.store_memory_bank(
-                text=request.content,
+                text=content,
                 tags=request.tags,
                 importance=request.importance,
                 confidence=request.confidence,
@@ -920,10 +926,16 @@ def create_app() -> FastAPI:
         if not _memory:
             raise HTTPException(status_code=503, detail="Memory system not ready")
 
+        MAX_MEMORY_CHARS = 2000
+        new_content = request.new_content
+        if new_content and len(new_content) > MAX_MEMORY_CHARS:
+            new_content = new_content[:MAX_MEMORY_CHARS]
+            logger.warning(f"Updated memory content truncated from {len(request.new_content)} to {MAX_MEMORY_CHARS} chars (safety cap)")
+
         try:
             doc_id = await _memory.update_memory_bank(
                 old_content=request.old_content,
-                new_content=request.new_content
+                new_content=new_content
             )
 
             return {
@@ -1050,9 +1062,15 @@ def create_app() -> FastAPI:
         if not _memory:
             raise HTTPException(status_code=503, detail="Memory system not ready")
 
+        MAX_MEMORY_CHARS = 2000
+        takeaway = request.key_takeaway
+        if takeaway and len(takeaway) > MAX_MEMORY_CHARS:
+            takeaway = takeaway[:MAX_MEMORY_CHARS]
+            logger.warning(f"Key takeaway truncated from {len(request.key_takeaway)} to {MAX_MEMORY_CHARS} chars (safety cap)")
+
         try:
             doc_id = await _memory.store_working(
-                content=f"Key takeaway: {request.key_takeaway}",
+                content=f"Key takeaway: {takeaway}",
                 conversation_id=request.conversation_id,
                 metadata={
                     "type": "key_takeaway",
