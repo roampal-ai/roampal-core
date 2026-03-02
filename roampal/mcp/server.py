@@ -813,7 +813,7 @@ Scoring happens via score_memories on the next turn: +0.2 worked, +0.05 partial,
                             if outcomes:
                                 meta_parts.append(outcomes)
 
-                        # Memory bank: show importance/confidence
+                        # Memory bank: show importance/confidence + Wilson/uses if scored
                         elif collection == "memory_bank":
                             try:
                                 imp = float(r.get("importance", metadata.get("importance", 0.7)) or 0.7)
@@ -822,6 +822,25 @@ Scoring happens via score_memories on the next turn: +0.2 worked, +0.05 partial,
                                 imp, conf = 0.7, 0.7
                             meta_parts.append(f"imp:{imp:.1f}")
                             meta_parts.append(f"conf:{conf:.1f}")
+                            # Show Wilson/uses/outcomes when memory_bank has been scored
+                            try:
+                                uses = r.get("uses", metadata.get("uses", 0))
+                                uses = int(uses) if uses else 0
+                            except (ValueError, TypeError):
+                                uses = 0
+                            if uses >= 1:
+                                try:
+                                    success_count = float(r.get("success_count", metadata.get("success_count", 0)) or 0)
+                                    from roampal.backend.modules.memory.scoring_service import wilson_score_lower
+                                    wilson = wilson_score_lower(success_count, uses)
+                                except (ValueError, TypeError, ImportError):
+                                    wilson = 0
+                                if wilson and wilson > 0:
+                                    meta_parts.append(f"w:{wilson:.2f}")
+                                meta_parts.append(f"{uses} uses")
+                                outcomes = r.get("outcome_history") or _format_outcomes(metadata.get("outcome_history", ""))
+                                if outcomes:
+                                    meta_parts.append(outcomes)
 
                         # Books: show title
                         elif collection == "books":

@@ -49,6 +49,7 @@ from pydantic import BaseModel, Field
 import uvicorn
 
 # Import memory system and session manager
+from roampal import __version__
 from roampal.backend.modules.memory import UnifiedMemorySystem
 from roampal.backend.modules.memory.scoring_service import wilson_score_lower
 from roampal.backend.modules.memory.unified_memory_system import ActionOutcome
@@ -513,7 +514,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Roampal",
         description="Persistent memory for AI coding tools",
-        version="0.3.7",
+        version=__version__,
         lifespan=lifespan
     )
 
