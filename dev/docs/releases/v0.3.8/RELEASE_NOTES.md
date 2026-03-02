@@ -121,10 +121,10 @@ In older versions, memory_bank weighting was too aggressive — the combination 
 
 ## Verification
 
-- [ ] `docker build -t roampal-core .` succeeds
-- [ ] `docker run -p 27182:27182 roampal-core` → `/api/health` returns 200
-- [ ] `search_memory` for memory_bank facts with 1+ uses shows `w:` and uses count
-- [ ] `search_memory` for fresh memory_bank facts (0 uses) shows only `imp:/conf:`
-- [ ] FastAPI `/docs` shows correct version string
-- [ ] ContentGraph saves without `RuntimeError` under concurrent memory operations
-- [ ] All existing tests pass
+- [x] `docker build -t roampal-core .` succeeds
+- [x] `docker run -p 27182:27182 roampal-core` → `/api/health` returns 200
+- [x] `search_memory` for memory_bank facts with 1+ uses shows `w:` and uses count
+- [x] `search_memory` for fresh memory_bank facts (0 uses) shows only `imp:/conf:`
+- [x] FastAPI `/docs` shows correct version string
+- [x] ContentGraph saves without `RuntimeError` under concurrent memory operations
+- [x] All existing tests pass (527 passed)

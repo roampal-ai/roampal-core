@@ -531,7 +531,7 @@ async function scoreExchangeViaLLM(
     // but not actual usage, so irrelevant memories get "unknown" instead of inheriting
     // unearned exchange outcomes. Conservative: defaults to "unknown" when unsure.
     const memorySection = memories?.length
-      ? `\nThese memories were injected into your context for this exchange:\n${memories.map(m => `- ${m.id}: "${m.content.slice(0, 200)}"`).join("\n")}\n`
+      ? `\nThese memories were injected into your context for this exchange:\n${memories.map(m => `- ${m.id}: "${m.content}"`).join("\n")}\n`
       : ""
 
     const memoryScoreSection = memories?.length
