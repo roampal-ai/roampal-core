@@ -448,9 +448,15 @@ class ContentGraph:
         Returns:
             Complete graph data as dictionary
         """
+        # Snapshot dicts to prevent "dictionary changed size during iteration"
+        # when concurrent coroutines modify the graph while we serialize.
+        entities_snapshot = dict(self.entities)
+        relationships_snapshot = list(self.relationships)
+        metadata_snapshot = dict(self.metadata)
+
         # Convert defaultdicts to regular dicts for JSON serialization
         serializable_entities = {}
-        for name, data in self.entities.items():
+        for name, data in entities_snapshot.items():
             entity_copy = data.copy()
             if isinstance(entity_copy.get("collections"), defaultdict):
                 entity_copy["collections"] = dict(entity_copy["collections"])
@@ -458,8 +464,8 @@ class ContentGraph:
 
         return {
             "entities": serializable_entities,
-            "relationships": self.relationships,
-            "metadata": self.metadata
+            "relationships": relationships_snapshot,
+            "metadata": metadata_snapshot
         }
 
     @classmethod
