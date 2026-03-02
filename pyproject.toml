@@ -58,6 +58,7 @@ Issues = "https://github.com/roampal-ai/roampal-core/issues"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = ["roampal"]
 
 [tool.mypy]
 python_version = "3.10"
