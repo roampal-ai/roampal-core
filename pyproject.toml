@@ -11,7 +11,7 @@ license = {text = "Apache-2.0"}
 authors = [
     {name = "Roampal", email = "roampal@protonmail.com"}
 ]
-keywords = ["ai", "memory", "claude", "opencode", "mcp", "llm"]
+keywords = ["ai", "memory", "claude", "opencode", "mcp", "llm", "model-context-protocol", "persistent-memory", "ai-coding", "ai-assistant", "chromadb", "outcome-based", "developer-tools", "semantic-search", "agent-memory", "mcp-server"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -20,6 +20,10 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
 ]
 requires-python = ">=3.10"
 dependencies = [
@@ -49,6 +53,8 @@ roampal = "roampal.cli:main"
 Homepage = "https://roampal.ai"
 Repository = "https://github.com/roampal-ai/roampal-core"
 Documentation = "https://github.com/roampal-ai/roampal-core#readme"
+Changelog = "https://github.com/roampal-ai/roampal-core/releases"
+Issues = "https://github.com/roampal-ai/roampal-core/issues"
 
 [tool.mypy]
 python_version = "3.10"
