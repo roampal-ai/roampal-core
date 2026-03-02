@@ -2,7 +2,10 @@
   <img src="assets/banner.svg" alt="Roampal - Outcome-Based Memory for AI Coding Tools" width="900">
 </p>
 
+# Roampal — Outcome-Based Persistent Memory MCP Server
+
 <p align="center">
+  <a href="https://github.com/roampal-ai/roampal-core/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/roampal-ai/roampal-core/tests.yml?branch=main&style=flat-square&label=tests" alt="Tests"></a>
   <a href="https://pypi.org/project/roampal/"><img src="https://img.shields.io/pypi/v/roampal?color=blue&style=flat-square" alt="PyPI"></a>
   <a href="https://pypi.org/project/roampal/"><img src="https://img.shields.io/pypi/dm/roampal?color=blue&style=flat-square" alt="Downloads"></a>
   <a href="https://github.com/roampal-ai/roampal-core/stargazers"><img src="https://img.shields.io/github/stars/roampal-ai/roampal-core?color=blue&style=flat-square" alt="Stars"></a>
@@ -22,7 +25,7 @@
 
 AI coding assistants forget everything between sessions. You explain your architecture, your preferences, your conventions — again. When they give bad advice, there's no mechanism to learn from it.
 
-Roampal fixes this with outcome-based memory. Good advice gets promoted. Bad advice gets demoted. Your AI gets smarter every exchange, across every session.
+Roampal is an MCP server that gives your AI persistent, outcome-based memory across every session. Good advice gets promoted. Bad advice gets demoted. Your AI learns what works and what doesn't — automatically, with zero workflow changes.
 
 ---
 
