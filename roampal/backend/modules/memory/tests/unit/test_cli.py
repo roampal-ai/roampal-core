@@ -292,7 +292,10 @@ class TestConfigureOpencode:
         # Check if plugin source exists
         plugin_source = Path(roampal.cli.__file__).parent / "plugins" / "opencode" / "roampal.ts"
 
+        # Patch XDG_CONFIG_HOME so Linux CI doesn't bypass the Path.home() mock
+        fake_env = {"XDG_CONFIG_HOME": str(tmp_path / ".config")}
         with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch.dict(os.environ, fake_env, clear=False), \
              patch("builtins.print"):
             if sys.platform == "win32":
                 with patch.object(Path, "home", return_value=tmp_path):
@@ -580,7 +583,8 @@ class TestCmdInit:
         args.force = False
 
         # Must mock shutil.which AND env vars to fully isolate from real system
-        fake_env = {"APPDATA": str(tmp_path / "appdata"), "LOCALAPPDATA": str(tmp_path / "localappdata")}
+        # XDG_CONFIG_HOME must be patched so Linux CI doesn't bypass the Path.home() mock
+        fake_env = {"APPDATA": str(tmp_path / "appdata"), "LOCALAPPDATA": str(tmp_path / "localappdata"), "XDG_CONFIG_HOME": str(tmp_path / ".config")}
         with patch("roampal.cli.Path.home", return_value=tmp_path), \
              patch("shutil.which", return_value=None), \
              patch.dict(os.environ, fake_env, clear=False), \
