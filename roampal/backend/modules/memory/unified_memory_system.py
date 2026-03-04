@@ -1309,7 +1309,7 @@ class UnifiedMemorySystem:
         # v0.2.0: Sentence-based chunking (preserves semantic boundaries)
         chunks = self._chunk_by_sentences(content, chunk_size, chunk_overlap)
 
-        base_id = f"book_{uuid.uuid4().hex[:8]}"
+        base_id = f"books_{uuid.uuid4().hex[:8]}"
 
         # v0.2.0: Batch embed all chunks at once (much faster for large books)
         embeddings = await self._embedding_service.embed_texts(chunks)

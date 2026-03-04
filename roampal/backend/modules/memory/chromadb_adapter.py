@@ -1,8 +1,8 @@
 import logging
+import os
 from typing import List, Dict, Any, Optional
 import chromadb
 import sys
-import os
 from chromadb.config import Settings as ChromaSettings
 
 # BM25 for hybrid search (v2.1 Enhanced Retrieval)
@@ -23,7 +23,6 @@ from .embedding_service import EmbeddingService
 import shutil
 from pathlib import Path
 import time
-import os
 # Simple collection naming for single user
 def get_loopsmith_collection():
     return "loopsmith_memories"
@@ -218,8 +217,7 @@ class ChromaDBAdapter:
             if self.client and self.collection_name:
                 self.collection = self.client.get_or_create_collection(
                     name=self.collection_name,
-                    embedding_function=None,  # Must match initialize() - prevents 384d/768d mismatch
-                    metadata={"hnsw:space": "l2"}
+                    embedding_function=None  # Must match initialize() - prevents 384d/768d mismatch
                 )
 
             if self.collection and self.collection.count() == 0:
@@ -504,7 +502,7 @@ class ChromaDBAdapter:
         except Exception as e:
             # ChromaDB can throw "Error finding id" for ghost entries (IDs in index but no document)
             # This happens when documents are deleted but index isn't fully cleaned
-            logger.warning(f"ChromaDB error getting fragment {fragment_id}: {e}")
+            logger.debug(f"ChromaDB ghost entry {fragment_id}: {e}")
             return None
         if not result or not result.get("ids"):
             return None
@@ -532,17 +530,11 @@ class ChromaDBAdapter:
         if not frag:
             logger.warning(f"update_fragment_metadata: No fragment with id={fragment_id}")
             return
-        if frag.get("vector") is None:
-            logger.warning(
-                f"Skipping metadata update for fragment {fragment_id} "
-                "because it has no associated vector."
-            )
-            return
         metadata = frag.get("metadata", {}) or {}
         metadata.update(metadata_updates)
-        self.collection.upsert(
+        # v0.4.0: Use update() instead of upsert() — avoids re-sending the embedding
+        self.collection.update(
             ids=[fragment_id],
-            embeddings=[frag.get("vector")],
             metadatas=[metadata]
         )
         logger.info(f"Fragment {fragment_id} metadata updated with {metadata_updates}")

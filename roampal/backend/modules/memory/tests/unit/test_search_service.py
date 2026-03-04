@@ -314,8 +314,7 @@ class TestCollectionBoosts:
         """Recent books should get boost."""
         result = {
             "distance": 1.0,
-            "upload_timestamp": datetime.utcnow().isoformat(),
-            "metadata": {}
+            "metadata": {"created_at": datetime.utcnow().isoformat()}
         }
         service._apply_collection_boost(result, "books", "query")
         assert result["distance"] == 0.7

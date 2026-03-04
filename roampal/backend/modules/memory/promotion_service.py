@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from .config import MemoryConfig
@@ -89,6 +89,22 @@ class PromotionService:
         Returns:
             New doc_id if promoted/demoted, None otherwise
         """
+        # v0.4.0: Acquire lock to prevent race with batch promotion
+        async with self._promotion_lock:
+            return await self._handle_promotion_inner(
+                doc_id, collection, score, uses, metadata, collection_size
+            )
+
+    async def _handle_promotion_inner(
+        self,
+        doc_id: str,
+        collection: str,
+        score: float,
+        uses: int,
+        metadata: Dict[str, Any],
+        collection_size: int = 0
+    ) -> Optional[str]:
+        """Inner promotion logic (called under lock)."""
         # Get full document for evaluation
         if collection not in self.collections:
             logger.warning(f"Collection {collection} not found")
@@ -131,7 +147,8 @@ class PromotionService:
         uses: int
     ) -> Optional[str]:
         """Promote from working to history collection."""
-        new_id = doc_id.replace("working_", "history_")
+        # v0.4.0: Use split-based ID derivation instead of fragile .replace()
+        new_id = f"history_{doc_id.split('_', 1)[1]}" if "_" in doc_id else f"history_{doc_id}"
 
         # Build promotion record
         promotion_record = {
@@ -145,6 +162,8 @@ class PromotionService:
         promotion_history.append(promotion_record)
         metadata["promotion_history"] = json.dumps(promotion_history)
         metadata["promoted_from"] = "working"
+        # v0.4.0: Store original_id so outcome scoring can find promoted docs
+        metadata["original_id"] = doc_id
 
         # v0.3.6: Carry Wilson forward — memory already proved itself via reserved slot scoring
         # No reset. success_count and uses carry through from working → history → patterns.
@@ -186,7 +205,7 @@ class PromotionService:
         uses: int
     ) -> Optional[str]:
         """Promote from history to patterns collection."""
-        new_id = doc_id.replace("history_", "patterns_")
+        new_id = f"patterns_{doc_id.split('_', 1)[1]}" if "_" in doc_id else f"patterns_{doc_id}"
 
         # Build promotion record
         promotion_record = {
@@ -200,6 +219,8 @@ class PromotionService:
         promotion_history.append(promotion_record)
         metadata["promotion_history"] = json.dumps(promotion_history)
         metadata["promoted_from"] = "history"
+        # v0.4.0: Store original_id so outcome scoring can find promoted docs
+        metadata["original_id"] = doc_id
 
         # Get text for embedding
         text_for_embedding = metadata.get("text") or metadata.get("content") or doc.get("content", "")
@@ -232,7 +253,7 @@ class PromotionService:
         score: float
     ) -> Optional[str]:
         """Demote from patterns back to history collection."""
-        new_id = doc_id.replace("patterns_", "history_")
+        new_id = f"history_{doc_id.split('_', 1)[1]}" if "_" in doc_id else f"history_{doc_id}"
 
         text_for_embedding = metadata.get("text") or metadata.get("content", "")
         if not text_for_embedding:
@@ -324,6 +345,12 @@ class PromotionService:
             for doc_id in all_ids:
                 doc = working_adapter.get_fragment(doc_id)
                 if not doc:
+                    # Ghost entry — clean up
+                    try:
+                        working_adapter.delete_vectors([doc_id])
+                        logger.debug(f"Cleaned up ghost working memory {doc_id} during promotion check")
+                    except Exception:
+                        pass
                     continue
 
                 metadata = doc.get("metadata", {})
@@ -340,13 +367,16 @@ class PromotionService:
 
                 # Promote if: high score AND used multiple times
                 if score >= self.config.promotion_score_threshold and uses >= 2:
-                    new_id = doc_id.replace("working_", "history_")
+                    new_id = f"history_{doc_id.split('_', 1)[1]}" if "_" in doc_id else f"history_{doc_id}"
+                    # v0.4.0: Use multi-key text fallback (was only checking "text")
+                    text_for_embed = text or metadata.get("content") or doc.get("content", "")
 
                     await self.collections["history"].upsert_vectors(
                         ids=[new_id],
-                        vectors=[await self.embed_fn(text)],
+                        vectors=[await self.embed_fn(text_for_embed)],
                         metadatas=[{
                             **metadata,
+                            "original_id": doc_id,  # v0.4.0: so outcome scoring can find promoted docs
                             "promoted_from": "working",
                             "promotion_time": datetime.now().isoformat(),
                             "promotion_reason": "batch_promotion",
@@ -377,7 +407,12 @@ class PromotionService:
         try:
             if timestamp_str:
                 doc_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-                return (datetime.now() - doc_time).total_seconds() / 3600
+                # v0.4.0: Use UTC-aware now() to avoid TypeError with TZ-aware timestamps
+                now = datetime.now(timezone.utc)
+                # Make doc_time TZ-aware if it isn't already
+                if doc_time.tzinfo is None:
+                    doc_time = doc_time.replace(tzinfo=timezone.utc)
+                return (now - doc_time).total_seconds() / 3600
         except Exception:
             pass
         return 0.0
@@ -465,6 +500,13 @@ class PromotionService:
             for doc_id in all_ids:
                 doc = working_adapter.get_fragment(doc_id)
                 if not doc:
+                    # Ghost entry — ID in index but no data. Clean it up.
+                    try:
+                        working_adapter.delete_vectors([doc_id])
+                        cleaned_count += 1
+                        logger.debug(f"Cleaned up ghost working memory {doc_id} (no data in storage)")
+                    except Exception:
+                        pass
                     continue
 
                 metadata = doc.get("metadata", {})
@@ -509,6 +551,12 @@ class PromotionService:
             for doc_id in all_ids:
                 doc = history_adapter.get_fragment(doc_id)
                 if not doc:
+                    try:
+                        history_adapter.delete_vectors([doc_id])
+                        cleaned_count += 1
+                        logger.debug(f"Cleaned up ghost history memory {doc_id} (no data in storage)")
+                    except Exception:
+                        pass
                     continue
 
                 metadata = doc.get("metadata", {})

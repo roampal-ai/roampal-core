@@ -101,12 +101,36 @@ class OutcomeService:
 
         # SAFEGUARD: Books are reference material, not scorable memories
         # But we still updated KG routing above so system learns to route to books
-        if doc_id.startswith("books_"):
+        if doc_id.startswith("books_") or doc_id.startswith("book_"):
             logger.info(f"[KG] Learned routing pattern for books, but skipping score update (static reference material)")
             return None
 
+        # v0.4.0: If doc not found, check if it was promoted to the next collection
+        if not doc and collection_name:
+            promotion_targets = {"working": "history", "history": "patterns"}
+            target_coll = promotion_targets.get(collection_name)
+            if target_coll and target_coll in self.collections:
+                try:
+                    # Search by original_id metadata in the target collection
+                    target_adapter = self.collections[target_coll]
+                    if target_adapter.collection:
+                        promoted_results = target_adapter.collection.get(
+                            where={"original_id": doc_id},
+                            include=["metadatas", "documents", "embeddings"],
+                            limit=1,
+                        )
+                        if promoted_results and promoted_results.get("ids") and len(promoted_results["ids"]) > 0:
+                            promoted_id = promoted_results["ids"][0]
+                            doc = target_adapter.get_fragment(promoted_id)
+                            if doc:
+                                doc_id = promoted_id
+                                collection_name = target_coll
+                                logger.info(f"Found promoted doc: {doc_id} in {collection_name} (was promoted from {promotion_targets.get(collection_name, '?')})")
+                except Exception as e:
+                    logger.debug(f"Promoted doc lookup failed for {doc_id}: {e}")
+
         if not doc:
-            logger.warning(f"Document {doc_id} not found")
+            logger.debug(f"Document {doc_id} not found (may have been promoted or expired)")
             return None
 
         # Calculate score update

@@ -449,9 +449,10 @@ class SearchService:
 
         # Books: boost recent uploads
         elif coll_name == "books":
-            if result.get("upload_timestamp"):
+            created_at = result.get("metadata", {}).get("created_at") or result.get("created_at")
+            if created_at:
                 try:
-                    upload_time = datetime.fromisoformat(result["upload_timestamp"])
+                    upload_time = datetime.fromisoformat(created_at)
                     age_days = (datetime.utcnow() - upload_time).days
                     if age_days <= 7:
                         result["distance"] = result.get("distance", 1.0) * 0.7
@@ -773,23 +774,26 @@ class SearchService:
             where["code_language"] = code_language
 
         try:
-            results = await self.collections["books"].query(
-                query_texts=[query],
-                n_results=n_results * 2,
-                where=where if where else None
+            # v0.4.0: Use adapter's query_vectors() with embedding (not raw .query())
+            query_embedding = await self.embed_fn(query)
+            results = await self.collections["books"].query_vectors(
+                query_vector=query_embedding,
+                top_k=n_results * 2,
+                filters=where if where else None
             )
 
-            if not results or not results.get("ids"):
+            if not results:
                 return []
 
-            # Format results
+            # Format results (query_vectors returns list of dicts with id, vector, metadata)
             formatted_results = []
-            for i in range(min(n_results, len(results["ids"][0]))):
+            for r in results[:n_results]:
+                metadata = r.get("metadata", {})
                 result = {
-                    "id": results["ids"][0][i],
-                    "text": results["documents"][0][i],
-                    "metadata": results["metadatas"][0][i] if results.get("metadatas") else {},
-                    "distance": results["distances"][0][i] if results.get("distances") else 0,
+                    "id": r.get("id", ""),
+                    "text": metadata.get("content") or metadata.get("text", ""),
+                    "metadata": metadata,
+                    "distance": r.get("distance", 0),
                     "collection": "books"
                 }
                 formatted_results.append(result)
