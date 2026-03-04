@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 
 import pytest
 from unittest.mock import MagicMock, AsyncMock
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 class TestPromotionServiceInit:
@@ -244,8 +244,8 @@ class TestAgeCalculation:
 
         service = PromotionService(collections={}, embed_fn=AsyncMock())
 
-        # 2 hours ago
-        two_hours_ago = (datetime.now() - timedelta(hours=2)).isoformat()
+        # 2 hours ago (UTC-aware to match production behavior)
+        two_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
         age = service._calculate_age_hours(two_hours_ago)
 
         assert 1.9 < age < 2.1  # Approximately 2 hours

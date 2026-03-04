@@ -252,6 +252,7 @@ Roampal Core is completely free and open source.
 - Support development: [roampal.gumroad.com](https://roampal.gumroad.com/l/aagzxv)
 - Feature ideas & feedback: [Discord](https://discord.com/invite/F87za86R3v)
 - Bug reports: [GitHub Issues](https://github.com/roampal-ai/roampal-core/issues)
+- Need help with AI memory? Reach out: **roampal@protonmail.com** | [LinkedIn](https://www.linkedin.com/in/logan-teague-6909901a5/)
 
 ## License
 

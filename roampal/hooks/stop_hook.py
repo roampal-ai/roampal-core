@@ -222,18 +222,24 @@ def main():
     conversation_id = input_data.get("conversation_id") or input_data.get("session_id", os.environ.get("ROAMPAL_CONVERSATION_ID", "default"))
     _diag(f"conversation_id={conversation_id}")
 
-    # v0.3.6: Stop hook reads transcript for exchange lifecycle tracking (session JSONL)
-    # but does NOT store in ChromaDB — main LLM stores summaries via score_memories.
-    # The exchange data is needed so get_previous_exchange() can generate scoring prompts.
-
-    # Read transcript to get exchange data for lifecycle tracking
-    transcript_path = input_data.get("transcript_path", "")
+    # v0.4.0: Read last_assistant_message from input if available (Claude Code v2.1+)
+    # Fall back to transcript parsing for older versions
     user_message = ""
-    assistant_response = ""
-    if transcript_path and os.path.exists(transcript_path):
-        user_message, assistant_response = read_transcript(transcript_path)
-        _diag(f"parsed user_message length: {len(user_message)}")
-        _diag(f"parsed assistant_response length: {len(assistant_response)}")
+    assistant_response = input_data.get("last_assistant_message", "")
+    if assistant_response:
+        _diag(f"got last_assistant_message from input ({len(assistant_response)} chars)")
+        # Try to get user message from transcript for completeness
+        transcript_path = input_data.get("transcript_path", "")
+        if transcript_path and os.path.exists(transcript_path):
+            user_msg_from_transcript, _ = read_transcript(transcript_path)
+            user_message = user_msg_from_transcript
+    else:
+        # Legacy path: parse transcript file
+        transcript_path = input_data.get("transcript_path", "")
+        if transcript_path and os.path.exists(transcript_path):
+            user_message, assistant_response = read_transcript(transcript_path)
+            _diag(f"parsed user_message length: {len(user_message)}")
+            _diag(f"parsed assistant_response length: {len(assistant_response)}")
 
     # Call Roampal server
     dev_mode = os.environ.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")

@@ -490,8 +490,9 @@ class ContentGraph:
                 entity_copy["collections"] = defaultdict(int, entity_copy["collections"])
             graph.entities[name] = entity_copy
 
-        # Load relationships
-        graph.relationships = data.get("relationships", {})
+        # Load relationships (v0.4.0: guard type — corrupted/legacy saves may have a list)
+        rels = data.get("relationships", {})
+        graph.relationships = rels if isinstance(rels, dict) else {}
 
         # Load metadata
         graph.metadata = data.get("metadata", graph.metadata)

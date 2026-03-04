@@ -178,7 +178,7 @@ def main():
         # No input - pass through
         sys.exit(0)
 
-    # Claude Code sends "prompt" field
+    # Claude Code sends "prompt" field; Cursor sends "user_message"
     user_message = input_data.get("prompt", input_data.get("user_message", input_data.get("query", "")))
 
     if not user_message:

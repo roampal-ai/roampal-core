@@ -34,7 +34,8 @@ import type { Plugin } from "@opencode-ai/plugin"
 // Port scheme: 27182 (prod), 27183 (dev)
 const ROAMPAL_DEV = process.env.ROAMPAL_DEV === "1"
 const ROAMPAL_PORT = ROAMPAL_DEV ? 27183 : 27182
-const ROAMPAL_HOOK_URL = `http://127.0.0.1:${ROAMPAL_PORT}/api/hooks`
+const ROAMPAL_API_URL = `http://127.0.0.1:${ROAMPAL_PORT}/api`  // v0.4.0: single base URL constant
+const ROAMPAL_HOOK_URL = `${ROAMPAL_API_URL}/hooks`
 
 // Debug logging to file (console.log leaks into OpenCode UI on some platforms)
 import { appendFileSync, readFileSync, statSync, writeFileSync } from "fs"
@@ -90,10 +91,12 @@ let scoringInFlight = false
 // Fallback: process.env still checked for manual/testing overrides.
 function _loadSidecarConfig(): { url: string; key: string; model: string; disabled: boolean } {
   try {
-    const configPath = join(
+    // v0.4.0: Respect XDG_CONFIG_HOME on Linux
+    const configDir = process.env.XDG_CONFIG_HOME || join(
       process.env.USERPROFILE || process.env.HOME || ".",
-      ".config", "opencode", "opencode.json"
+      ".config"
     )
+    const configPath = join(configDir, "opencode", "opencode.json")
     const raw = readFileSync(configPath, "utf-8")
     const config = JSON.parse(raw)
     const env = config?.mcp?.["roampal-core"]?.environment || {}
@@ -772,7 +775,7 @@ ${memoryInstructions}`
 
           // Send scoring result to roampal server (all outcomes including unknown)
           if (Object.keys(memoryScores).length > 0) {
-            const scoreResp = await fetch(`${ROAMPAL_HOOK_URL.replace("/hooks", "")}/record-outcome`, {
+            const scoreResp = await fetch(`${ROAMPAL_API_URL}/record-outcome`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -812,7 +815,7 @@ ${memoryInstructions}`
 
               // Dedup check: skip if this exchange was already summarized (matches cli.py)
               try {
-                const dedupResp = await fetch(`${ROAMPAL_HOOK_URL.replace('/hooks', '/search')}`, {
+                const dedupResp = await fetch(`${ROAMPAL_API_URL}/search`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
@@ -861,7 +864,7 @@ ${memoryInstructions}`
                 // Score the summary itself with the exchange outcome (matches cli.py)
                 if (docId && outcome !== "unknown") {
                   try {
-                    await fetch(`${ROAMPAL_HOOK_URL.replace("/hooks", "")}/record-outcome`, {
+                    await fetch(`${ROAMPAL_API_URL}/record-outcome`, {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({
@@ -923,7 +926,7 @@ ${memoryInstructions}`
  */
 async function autoSummarizeOldMemory(): Promise<void> {
   try {
-    const resp = await fetch(`${ROAMPAL_HOOK_URL.replace('/hooks', '/memory/auto-summarize-one')}`, {
+    const resp = await fetch(`${ROAMPAL_API_URL}/memory/auto-summarize-one`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: AbortSignal.timeout(15000)  // 15s — sidecar can be slow
@@ -1014,7 +1017,7 @@ Respond with ONLY a JSON object:
           const finalSummary = summary.length > 400 ? summary.slice(0, 380) + "... [truncated]" : summary
 
           // Save via update-content endpoint
-          const updateResp = await fetch(`${ROAMPAL_HOOK_URL.replace('/hooks', '/memory/update-content')}`, {
+          const updateResp = await fetch(`${ROAMPAL_API_URL}/memory/update-content`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1182,7 +1185,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
       if (includeRecentOnNextTurn.get(sessionId)) {
         includeRecentOnNextTurn.delete(sessionId)
         try {
-          const recentResp = await fetch(`${ROAMPAL_HOOK_URL.replace('/hooks', '/search')}`, {
+          const recentResp = await fetch(`${ROAMPAL_API_URL}/search`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1550,7 +1553,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           if (!sid) break
           debugLog(`experimental.session.compacting: Injecting recent exchanges into compaction for ${sid}`)
           try {
-            const recentResp = await fetch(`${ROAMPAL_HOOK_URL.replace('/hooks', '/search')}`, {
+            const recentResp = await fetch(`${ROAMPAL_API_URL}/search`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -1596,6 +1599,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           cachedContext.delete(sid)
           pendingScoringData.delete(sid)
           includeRecentOnNextTurn.delete(sid)
+          sessionOnboarded.delete(sid)  // v0.4.0: prevent memory leak
           debugLog(`Session deleted: ${sid}`)
           break
         }

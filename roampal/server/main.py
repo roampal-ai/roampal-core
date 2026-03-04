@@ -962,7 +962,7 @@ def create_app() -> FastAPI:
             return {"success": success}
 
         except Exception as e:
-            logger.error(f"Error archiving: {e}")
+            logger.error(f"Error deleting memory: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/ingest")
@@ -1015,7 +1015,7 @@ def create_app() -> FastAPI:
             }
 
         except Exception as e:
-            logger.error(f"Error archiving: {e}")
+            logger.error(f"Error ingesting document: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
 

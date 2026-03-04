@@ -487,8 +487,7 @@ VERIFICATION USE:
                         "collections": {
                             "type": "array",
                             "items": {"type": "string", "enum": ["books", "working", "history", "patterns", "memory_bank"]},
-                            "description": "Which collections to search. Omit for auto-routing (recommended). Manual: books, working, history, patterns, memory_bank",
-                            "default": None
+                            "description": "Which collections to search. Omit for auto-routing (recommended). Manual: books, working, history, patterns, memory_bank"
                         },
                         "limit": {
                             "type": "integer",
@@ -505,8 +504,7 @@ VERIFICATION USE:
                         "sort_by": {
                             "type": "string",
                             "enum": ["relevance", "recency", "score"],
-                            "description": "Sort order. 'recency' for temporal queries like 'last thing we did'. Auto-detected if omitted.",
-                            "default": None
+                            "description": "Sort order. 'recency' for temporal queries like 'last thing we did'. Auto-detected if omitted."
                         }
                     },
                     "required": []

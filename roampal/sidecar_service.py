@@ -35,7 +35,7 @@ CUSTOM_MODEL = os.environ.get("ROAMPAL_SIDECAR_MODEL", "")
 # Zen free models — OpenAI-compatible API, no auth required
 ZEN_URL = "https://opencode.ai/zen/v1"
 ZEN_KEY = "public"
-ZEN_MODELS = ["minimax-m2.5-free", "kimi-k2.5-free", "glm-4.7-free"]
+ZEN_MODELS = ["glm-4.7-free", "kimi-k2.5-free", "gpt-5-nano"]
 
 # Anthropic API
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"

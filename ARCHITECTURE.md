@@ -34,7 +34,7 @@ roampal init --opencode   # Or configure explicitly
   OpenCode MCP         hook subprocesses   TypeScript plugin
 ```
 
-**Architecture (v0.3.2):** MCP servers are thin HTTP clients — no ChromaDB, PyTorch, or sentence-transformers in the MCP process. All access is serialized through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running.
+**Architecture (v0.4.0):** MCP servers are thin HTTP clients — no ChromaDB, PyTorch, or sentence-transformers in the MCP process. All access is serialized through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running.
 
 `roampal start` is available for standalone use (e.g., OpenCode-only setups where no MCP auto-starts the server).
 
@@ -538,7 +538,7 @@ roampal sidecar setup       # Configure scoring model
 roampal sidecar disable     # Remove scoring model configuration
 ```
 
-### CLI Design (v0.3.7)
+### CLI Design
 
 The CLI follows standard Unix tool conventions:
 - **NO_COLOR**: Respects `NO_COLOR` env var and `TERM=dumb` (no-color.org)
@@ -591,43 +591,26 @@ Example `~/.claude/settings.json`:
 }
 ```
 
-Bug (2025-12-26): Missing env section in settings.json caused hooks to silently connect to PROD (27182) while MCP connected to DEV (27183). This went unnoticed for 15 days because MCP still worked.
+**Important:** Both MCP server AND hooks need `ROAMPAL_DEV=1` configured separately — hooks run as subprocesses and do NOT inherit your terminal's env vars.
 
 You can also set `ROAMPAL_DATA_PATH` environment variable for custom paths.
 
-### Dev Mode Implementation (v0.2.0)
+### Dev Mode Implementation
 
-**SINGLE SOURCE OF TRUTH:** All code that determines DEV vs PROD mode MUST use the `is_dev_mode()` helper function. Never check `args.dev` directly.
+All DEV/PROD mode detection uses the `is_dev_mode()` helper in `cli.py`. This centralizes the check so that CLI commands, hooks, and MCP server all agree on which environment to use.
 
-**The Pattern (cli.py):**
 ```python
 def is_dev_mode(args=None) -> bool:
-    """
-    SINGLE SOURCE OF TRUTH for DEV mode detection.
-
-    Checks (in order):
-    1. args.dev flag (if args provided)
-    2. ROAMPAL_DEV environment variable
-
-    ALL commands MUST use this. Never check args.dev directly.
-    """
+    """Checks args.dev flag first, then ROAMPAL_DEV env var."""
     if args is not None and getattr(args, 'dev', False):
         return True
     return os.environ.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")
-
-
-def get_port(args=None) -> int:
-    """Get port based on DEV/PROD mode."""
-    return DEV_PORT if is_dev_mode(args) else PROD_PORT
 ```
 
-**Bug History (2025-12-26):** Multiple CLI commands only checked `args.dev`, ignoring the `ROAMPAL_DEV` environment variable. This caused MCP (using env var from `.mcp.json`) to connect to DEV while CLI commands connected to PROD - data ended up in wrong database. Fixed by centralizing all DEV mode checks through `is_dev_mode()`.
-
-**Why This Matters:**
-- MCP server gets `ROAMPAL_DEV=1` from `.mcp.json` env config
-- Hooks detect `ROAMPAL_DEV` from environment
-- CLI commands must also check the env var, not just `--dev` flag
-- Single helper prevents this class of bug from recurring
+All three entry points must resolve to the same mode:
+- MCP server: reads `ROAMPAL_DEV` from `.mcp.json` env config
+- Hooks: read `ROAMPAL_DEV` from `settings.json` env config
+- CLI: checks `--dev` flag OR `ROAMPAL_DEV` env var
 
 ### What `roampal init` Does
 
@@ -788,7 +771,7 @@ Unlike Roampal Desktop, roampal-core uses NO local LLM. The connected external L
 - Model download/management
 - Local compute requirements
 
-### 5. No Truncation (v0.2.8)
+### 5. No Truncation
 
 All content is stored and returned in full - no character limits or truncation:
 - Full transcripts in session JSONL files
@@ -807,12 +790,13 @@ dependencies = [
     "sentence-transformers>=2.2.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.22.0",
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2.0.0",
     "httpx>=0.24.0",
     "pydantic>=2.0.0",
-    "rank-bm25>=0.2.0",
-    "nltk>=3.8.0",
 ]
+
+[project.optional-dependencies]
+hybrid = ["rank-bm25>=0.2.0"]
 ```
 
 ---
@@ -848,12 +832,10 @@ Falls back to inline vector + Wilson scoring if SearchService fails or isn't ini
 
 ## Future Considerations
 
-1. **Cursor Support**: Implemented but blocked by Cursor v2.4.7 bug — context injection doesn't reach the AI. Will go live when Cursor fixes `agent_message`.
-2. **OpenCode Support**: ✅ Full support via TypeScript plugin (v0.3.2)
-3. **Dashboard**: Web UI for memory management
-4. **Multi-User**: Currently single-user design
-5. **Encryption**: Data at rest is not encrypted
-6. **KG Service**: ✅ Knowledge Graphs shared with Roampal Desktop (v0.2.8)
+1. **Cursor Support**: Blocked by upstream Cursor bug — context injection doesn't reach the AI. Deferred indefinitely.
+2. **Dashboard**: Web UI for memory management
+3. **Multi-User**: Currently single-user design
+4. **Encryption**: Data at rest is not encrypted
 
 ---
 
