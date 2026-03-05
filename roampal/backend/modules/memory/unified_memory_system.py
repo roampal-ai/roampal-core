@@ -8,6 +8,7 @@ Kept: Core search, outcome tracking, memory bank operations.
 
 import logging
 import json
+import sys
 import uuid
 import os
 from pathlib import Path
@@ -100,11 +101,11 @@ def _humanize_age(iso_timestamp: str) -> str:
     if not iso_timestamp:
         return ""
     try:
-        from datetime import timezone
         dt = datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
+        # Timestamps are stored as naive local time — compare against naive local now
+        if dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
+        now = datetime.now()
         delta = now - dt
         days = delta.days
         hours = delta.seconds // 3600
@@ -291,10 +292,11 @@ class UnifiedMemorySystem:
                 if os.name == 'nt':  # Windows
                     appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
                     data_path = os.path.join(appdata, app_folder, 'data')
-                elif os.uname().sysname == 'Darwin':  # macOS
+                elif sys.platform == 'darwin':  # macOS
                     data_path = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support', app_folder, 'data')
-                else:  # Linux
-                    data_path = os.path.join(os.path.expanduser('~'), '.local', 'share', app_folder.lower(), 'data')
+                else:  # Linux — v0.4.1: respect XDG_DATA_HOME
+                    xdg_data = os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser('~'), '.local', 'share'))
+                    data_path = os.path.join(xdg_data, app_folder.lower(), 'data')
         self.data_path = Path(data_path)
         self.data_path.mkdir(parents=True, exist_ok=True)
 
@@ -504,7 +506,6 @@ class UnifiedMemorySystem:
         )
 
         # v0.3.7: Cross-encoder removed — Wilson scoring is the reranker now.
-        # Saves ~320 MB RAM. SearchService still accepts reranker= for API compat.
         self._search_service = SearchService(
             collections=self.collections,
             scoring_service=self._scoring_service,
@@ -512,7 +513,6 @@ class UnifiedMemorySystem:
             kg_service=self._kg_service,
             embed_fn=self._embedding_service.embed_text,
             config=self.config,
-            reranker=None,
         )
 
         self.initialized = True
@@ -1105,7 +1105,7 @@ class UnifiedMemorySystem:
         memories = context.get("memories", [])
 
         if user_name or memories:
-            parts.append("You have persistent memory about this user via Roampal. Scored memories include Wilson confidence and outcome history. [id:...] tags can be looked up with search_memory(id=...). Memories may be outdated or wrong. Verify before treating as ground truth. The context below was retrieved from past conversations. If the user references past interactions or asks if you remember them, use this context — you DO remember.")
+            parts.append("You have persistent memory about this user via Roampal. Scored memories include Wilson confidence and outcome history. [id:...] tags can be looked up with search_memory(id=...). Memories may be outdated or wrong. Verify before treating as ground truth. The context below was retrieved from past conversations. If the user references past interactions or asks if you remember them, use your roampal memory — you DO remember.")
             parts.append("")
             parts.append("═══ KNOWN CONTEXT ═══")
 

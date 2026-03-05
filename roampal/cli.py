@@ -110,8 +110,9 @@ def get_data_dir(dev: bool = False) -> Path:
             return Path(appdata) / "Roampal_DEV" / "data"
         elif sys.platform == 'darwin':  # macOS
             return Path.home() / "Library" / "Application Support" / "Roampal_DEV" / "data"
-        else:  # Linux
-            return Path.home() / ".local" / "share" / "roampal_dev" / "data"
+        else:  # Linux — v0.4.1: respect XDG_DATA_HOME
+            xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+            return Path(xdg_data) / "roampal_dev" / "data"
     else:
         # PROD mode
         if os.name == 'nt':  # Windows
@@ -119,8 +120,9 @@ def get_data_dir(dev: bool = False) -> Path:
             return Path(appdata) / "Roampal" / "data"
         elif sys.platform == 'darwin':  # macOS
             return Path.home() / "Library" / "Application Support" / "Roampal" / "data"
-        else:  # Linux
-            return Path.home() / ".local" / "share" / "roampal" / "data"
+        else:  # Linux — v0.4.1: respect XDG_DATA_HOME
+            xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+            return Path(xdg_data) / "roampal" / "data"
 
 
 def _build_hook_command(module: str, is_dev: bool) -> str:

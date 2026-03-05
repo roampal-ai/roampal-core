@@ -56,7 +56,7 @@ The core loop is identical — both platforms inject context, capture exchanges,
 | Scoring | Main LLM via `score_memories` tool | Independent sidecar (your chosen model > Zen free) |
 | Self-healing | Hooks auto-restart server on failure | Plugin auto-restarts server on failure |
 
-Claude Code prompts the main LLM to score each exchange via the `score_memories` tool. OpenCode uses an independent sidecar — a separate API call that reviews the exchange transcript as a third party, removing self-assessment bias. During `roampal init` or `roampal sidecar setup`, Roampal detects local models (Ollama, LM Studio, etc.) and lets you choose a scoring model. If configured, these take priority (Zen is skipped for privacy). A cheap or local model works great — scoring doesn't need a powerful model. Defaults to Zen free models (remote, best-effort) if you skip setup.
+Claude Code prompts the main LLM to score each exchange via the `score_memories` tool. OpenCode never self-scores — an independent sidecar (a separate API call) reviews each exchange as a third party, removing self-assessment bias. The `score_memories` tool is not registered on OpenCode. During `roampal init` or `roampal sidecar setup`, Roampal detects local models (Ollama, LM Studio, etc.) and lets you choose a scoring model. If configured, these take priority (Zen is skipped for privacy). A cheap or local model works great — scoring doesn't need a powerful model. Defaults to Zen free models (remote, best-effort) if you skip setup.
 </details>
 
 ## How It Works
@@ -133,10 +133,10 @@ Your AI gets these memory tools:
 | `add_to_memory_bank` | Store permanent facts (identity, preferences, goals) | Both |
 | `update_memory` | Correct or update existing memories | Both |
 | `delete_memory` | Remove outdated info | Both |
-| `score_memories` | Score previous exchange outcomes | Both (see note) |
+| `score_memories` | Score previous exchange outcomes | Claude Code |
 | `record_response` | Store key takeaways from significant exchanges | Both |
 
-> **How scoring works:** Claude Code's hooks prompt the main LLM to call `score_memories` every turn. OpenCode uses an independent sidecar that scores silently in the background — the model never sees a scoring prompt and never calls `score_memories`. The tool is registered for both platforms but OpenCode's plugin handles all scoring independently. If the sidecar fails completely, the model is prompted to suggest `roampal sidecar setup`. Choose your scoring model during `roampal init` or via `roampal sidecar setup`.
+> **How scoring works:** Claude Code's hooks prompt the main LLM to call `score_memories` every turn. OpenCode uses an independent sidecar that scores silently in the background — the model never sees a scoring prompt and `score_memories` is not registered as a tool. If the sidecar is unavailable, a warning prompts the user to run `roampal sidecar setup`. Choose your scoring model during `roampal init` or via `roampal sidecar setup`.
 
 ## What's Different?
 
