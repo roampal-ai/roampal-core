@@ -307,7 +307,10 @@ class ChromaDBAdapter:
             return []
 
     async def _build_bm25_index(self):
-        """Build BM25 index from all documents (v2.1 Hybrid Search)"""
+        """Build BM25 index from documents (v2.1 Hybrid Search).
+
+        v0.4.1: Capped at 2000 most recent documents to prevent OOM on large collections.
+        """
         if not BM25_AVAILABLE:
             return
 
@@ -318,20 +321,32 @@ class ChromaDBAdapter:
             return
 
         try:
-            # Get all documents
-            all_data = self.collection.get(include=["documents", "metadatas"])
+            # v0.4.1: Cap at 2000 docs to prevent OOM on memory-constrained systems
+            BM25_MAX_DOCS = 2000
+            all_data = self.collection.get(
+                include=["documents", "metadatas"],
+                limit=BM25_MAX_DOCS
+            )
             self.bm25_ids = all_data.get("ids", [])
             self.bm25_docs = all_data.get("documents", [])
             self.bm25_metadatas = all_data.get("metadatas", [])
 
             # Tokenize documents for BM25
-            tokenized_docs = [doc.lower().split() for doc in self.bm25_docs]
+            tokenized_docs = [doc.lower().split() for doc in self.bm25_docs if doc]
+
+            if not tokenized_docs:
+                logger.debug("[BM25] No valid documents to index")
+                return
 
             # Build BM25 index
             self.bm25_index = BM25Okapi(tokenized_docs)
             self._bm25_needs_rebuild = False
 
-            logger.debug(f"[BM25] Index built with {len(self.bm25_docs)} documents")
+            total_count = self.collection.count()
+            if total_count > BM25_MAX_DOCS:
+                logger.debug(f"[BM25] Index built with {len(self.bm25_docs)}/{total_count} documents (capped)")
+            else:
+                logger.debug(f"[BM25] Index built with {len(self.bm25_docs)} documents")
         except Exception as e:
             logger.warning(f"[BM25] Index build failed: {e}")
             self.bm25_index = None
@@ -615,13 +630,6 @@ class ChromaDBAdapter:
         except Exception as e:
             logger.warning(f"Error during ChromaDB cleanup: {e}")
 
-    def __del__(self):
-        """Cleanup on deletion"""
-        try:
-            if self.client or self.collection:
-                import asyncio
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(self.cleanup())
-                loop.close()
-        except Exception:
-            pass  # Ignore errors in destructor
+    # v0.4.1: __del__ removed — it created a new asyncio event loop during GC,
+    # which conflicts with the running loop and can leave SQLite WAL files locked.
+    # Use explicit `await adapter.cleanup()` during lifespan shutdown instead.

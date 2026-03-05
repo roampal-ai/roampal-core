@@ -478,16 +478,33 @@ async def lifespan(app: FastAPI):
             data_path = str(Path(appdata) / "Roampal_DEV" / "data")
         elif sys.platform == 'darwin':  # macOS
             data_path = str(Path.home() / "Library" / "Application Support" / "Roampal_DEV" / "data")
-        else:  # Linux
-            data_path = str(Path.home() / ".local" / "share" / "roampal_dev" / "data")
+        else:  # Linux — v0.4.1: respect XDG_DATA_HOME
+            xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+            data_path = str(Path(xdg_data) / "roampal_dev" / "data")
         logger.info(f"DEV MODE enabled - using: {data_path}")
     elif data_path:
         logger.info(f"Using custom data path: {data_path}")
 
-    # Initialize memory system
-    _memory = UnifiedMemorySystem(data_path=data_path)
-    await _memory.initialize()
-    logger.info("Memory system initialized")
+    # v0.4.1: Wrap initialization in try/except with user-friendly guidance
+    try:
+        _memory = UnifiedMemorySystem(data_path=data_path)
+        await _memory.initialize()
+        logger.info("Memory system initialized")
+    except ImportError as e:
+        logger.error(
+            f"Missing dependency: {e}\n"
+            "Fix: pip install roampal[all]  (or: pip install sentence-transformers)"
+        )
+        raise SystemExit(1)
+    except Exception as e:
+        logger.error(
+            f"Failed to initialize memory system: {e}\n"
+            "Common fixes:\n"
+            "  - First run? Ensure you have internet for model download (~420MB)\n"
+            "  - ChromaDB error? Check disk space and permissions on data directory\n"
+            "  - Run 'roampal doctor' for diagnostics"
+        )
+        raise SystemExit(1)
 
     # v0.2.9: Cleanup legacy archived memories (one-time migration)
     if _memory._memory_bank_service:
@@ -505,8 +522,16 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Cleanup
+    # v0.4.1: Explicit cleanup of ChromaDB adapters (replaces __del__ destructor)
     logger.info("Shutting down Roampal server...")
+    if _memory:
+        try:
+            for name, adapter in getattr(_memory, 'collections', {}).items():
+                if hasattr(adapter, 'cleanup'):
+                    await adapter.cleanup()
+                    logger.debug(f"Cleaned up {name} adapter")
+        except Exception as e:
+            logger.warning(f"Error during adapter cleanup: {e}")
 
 
 def create_app() -> FastAPI:

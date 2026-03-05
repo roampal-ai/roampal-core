@@ -8,9 +8,16 @@ Simplified from Roampal - removed Ollama embedding fallback since roampal-core
 uses bundled model only.
 """
 
+import asyncio
 import logging
 from typing import List, Optional
-from sentence_transformers import SentenceTransformer
+
+try:
+    from sentence_transformers import SentenceTransformer
+    EMBEDDING_AVAILABLE = True
+except ImportError:
+    SentenceTransformer = None
+    EMBEDDING_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +44,14 @@ class EmbeddingService:
         self._model: Optional[SentenceTransformer] = None
 
     @property
-    def model(self) -> SentenceTransformer:
+    def model(self):
         """Lazy-load model on first use."""
         if self._model is None:
+            if not EMBEDDING_AVAILABLE:
+                raise ImportError(
+                    "sentence-transformers not installed. "
+                    "Run: pip install sentence-transformers"
+                )
             logger.info(f"Loading embedding model: {self.model_name}")
             self._model = SentenceTransformer(self.model_name)
             logger.info(f"Embedding model loaded: {self.model_name}")
@@ -60,8 +72,8 @@ class EmbeddingService:
             # Return zero vector of appropriate dimension
             return [0.0] * 768  # paraphrase-multilingual-mpnet-base-v2 dimension
 
-        # Generate embedding
-        embedding = self.model.encode(text, convert_to_numpy=True)
+        # v0.4.1: Run CPU-bound encode in thread to avoid blocking asyncio event loop
+        embedding = await asyncio.to_thread(self.model.encode, text, convert_to_numpy=True)
         return embedding.tolist()
 
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:
@@ -82,8 +94,8 @@ class EmbeddingService:
         if not valid_texts:
             return [[0.0] * 768 for _ in texts]
 
-        # Batch embed
-        embeddings = self.model.encode(valid_texts, convert_to_numpy=True)
+        # v0.4.1: Run CPU-bound encode in thread to avoid blocking asyncio event loop
+        embeddings = await asyncio.to_thread(self.model.encode, valid_texts, convert_to_numpy=True)
         return [e.tolist() for e in embeddings]
 
     def get_embedding_dimension(self) -> int:

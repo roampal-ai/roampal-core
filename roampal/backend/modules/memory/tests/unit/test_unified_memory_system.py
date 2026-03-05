@@ -802,13 +802,12 @@ class TestCrossEncoderWiring:
 
     @pytest.mark.asyncio
     async def test_initialize_creates_search_service_no_reranker(self, ums):
-        """v0.3.7: initialize() creates SearchService with reranker=None (cross-encoder removed)."""
+        """v0.4.1: SearchService no longer has reranker parameter."""
         await ums.initialize()
 
         assert ums._search_service is not None
-        assert hasattr(ums._search_service, 'reranker')
-        # v0.3.7: Cross-encoder removed, Wilson scoring is the reranker
-        assert ums._search_service.reranker is None
+        # v0.4.1: reranker parameter fully removed from SearchService
+        assert not hasattr(ums._search_service, 'reranker')
 
     @pytest.mark.asyncio
     async def test_search_delegates_to_search_service(self, tmp_path):
@@ -892,15 +891,15 @@ class TestCrossEncoderWiring:
         assert results[0]["id"] == "fallback_1"
 
     @pytest.mark.asyncio
-    async def test_search_service_receives_none_reranker(self, ums):
-        """v0.3.7: SearchService receives reranker=None (cross-encoder removed)."""
+    async def test_search_service_receives_no_reranker(self, ums):
+        """v0.4.1: SearchService no longer receives reranker parameter."""
         with patch('roampal.backend.modules.memory.unified_memory_system.SearchService') as MockSS:
             MockSS.return_value = MagicMock()
             await ums.initialize()
 
             MockSS.assert_called_once()
             call_kwargs = MockSS.call_args.kwargs
-            assert call_kwargs["reranker"] is None
+            assert "reranker" not in call_kwargs
 
 
 if __name__ == "__main__":

@@ -1222,7 +1222,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
       cachedContext.set(sessionId, { contextOnly, scoringRequired, scoringPromptSimple, scoringExchange, scoringMemories, recentExchanges, timestamp: Date.now() })
 
       // Cache scoring data for session.idle — sidecar scoring is DEFERRED until
-      // after the main LLM responds. If scoringBroken, model may score first (check-scored).
+      // after the main LLM responds. Sidecar is the sole scorer (v0.4.1).
       if (scoringRequired && scoringExchange) {
         pendingScoringData.set(sessionId, {
           userMessage: userText,
@@ -1287,12 +1287,8 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           debugLog(`system.transform: Injected ${fullContext.length} chars context into system prompt (merged)`)
         }
 
-        // v0.3.7: Sidecar handles scoring. When broken, inject scoring prompt
-        // so the main LLM can score as fallback (+ IMPORTANT tag suggests CLI fix).
-        if (scoringBroken && cached.scoringRequired && cached.scoringPromptSimple) {
-          output.system.push(cached.scoringPromptSimple)
-          debugLog(`system.transform: Sidecar broken — injected scoring prompt (${cached.scoringPromptSimple.length} chars):\n${cached.scoringPromptSimple}`)
-        }
+        // v0.4.1: Scoring is sidecar-only on OpenCode. No main LLM fallback.
+        // score_memories tool is hidden from MCP, so no scoring prompt needed.
         // DEBUG: dump full system prompt content being sent to model
         debugLog(`system.transform FINAL (cached path): ${output.system.length} system entries, total ${output.system.reduce((a, s) => a + s.length, 0)} chars`)
         for (let i = 0; i < output.system.length; i++) {
@@ -1456,68 +1452,26 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
             }
           }
 
-          // Run sidecar scoring for this exchange.
-          // When scoringBroken: check if main model already scored via score_memories tool.
-          //   If yes: skip sidecar (avoid double-scoring), but still attempt sidecar next exchange.
-          //   If no: run sidecar anyway (auto-recovery attempt).
-          // When sidecar not broken: run sidecar normally (sole scorer).
+          // v0.4.1: Sidecar is the sole scorer on OpenCode. No main LLM fallback.
+          // score_memories tool is hidden from MCP tool list.
           const scoringData = pendingScoringData.get(sid)
           if (scoringData) {
             pendingScoringData.delete(sid)
 
-            // ROAMPAL_SIDECAR_DISABLED: skip sidecar entirely, let main LLM score via prompt
+            // ROAMPAL_SIDECAR_DISABLED: skip sidecar entirely (testing mode)
             if (SIDECAR_DISABLED) {
-              debugLog(`session.idle: Sidecar DISABLED (testing) — skipping sidecar, main LLM scores via prompt`)
+              debugLog(`session.idle: Sidecar DISABLED (testing) — skipping scoring entirely`)
             } else {
-              let modelAlreadyScored = false
-              if (scoringBroken) {
-                // Check if main model called score_memories this turn
-                try {
-                  const checkResp = await fetch(`${ROAMPAL_HOOK_URL}/check-scored?conversation_id=${encodeURIComponent(sid)}`)
-                  if (checkResp.ok) {
-                    const { scored } = await checkResp.json()
-                    if (scored) {
-                      modelAlreadyScored = true
-                      debugLog(`session.idle: Main model scored this turn (scoringBroken mode) — skipping sidecar scoring for THIS exchange`)
-                    }
-                  }
-                } catch {
-                  // check-scored failed — proceed with sidecar attempt
-                }
-              }
-
-              if (modelAlreadyScored) {
-                // Model handled scoring. Still probe sidecar for auto-recovery (fire-and-forget, no data).
-                // We use the first Zen model as a health check — if it responds, sidecar is back.
-                try {
-                  const zenProbe = ZEN_SCORING_MODELS[0]
-                  const probeResp = await fetch(`${zenBaseURL}/chat/completions`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${zenApiKey}` },
-                    body: JSON.stringify({ model: zenProbe, messages: [{ role: "user", content: "ping" }], max_tokens: 1 }),
-                    signal: AbortSignal.timeout(5000)
-                  })
-                  if (probeResp.ok) {
-                    scoringBroken = false
-                    debugLog(`session.idle: Zen probe succeeded (${zenProbe}) — scoringBroken reset, sidecar will handle next turn`)
-                  }
-                } catch {
-                  // Zen still down — model continues as scorer next turn
-                }
-              } else {
-                debugLog(`session.idle: Running sidecar for ${sid} (memories=${scoringData.memories?.length || 0}, broken=${scoringBroken})`)
-                try {
-                  const ok = await scoreExchangeViaLLM(sid, scoringData.userMessage, scoringData.exchange, scoringData.memories)
-                  if (!ok) {
-                    pendingScoring = { sessionId: sid, ...scoringData }
-                    debugLog(`session.idle: Sidecar failed — queued for deferred retry`)
-                  }
-                  // Note: if sidecar succeeds here while scoringBroken=true → scoringBroken resets
-                  // in scoreExchangeViaLLM success path. Auto-recovery complete.
-                } catch (err) {
+              debugLog(`session.idle: Running sidecar for ${sid} (memories=${scoringData.memories?.length || 0}, broken=${scoringBroken})`)
+              try {
+                const ok = await scoreExchangeViaLLM(sid, scoringData.userMessage, scoringData.exchange, scoringData.memories)
+                if (!ok) {
                   pendingScoring = { sessionId: sid, ...scoringData }
-                  debugLog(`session.idle: Sidecar error — queued for deferred retry: ${err}`)
+                  debugLog(`session.idle: Sidecar failed — queued for deferred retry`)
                 }
+              } catch (err) {
+                pendingScoring = { sessionId: sid, ...scoringData }
+                debugLog(`session.idle: Sidecar error — queued for deferred retry: ${err}`)
               }
             }
           }

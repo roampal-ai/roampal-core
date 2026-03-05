@@ -18,7 +18,7 @@ MCP TOOLS (available after setup):
 - add_to_memory_bank: Store permanent user facts
 - update_memory: Update existing memories
 - delete_memory: Delete outdated memories
-- score_memories: Score cached memories from previous context
+- score_memories: Score cached memories (Claude Code only; OpenCode uses sidecar)
 - record_response: Store key takeaways for learning
 
 CONTEXT INJECTION (automatic — no tool call needed):
@@ -154,9 +154,15 @@ _fastapi_process: Optional[subprocess.Popen] = None
 _dev_mode = False
 
 # v0.3.6: Platform detection — OpenCode sets ROAMPAL_PLATFORM=opencode via MCP env
-# v0.3.7: score_memories now always registered (plugin controls when model sees scoring prompt).
-# Variable kept for potential future platform-specific behavior.
 _is_opencode = os.environ.get("ROAMPAL_PLATFORM", "").lower() == "opencode"
+
+# v0.4.1: Hide score_memories tool when OpenCode sidecar is active.
+# The sidecar handles scoring silently. If score_memories is visible, the model
+# reads the tool description and calls it unprompted — causing double-scoring.
+# Only show the tool when sidecar is explicitly disabled (testing/fallback).
+_sidecar_disabled = os.environ.get("ROAMPAL_SIDECAR_DISABLED", "").lower() == "true"
+_hide_score_tool = _is_opencode and not _sidecar_disabled
+logger.info(f"Platform: opencode={_is_opencode}, sidecar_disabled={_sidecar_disabled}, hide_score_tool={_hide_score_tool}")
 
 # Cache for update check (only check once per session)
 _update_check_cache: Optional[tuple] = None
@@ -352,7 +358,7 @@ def _ensure_server_running(timeout: float = 5.0) -> bool:
         pass
 
     # Server not responding - try to restart it
-    logger.warning(f"FastAPI hook server not responding on port {port}, attempting restart...")
+    logger.info(f"Roampal server restarting on port {port}...")
     _fastapi_started = False
     _start_fastapi_server()
 
@@ -422,11 +428,8 @@ def run_mcp_server(dev: bool = False):
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
-        """List available MCP tools.
-
-        score_memories is always registered but OpenCode scoring is handled
-        entirely by the sidecar (scoreExchangeViaLLM in plugin).
-        """
+        """List available MCP tools."""
+        logger.info(f"list_tools called: hide_score_tool={_hide_score_tool}")
         tools = [
             types.Tool(
                 name="search_memory",
@@ -596,12 +599,12 @@ STORAGE DISCIPLINE:
             ),
         ]
 
-        # score_memories: always registered.
+        # score_memories: hidden on OpenCode when sidecar is active (prevents double-scoring).
         # Claude Code: model always scores (hook injects prompt every turn).
-        # OpenCode: sidecar scores silently when working. Plugin injects scoring prompt
-        #           into user message only when sidecar is broken (scoringBroken=true).
-        #           Tool is there as a fallback — plugin controls when model sees the prompt.
-        tools.append(types.Tool(
+        # OpenCode + sidecar disabled: model scores as fallback.
+        # OpenCode + sidecar active: sidecar scores silently, tool is hidden.
+        if not _hide_score_tool:
+            tools.append(types.Tool(
                 name="score_memories",
                 description="""Score individual cached memories from your previous context. ONLY use when the <roampal-score-required> hook prompt appears.
 
@@ -677,7 +680,7 @@ OPTIONAL - Only use for significant exchanges:
 Most routine exchanges don't need this - the transcript is enough.
 
 Key takeaways start at 0.7 (user explicitly asked to remember = higher confidence).
-Scoring happens via score_memories on the next turn: +0.2 worked, +0.05 partial, -0.3 failed.""",
+Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -0.3 failed.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -701,8 +704,13 @@ Scoring happens via score_memories on the next turn: +0.2 worked, +0.05 partial,
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         """Handle MCP tool calls — all proxied through FastAPI (v0.3.2)."""
-        # Ensure FastAPI hook server is healthy before any operation
-        _ensure_server_running(timeout=3.0)
+        # v0.4.1: Ensure FastAPI is healthy — bump timeout to 15s (parity with hooks/plugin)
+        # and check return value to avoid raw httpx errors
+        if not _ensure_server_running(timeout=15.0):
+            return [types.TextContent(
+                type="text",
+                text="Roampal server is restarting. Please try again in a few seconds."
+            )]
 
         try:
             if name == "search_memory":

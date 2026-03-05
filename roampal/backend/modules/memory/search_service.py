@@ -1,11 +1,10 @@
 """
-Search Service - Unified search with hybrid ranking and cross-encoder reranking.
+Search Service - Unified search with hybrid ranking.
 
 Extracted from UnifiedMemorySystem as part of refactoring.
 
 Responsibilities:
 - Main search with hybrid ranking (vector + BM25)
-- Cross-encoder reranking (optional)
 - Entity boost calculation
 - Result scoring and ranking
 - Document effectiveness tracking
@@ -37,7 +36,6 @@ class SearchService:
     - KG-based intelligent routing
     - Vector similarity search with BM25 fusion
     - Wilson score learning-aware ranking
-    - Cross-encoder reranking (optional)
     - Entity boost from Content KG
     """
 
@@ -49,7 +47,6 @@ class SearchService:
         kg_service: KnowledgeGraphService,
         embed_fn: Callable[[str], Any],  # Async function to embed text
         config: Optional[MemoryConfig] = None,
-        reranker: Optional[Any] = None,  # CrossEncoder instance
     ):
         """
         Initialize SearchService.
@@ -61,7 +58,6 @@ class SearchService:
             kg_service: KnowledgeGraphService for KG operations
             embed_fn: Async function to generate embeddings
             config: Optional MemoryConfig
-            reranker: Optional CrossEncoder for reranking
         """
         self.collections = collections
         self.scoring_service = scoring_service
@@ -69,7 +65,6 @@ class SearchService:
         self.kg_service = kg_service
         self.embed_fn = embed_fn
         self.config = config or MemoryConfig()
-        self.reranker = reranker
 
         # Cache for doc_ids per session (for outcome scoring)
         self._cached_doc_ids: Dict[str, List[str]] = {}
@@ -258,9 +253,7 @@ class SearchService:
         # Apply scoring and ranking
         all_results = self.scoring_service.apply_scoring_to_results(all_results)
 
-        # Cross-encoder reranking
-        if self.reranker and len(all_results) > limit * 2:
-            all_results = await self._rerank_with_cross_encoder(query, all_results, limit)
+        # v0.4.1: Cross-encoder reranking removed — Wilson scoring is the reranker (since v0.3.7)
 
         # Track usage for KG learning
         paginated_results = all_results[offset:offset + limit]
@@ -298,7 +291,8 @@ class SearchService:
             try:
                 adapter = self.collections[coll_name]
                 collection_obj = adapter.collection
-                items = collection_obj.get(limit=100000)
+                # v0.4.1: Cap at 1000 per collection (was 100000 — wasteful for 5-20 result queries)
+                items = collection_obj.get(limit=1000)
 
                 for i in range(len(items['ids'])):
                     metadata = items['metadatas'][i] if i < len(items['metadatas']) else {}
@@ -584,92 +578,6 @@ class SearchService:
             "total_uses": total,
             "success_rate": (successes + partials * 0.5) / total
         }
-
-    # =========================================================================
-    # Cross-Encoder Reranking
-    # =========================================================================
-
-    async def _rerank_with_cross_encoder(
-        self,
-        query: str,
-        candidates: List[Dict],
-        top_k: int
-    ) -> List[Dict]:
-        """
-        Rerank top candidates with cross-encoder for precision.
-
-        Returns:
-            Reranked results with cross-encoder scores
-        """
-        if not self.reranker:
-            return candidates
-
-        try:
-            # Take top-30 candidates for reranking
-            top_candidates = sorted(
-                candidates,
-                key=lambda x: x.get("final_rank_score", 0.0),
-                reverse=True
-            )[:30]
-
-            # Prepare query-document pairs
-            pairs = []
-            for candidate in top_candidates:
-                doc_text = candidate.get("text", "")
-                if not doc_text and candidate.get("metadata"):
-                    doc_text = candidate.get("metadata", {}).get("content", "")
-                pairs.append([query, doc_text[:512]])
-
-            # Score with cross-encoder
-            ce_scores = self.reranker.predict(pairs, batch_size=32, show_progress_bar=False)
-
-            # Blend scores
-            # v0.3.2: CE weight drops to 0 for scored memories (uses >= 3).
-            # Wilson has real outcome data at that point — don't let semantic
-            # similarity undercut learned rankings. CE only helps cold-start.
-            for i, candidate in enumerate(top_candidates):
-                ce_score = float(ce_scores[i])
-                candidate["ce_score"] = ce_score
-                original_score = candidate.get("final_rank_score", 0.5)
-
-                metadata = candidate.get("metadata", {})
-                uses = int(metadata.get("uses", 0))
-                collection = candidate.get("collection", "")
-
-                # Scored memories: skip CE blending, preserve Wilson ranking
-                if uses >= 3:
-                    candidate["final_rank_score"] = original_score
-                    continue
-
-                # Cold-start memories: CE is valuable, blend it in
-                if collection == "memory_bank":
-                    importance = self._parse_numeric(metadata.get("importance", 0.7))
-                    confidence = self._parse_numeric(metadata.get("confidence", 0.7))
-                    quality = importance * confidence
-
-                    ce_norm = (ce_score + 1) / 2
-                    ce_weight = 0.3
-                    quality_boost = 1.0 + quality * 0.3
-                    blended = ((1 - ce_weight) * original_score + ce_weight * ce_norm) * quality_boost
-                else:
-                    ce_norm = (ce_score + 1) / 2
-                    ce_weight = 0.4
-                    blended = (1 - ce_weight) * original_score + ce_weight * ce_norm
-
-                candidate["final_rank_score"] = blended
-
-            # Re-sort by updated score
-            top_candidates.sort(key=lambda x: x.get("final_rank_score", 0.0), reverse=True)
-
-            # Merge back: use reranked top + remaining
-            top_ids = {c.get("id") for c in top_candidates}
-            remaining = [c for c in candidates if c.get("id") not in top_ids]
-
-            return top_candidates + remaining
-
-        except Exception as e:
-            logger.error(f"Cross-encoder reranking failed: {e}")
-            return candidates
 
     # =========================================================================
     # Tracking and Caching

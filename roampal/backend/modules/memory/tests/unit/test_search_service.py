@@ -54,11 +54,7 @@ class TestSearchServiceInit:
         assert service.routing_service == mock_dependencies["routing_service"]
         assert service.kg_service == mock_dependencies["kg_service"]
 
-    def test_init_with_optional_reranker(self, mock_dependencies):
-        """Should accept optional reranker."""
-        mock_reranker = MagicMock()
-        service = SearchService(**mock_dependencies, reranker=mock_reranker)
-        assert service.reranker == mock_reranker
+    # v0.4.1: test_init_with_optional_reranker removed — cross-encoder code cleaned up
 
 
 class TestMainSearch:

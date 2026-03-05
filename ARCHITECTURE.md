@@ -24,7 +24,7 @@ roampal init --opencode   # Or configure explicitly
 │  UnifiedMemorySystem → ChromaDB    Hook endpoints                │
 │  ScoringService, SearchService     /api/hooks/get-context        │
 │  KnowledgeGraphService             /api/hooks/stop               │
-│  Cross-encoder (optional)          /api/record-outcome           │
+│                                    /api/record-outcome           │
 │                                    /api/search, etc.             │
 └──────────────────────────────────────────────────────────────────┘
         ▲                    ▲                    ▲
@@ -66,7 +66,7 @@ This distinction prevents forcing the LLM to score when the user is just providi
 │    - If interrupted mid-work: skip scoring                   │
 │    - KG-ROUTED UNIFIED SEARCH:                               │
 │      → Extract concepts from user message                    │
-│      → Hybrid search (vector + BM25) + cross-encoder rerank │
+│      → Hybrid search (vector + BM25) + Wilson scoring       │
 │      → 4 slots: reserved working + reserved history          │
 │        + 2 best from all collections (Wilson-ranked)         │
 │      → Cache doc_ids for scoring                             │
@@ -171,7 +171,7 @@ roampal-core/
 │   │           ├── unified_memory_system.py # Main orchestrator
 │   │           ├── chromadb_adapter.py      # Vector storage
 │   │           ├── embedding_service.py     # sentence-transformers
-│   │           ├── search_service.py        # Hybrid search + cross-encoder reranking
+│   │           ├── search_service.py        # Hybrid search + Wilson scoring
 │   │           ├── scoring_service.py       # Wilson score calculation
 │   │           ├── routing_service.py       # KG-based collection routing
 │   │           ├── knowledge_graph_service.py # Dual KG system
@@ -189,7 +189,7 @@ roampal-core/
 │   │
 │   ├── mcp/
 │   │   ├── __init__.py
-│   │   └── server.py         # MCP server — thin HTTP client (6 tools)
+│   │   └── server.py         # MCP server — thin HTTP client
 │   │
 │   ├── hooks/
 │   │   ├── __init__.py
@@ -263,7 +263,7 @@ working → history → patterns
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/search` | POST | Hybrid search (vector + BM25 + cross-encoder reranking) across collections. Supports `metadata_filters` and `sort_by`. |
+| `/api/search` | POST | Hybrid search (vector + BM25 + Wilson scoring) across collections. Supports `metadata_filters` and `sort_by`. |
 | `/api/memory-bank/add` | POST | Add to memory bank (supports `always_inject` flag) |
 | `/api/memory-bank/update` | POST | Update memory bank entry |
 | `/api/memory-bank/archive` | POST | Archive memory bank entry |
@@ -279,7 +279,7 @@ working → history → patterns
 
 ## MCP Tools
 
-The MCP server provides 6 tools for deep memory access:
+The MCP server provides these tools for deep memory access:
 
 | Tool | Description | Platforms |
 |------|-------------|-----------|
@@ -287,12 +287,12 @@ The MCP server provides 6 tools for deep memory access:
 | `add_to_memory_bank` | Store permanent user facts | Both |
 | `update_memory` | Update existing memories | Both |
 | `delete_memory` | Delete outdated memories | Both |
-| `score_memories` | Score the previous exchange (worked/failed/partial/unknown) | Both (see below) |
+| `score_memories` | Score the previous exchange (worked/failed/partial/unknown) | Claude Code |
 | `record_response` | Store key takeaways when transcript won't capture learning | Both |
 
 > **Scoring workflow differs by platform:**
 > - **Claude Code:** Hooks inject a scoring prompt every turn. The main LLM calls `score_memories` as part of its response. This is soft-enforced via the prompt.
-> - **OpenCode:** An independent sidecar scores silently in the background. The main LLM never sees a scoring prompt and never calls `score_memories`. The tool is registered but only invoked if the sidecar breaks.
+> - **OpenCode:** An independent sidecar scores silently in the background. The main LLM never sees a scoring prompt and `score_memories` is not registered as a tool. If the sidecar is unavailable, scoring is paused and a warning prompts the user to run `roampal sidecar setup`.
 
 ### Recommended Workflow (Claude Code)
 
@@ -303,7 +303,7 @@ The MCP server provides 6 tools for deep memory access:
 4. record_response(key_takeaway) → OPTIONAL, only for significant learnings
 ```
 
-### score_memories (Claude Code: Soft Enforced / OpenCode: Sidecar)
+### score_memories (Claude Code only — OpenCode uses sidecar)
 
 ```json
 {
@@ -808,7 +808,7 @@ All three entry points (hooks, MCP, plugin) auto-recover if the FastAPI server g
 | Entry Point | Recovery Method |
 |-------------|----------------|
 | Python hooks (`user_prompt_submit_hook`, `stop_hook`) | `_restart_server()` — kills stale port process, spawns fresh server, polls `/api/health` for 15s, retries |
-| MCP server (`server.py`) | `_ensure_server_running()` — health check before every tool call, auto-restart with 3s timeout |
+| MCP server (`server.py`) | `_ensure_server_running()` — health check before every tool call, auto-restart with 15s timeout |
 | OpenCode plugin (`roampal.ts`) | `restartServer()` — same kill/spawn/poll pattern, `_restartInProgress` guard prevents concurrent restarts |
 
 The `user_prompt_submit_hook` / `chat.message` fires first every turn — if the server is down, it recovers before context injection.
@@ -820,13 +820,12 @@ The `user_prompt_submit_hook` / `chat.message` fires first every turn — if the
 The `search()` method delegates to `SearchService` which provides a full retrieval pipeline:
 
 1. **Hybrid search**: Vector similarity + BM25 keyword matching with Reciprocal Rank Fusion
-2. **Cross-encoder reranking**: Top-30 candidates re-scored by `ms-marco-MiniLM-L-6-v2` (optional — graceful fallback if unavailable)
-3. **Wilson scoring**: Confidence intervals with dynamic weight shifts (NEW → EMERGING → ESTABLISHED → PROVEN)
-4. **Collection-specific boosts**: patterns priority, memory_bank 80/20 quality+Wilson blend (after 3 uses), books recency
-5. **Entity boost**: Content KG quality-weighted entity matching
-6. **KG routing**: Intelligent collection selection when no collections specified
+2. **Wilson scoring**: Confidence intervals with dynamic weight shifts (NEW → EMERGING → ESTABLISHED → PROVEN)
+3. **Collection-specific boosts**: patterns priority, memory_bank 80/20 quality+Wilson blend (after 3 uses), books recency
+4. **Entity boost**: Content KG quality-weighted entity matching
+5. **KG routing**: Intelligent collection selection when no collections specified
 
-Falls back to inline vector + Wilson scoring if SearchService fails or isn't initialized.
+Falls back to inline vector search + Wilson scoring if SearchService fails or isn't initialized.
 
 ---
 

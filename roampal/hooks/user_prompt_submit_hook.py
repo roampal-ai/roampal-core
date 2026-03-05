@@ -72,7 +72,7 @@ def _restart_server(server_url: str, port: int, timeout: float = 15.0) -> bool:
                             ["taskkill", "/pid", pid, "/f"],
                             capture_output=True, timeout=5
                         )
-                        print(f"Roampal: killed stale server process {pid}", file=sys.stderr)
+                        print(f"Roampal: restarting server...", file=sys.stderr)
                     break
         else:
             # Unix: lsof + kill
@@ -83,7 +83,7 @@ def _restart_server(server_url: str, port: int, timeout: float = 15.0) -> bool:
                 pid = result.stdout.strip().split('\n')[0]
                 if pid.isdigit():
                     subprocess.run(["kill", "-9", pid], capture_output=True, timeout=5)
-                    print(f"Roampal: killed stale server process {pid}", file=sys.stderr)
+                    print(f"Roampal: restarting server...", file=sys.stderr)
     except Exception:
         pass  # Best effort — if we can't kill, the new server will fail to bind and we'll exit
 
@@ -235,8 +235,7 @@ def main():
         is_down = isinstance(e, urllib.error.URLError)
 
         if is_503 or is_down:
-            reason = "unhealthy (embedding corruption)" if is_503 else "unavailable"
-            print(f"Roampal server {reason}, attempting restart...", file=sys.stderr)
+            print(f"Roampal: server restarting, please wait...", file=sys.stderr)
 
             if _restart_server(server_url, default_port):
                 # Retry the original request
