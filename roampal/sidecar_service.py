@@ -4,8 +4,8 @@ Sidecar Service — Cheap LLM for exchange summarization + scoring.
 v0.3.6: Auto-detects best backend:
   1. ANTHROPIC_API_KEY set → direct Haiku API (~3s, ~$0.001/call)
   2. No API key → Zen free models (~5s, $0) — same as OpenCode sidecar
-  3. Zen unavailable → Ollama local (if running)
-  4. Nothing works → claude -p fallback (slow, ~30-60s)
+  3. Zen unavailable → Ollama / LM Studio local (if running)
+  4. Nothing works → fails gracefully (no silent subprocess spawning)
 
 Two operations:
 1. summarize_and_score() — Summarize exchange + score outcome (used by stop hook)
@@ -16,9 +16,6 @@ import json
 import logging
 import os
 import re
-import shutil
-import subprocess
-import sys
 import urllib.request
 import urllib.error
 from typing import Optional, Dict, Any, List
@@ -367,72 +364,6 @@ def _call_lmstudio(prompt: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Backend 4: claude -p fallback (slow, but works with any Claude Code auth)
-# ---------------------------------------------------------------------------
-
-def _call_claude(prompt: str, timeout: int = 60) -> Optional[Dict[str, Any]]:
-    """
-    Call Haiku via claude CLI. Slow (~30-60s) but works with any auth.
-    Last resort fallback.
-    """
-    claude_path = shutil.which("claude")
-    if not claude_path:
-        logger.debug("claude CLI not found in PATH")
-        return None
-
-    cmd = [
-        claude_path, "-p",
-        "--model", "haiku",
-        "--output-format", "json",
-        "--max-turns", "1",
-        "--max-budget-usd", "0.05",
-    ]
-
-    try:
-        result = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            shell=(sys.platform == "win32"),
-        )
-
-        if result.returncode != 0:
-            logger.warning(f"Claude CLI error (exit {result.returncode}): {result.stderr[:200]}")
-            return None
-
-        output = result.stdout.strip()
-        if not output:
-            logger.warning("Claude CLI returned empty output")
-            return None
-
-        envelope = _extract_json(output)
-        if envelope and isinstance(envelope, dict) and "result" in envelope:
-            inner = envelope["result"]
-            if isinstance(inner, str):
-                parsed = _extract_json(inner)
-                if parsed:
-                    return parsed
-            elif isinstance(inner, dict):
-                return inner
-
-        if envelope:
-            return envelope
-
-        logger.warning(f"Could not parse Claude CLI output: {output[:200]}")
-        return None
-
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Claude CLI timed out after {timeout}s")
-        return None
-    except FileNotFoundError:
-        return None
-    except Exception as e:
-        logger.warning(f"Claude CLI failed: {e}")
-        return None
-
 
 # ---------------------------------------------------------------------------
 # Unified call — tries backends in order
@@ -447,7 +378,6 @@ def _call_llm(prompt: str) -> Optional[Dict[str, Any]]:
     1. ANTHROPIC_API_KEY → direct Haiku API (~3s, ~$0.001)
     2. Zen free models (~5s, $0)
     3. Ollama / LM Studio local (~5-14s, $0)
-    4. claude -p CLI (~30-60s, uses existing auth)
     """
     # 0. Custom endpoint (user-configured — takes priority over everything)
     result = _call_custom(prompt)
@@ -466,11 +396,6 @@ def _call_llm(prompt: str) -> Optional[Dict[str, Any]]:
 
     # 3. Ollama / LM Studio local (free, no network)
     result = _call_local(prompt)
-    if result:
-        return result
-
-    # 4. claude -p (last resort)
-    result = _call_claude(prompt)
     if result:
         return result
 
@@ -520,8 +445,6 @@ def get_backend_info() -> str:
                 return f"LM Studio ({models[0]})"
     except Exception:
         pass
-    if shutil.which("claude"):
-        return "claude -p (slow)"
     return "none available"
 
 
