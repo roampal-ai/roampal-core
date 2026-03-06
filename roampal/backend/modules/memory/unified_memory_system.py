@@ -1040,9 +1040,9 @@ class UnifiedMemorySystem:
             if (m.get("content") or m.get("text")) and m.get("id") not in reserved_ids
         ]
 
-        # 7. Combine: 1 working + 1 history + top 2 best matches = 4 total
-        #    If no history match found, the slot falls through to best matches
-        top_memories = reserved_working + reserved_history + valid_results[:2]
+        # 7. Combine: 1 working + 1 history + backfill from best matches = 4 total
+        reserved = reserved_working + reserved_history
+        top_memories = reserved + valid_results[:4 - len(reserved)]
 
         # 8. Enrich with Action KG effectiveness stats
         for mem in top_memories:
