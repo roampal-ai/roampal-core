@@ -136,7 +136,8 @@ def check_for_updates_cached() -> tuple:
                 _update_check_cache["latest"])
 
     try:
-        from roampal import __version__
+        from importlib.metadata import version as _pkg_version
+        __version__ = _pkg_version("roampal")
 
         url = "https://pypi.org/pypi/roampal/json"
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -207,7 +208,7 @@ def main():
             method="POST"
         )
 
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:
             result = json.loads(response.read().decode("utf-8"))
 
         # Get the formatted injection
@@ -246,7 +247,7 @@ def main():
                         headers={"Content-Type": "application/json"},
                         method="POST"
                     )
-                    with urllib.request.urlopen(retry_req, timeout=5) as response:
+                    with urllib.request.urlopen(retry_req, timeout=10) as response:
                         result = json.loads(response.read().decode("utf-8"))
 
                     formatted_injection = result.get("formatted_injection", "")

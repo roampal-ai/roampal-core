@@ -185,7 +185,8 @@ def _check_for_updates() -> tuple:
 
     try:
         import urllib.request
-        from roampal import __version__
+        from importlib.metadata import version as _pkg_version
+        __version__ = _pkg_version("roampal")
 
         url = "https://pypi.org/pypi/roampal/json"
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -204,7 +205,8 @@ def _check_for_updates() -> tuple:
     except Exception:
         # Fail silently - don't block on network issues
         try:
-            from roampal import __version__
+            from importlib.metadata import version as _pkg_version
+            __version__ = _pkg_version("roampal")
             _update_check_cache = (False, __version__, __version__)
         except Exception:
             _update_check_cache = (False, "unknown", "unknown")

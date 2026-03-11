@@ -42,19 +42,36 @@ class EmbeddingService:
         """
         self.model_name = model_name
         self._model: Optional[SentenceTransformer] = None
+        self._backend: str = "unknown"
+        # v0.4.2: Cache recent embeddings to avoid re-encoding the same query
+        # get_context_for_injection calls search() 3x with the same query,
+        # each generating an embedding. Without cache, 3 sequential CPU-bound
+        # encode calls can exceed the hook's 5s timeout.
+        self._embed_cache: dict[str, List[float]] = {}
+        self._embed_cache_max = 32
 
     @property
     def model(self):
-        """Lazy-load model on first use."""
+        """Lazy-load model on first use. Tries ONNX backend first, falls back to PyTorch."""
         if self._model is None:
             if not EMBEDDING_AVAILABLE:
                 raise ImportError(
                     "sentence-transformers not installed. "
                     "Run: pip install sentence-transformers"
                 )
-            logger.info(f"Loading embedding model: {self.model_name}")
-            self._model = SentenceTransformer(self.model_name)
-            logger.info(f"Embedding model loaded: {self.model_name}")
+            # v0.4.2: Try ONNX backend first (faster inference, lower RAM)
+            # Requires: pip install roampal[onnx]
+            try:
+                import onnxruntime  # noqa: F401
+                logger.info(f"Loading embedding model (ONNX): {self.model_name}")
+                self._model = SentenceTransformer(self.model_name, backend="onnx")
+                self._backend = "onnx"
+                logger.info(f"Embedding model loaded (ONNX): {self.model_name}")
+            except Exception as e:
+                logger.info(f"ONNX backend unavailable ({e}), using PyTorch")
+                self._model = SentenceTransformer(self.model_name)
+                self._backend = "pytorch"
+                logger.info(f"Embedding model loaded (PyTorch): {self.model_name}")
         return self._model
 
     async def embed_text(self, text: str) -> List[float]:
@@ -72,9 +89,22 @@ class EmbeddingService:
             # Return zero vector of appropriate dimension
             return [0.0] * 768  # paraphrase-multilingual-mpnet-base-v2 dimension
 
+        # v0.4.2: Return cached embedding if available
+        if text in self._embed_cache:
+            return self._embed_cache[text]
+
         # v0.4.1: Run CPU-bound encode in thread to avoid blocking asyncio event loop
         embedding = await asyncio.to_thread(self.model.encode, text, convert_to_numpy=True)
-        return embedding.tolist()
+        result = embedding.tolist()
+
+        # Cache the result (evict oldest if full)
+        if len(self._embed_cache) >= self._embed_cache_max:
+            # Remove first (oldest) entry
+            oldest_key = next(iter(self._embed_cache))
+            del self._embed_cache[oldest_key]
+        self._embed_cache[text] = result
+
+        return result
 
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:
         """

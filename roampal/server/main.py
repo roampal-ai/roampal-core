@@ -49,7 +49,8 @@ from pydantic import BaseModel, Field
 import uvicorn
 
 # Import memory system and session manager
-from roampal import __version__
+from importlib.metadata import version as _pkg_version
+__version__ = _pkg_version("roampal")
 from roampal.backend.modules.memory import UnifiedMemorySystem
 from roampal.backend.modules.memory.scoring_service import wilson_score_lower
 from roampal.backend.modules.memory.unified_memory_system import ActionOutcome
@@ -145,24 +146,26 @@ def _first_sentence(text: str, max_chars: int = 300) -> str:
 
 
 def _get_installed_version() -> str:
-    """Read the installed version from disk, bypassing Python's module cache.
+    """Get the installed version from pip package metadata.
 
-    In a long-running server, `from roampal import __version__` returns the
-    value loaded at startup. If the user upgrades roampal without restarting
-    the server, the cached import stays stale. Reading __init__.py directly
-    picks up the new version.
+    Uses importlib.metadata which reads pip metadata directly — always correct
+    regardless of namespace conflicts (e.g., roampal-cli co-installed).
+    Falls back to reading __init__.py from disk for long-running server upgrades.
     """
+    try:
+        from importlib.metadata import version as _pkg_ver
+        return _pkg_ver("roampal")
+    except Exception:
+        pass
+    # Fallback: read __init__.py from disk (handles mid-session pip upgrades)
     try:
         init_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "__init__.py")
         with open(init_path, "r") as f:
             for line in f:
                 if line.startswith("__version__"):
-                    # Parse: __version__ = "0.3.7"
                     return line.split("=", 1)[1].strip().strip("\"'")
     except Exception:
         pass
-    # Fallback to cached import
-    from roampal import __version__
     return __version__
 
 
