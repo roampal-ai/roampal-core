@@ -912,23 +912,28 @@ def configure_opencode(is_dev: bool = False, force: bool = False):
             existing_mcp = config.get("mcp", {}).get("roampal-core", {})
 
             if existing_mcp:
-                # Check if config matches
+                # Check if roampal's base config matches (ignore sidecar vars)
                 existing_cmd = existing_mcp.get("command", [])
                 existing_env = existing_mcp.get("environment", {})
+                # v0.4.2.2: Compare only roampal base keys, not sidecar vars
+                base_keys_match = all(
+                    existing_env.get(k) == v for k, v in expected_env.items()
+                )
 
-                if (existing_cmd == roampal_mcp_config["command"] and
-                    existing_env == expected_env):
+                if (existing_cmd == roampal_mcp_config["command"] and base_keys_match):
                     print(f"  {GREEN}[OK] roampal-core MCP already configured correctly{RESET}")
                     mcp_needs_write = False
-                else:
-                    # v0.4.2.1: Always update roampal-owned MCP config when it differs
-                    pass  # mcp_needs_write stays True, update applied below
+                # else: mcp_needs_write stays True, update applied below
         except Exception as e:
             logger.warning(f"Failed to parse existing opencode.json: {e}")
 
     if mcp_needs_write:
         if "mcp" not in config:
             config["mcp"] = {}
+        # v0.4.2.1: Merge environment — preserve sidecar vars (ROAMPAL_SIDECAR_*)
+        existing_mcp_env = config.get("mcp", {}).get("roampal-core", {}).get("environment", {})
+        merged_env = {**existing_mcp_env, **expected_env}
+        roampal_mcp_config["environment"] = merged_env
         config["mcp"]["roampal-core"] = roampal_mcp_config
         config_file.write_text(json.dumps(config, indent=2))
         print(f"  {GREEN}Created MCP config: {config_file}{RESET}")
