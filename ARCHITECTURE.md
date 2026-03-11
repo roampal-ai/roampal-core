@@ -34,7 +34,7 @@ roampal init --opencode   # Or configure explicitly
   OpenCode MCP         hook subprocesses   TypeScript plugin
 ```
 
-**Architecture (v0.4.0):** MCP servers are thin HTTP clients — no ChromaDB, PyTorch, or sentence-transformers in the MCP process. All access is serialized through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running.
+**Architecture (v0.4.2):** MCP servers are thin HTTP clients — no ChromaDB, PyTorch, or sentence-transformers in the MCP process. All access is serialized through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running.
 
 `roampal start` is available for standalone use (e.g., OpenCode-only setups where no MCP auto-starts the server).
 
@@ -787,7 +787,7 @@ All content is stored and returned in full - no character limits or truncation:
 [project]
 dependencies = [
     "chromadb>=1.0.0,<2.0.0",
-    "sentence-transformers>=2.2.0",
+    "sentence-transformers>=3.2.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.22.0",
     "mcp>=1.0.0,<2.0.0",
@@ -796,7 +796,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-hybrid = ["rank-bm25>=0.2.0"]
+onnx = ["onnxruntime>=1.14.0", "optimum>=1.14.0"]
+dev = ["pytest>=7.0.0", "pytest-asyncio>=0.21.0", "mypy>=1.0.0"]
 ```
 
 ---

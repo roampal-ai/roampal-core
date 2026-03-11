@@ -77,6 +77,12 @@ const assistantMessageIds = new Map<string, Set<string>>()
 // Map<sessionID, Map<partID, fullText>>
 const assistantTextParts = new Map<string, Map<string, string>>()
 
+// v0.4.2: Debounce session.idle to avoid acting on subagent completions.
+// OpenCode fires session.idle when subagents finish (issue #13334), which can
+// store incomplete exchanges and corrupt the scoring loop. Debounce waits 1.5s
+// after idle fires; if new text parts arrive, the timer resets.
+const idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
 // v0.3.7: mainLLMScored removed — sidecar is sole scorer in OpenCode
 
 // v0.3.7: pendingScoringPrompt removed — scoring prompt injected via system.transform when sidecar broken
@@ -1329,6 +1335,77 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
     },
 
     // ========================================================================
+    // Hook 2c: Inject recent exchanges into compaction prompt
+    //
+    // v0.4.2: Moved from event switch to top-level hook. The SDK defines
+    // experimental.session.compacting as a top-level hook with (input, output)
+    // signature, NOT an event. Fires BEFORE compaction so injected context
+    // is included in the model's compacted summary.
+    // ========================================================================
+    "experimental.session.compacting": async (
+      input: { sessionID?: string },
+      output: { context?: string[]; prompt?: string }
+    ) => {
+      const sid = input.sessionID
+      if (!sid) return
+      debugLog(`experimental.session.compacting: Injecting recent exchanges into compaction for ${sid}`)
+      try {
+        const recentResp = await fetch(`${ROAMPAL_API_URL}/search`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query: "recent exchange",
+            collections: ["working"],
+            limit: 4,
+            sort_by: "recency",
+            metadata_filters: { memory_type: "exchange_summary" }
+          }),
+          signal: AbortSignal.timeout(5000)
+        })
+        if (recentResp.ok) {
+          const data = await recentResp.json() as { results: Array<{ text?: string; content?: string; metadata: { recency?: string; text?: string; content?: string } }> }
+          if (data.results?.length > 0) {
+            const recentText = data.results
+              .map((r, i) => {
+                const body = r.text || r.content || r.metadata?.text || r.metadata?.content || ""
+                return `${i + 1}. ${r.metadata?.recency ? `[${r.metadata.recency}] ` : ""}${body.slice(0, 200)}`
+              })
+              .join("\n")
+            if (output.context && Array.isArray(output.context)) {
+              output.context.push(`<recent-exchanges>\n${recentText}\n</recent-exchanges>`)
+              debugLog(`experimental.session.compacting: Injected ${data.results.length} recent exchanges`)
+            }
+          }
+        }
+      } catch (err) {
+        debugLog(`experimental.session.compacting: Failed to fetch recent exchanges: ${err}`)
+      }
+    },
+
+    // ========================================================================
+    // Hook 2d: Detect MCP score_memories tool completion
+    //
+    // v0.4.2: Replaces HTTP round-trip (GET /api/hooks/check-scored) with
+    // in-plugin detection. When score_memories fires, set scoredThisTurn so
+    // sidecar doesn't double-score on session.idle.
+    // ========================================================================
+    "tool.execute.after": async (
+      input: { tool?: string; sessionID?: string; callID?: string },
+      output: { title?: string; output?: string; metadata?: any }
+    ) => {
+      const toolName = input.tool || ""
+      if (toolName.includes("score_memories") || toolName.includes("score_response")) {
+        const sid = input.sessionID || ""
+        debugLog(`tool.execute.after: Detected scoring tool (${toolName}) for session ${sid}`)
+        // Clear pending scoring data — main LLM already scored this exchange
+        if (sid && pendingScoringData.has(sid)) {
+          pendingScoringData.delete(sid)
+          debugLog(`tool.execute.after: Cleared pending sidecar scoring for ${sid} (main LLM scored)`)
+        }
+      }
+    },
+
+    // ========================================================================
     // Hook 3: Handle session lifecycle and message events
     //
     // OpenCode event structure (v1.1.42+):
@@ -1384,6 +1461,12 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
 
           const sid = part.sessionID
 
+          // v0.4.2: Cancel pending idle timer — still receiving parts, not truly idle
+          if (idleTimers.has(sid)) {
+            clearTimeout(idleTimers.get(sid))
+            idleTimers.delete(sid)
+          }
+
           // v0.3.7: score_memories detection removed — sidecar is sole scorer
 
           // Collect text content from assistant message parts
@@ -1409,85 +1492,92 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
         }
 
         case "session.idle": {
-          // Agent finished responding — store exchange + run deferred sidecar scoring
+          // v0.4.2: Debounce idle to avoid acting on subagent completions (OpenCode #13334).
+          // If text parts are still arriving, the timer gets cancelled in message.part.updated.
           const sid = event.properties?.sessionID
           if (!sid) break
 
-          const ctx = sessionContextMap.get(sid)
-          const textParts = assistantTextParts.get(sid)
-
-          debugLog(`session.idle: sid=${sid}, userPrompt=${!!ctx?.userPrompt}, textParts=${textParts?.size || 0}`)
-
-          if (ctx?.userPrompt && textParts?.size) {
-            const assistantText = Array.from(textParts.values()).join("\n")
-            await storeExchange(sid, ctx.userPrompt, assistantText)
-            debugLog(`Stored exchange for session ${sid}`)
-
-            // Reset for next exchange
-            ctx.userPrompt = ""
+          // Cancel any existing timer for this session
+          if (idleTimers.has(sid)) {
+            clearTimeout(idleTimers.get(sid))
           }
 
-          // Retry deferred scoring from previous failures FIRST (before current scoring).
-          // This ensures failed scoring from exchange N-1 gets retried when exchange N completes.
-          if (pendingScoring && !SIDECAR_DISABLED) {
-            debugLog(`session.idle: Retrying deferred scoring for ${pendingScoring.sessionId}`)
-            try {
-              const ok = await scoreExchangeViaLLM(pendingScoring.sessionId, pendingScoring.userMessage, pendingScoring.exchange, pendingScoring.memories)
-              if (ok) {
-                debugLog(`session.idle: Deferred scoring succeeded`)
-                pendingScoring = null
-              } else {
-                // Two consecutive scoring failures — all models exhausted twice.
-                // Set scoringBroken so next system.transform injects visible warning into context.
-                scoringBroken = true
-                console.warn("[roampal] Memory scoring failed twice in a row — check ROAMPAL_SIDECAR_URL/KEY/MODEL or Zen availability")
-                debugLog(`session.idle: Deferred scoring also failed — scoringBroken=true, dropping payload`)
-                pendingScoring = null
-              }
-            } catch (err) {
-              scoringBroken = true
-              console.warn("[roampal] Memory scoring failed twice in a row — check ROAMPAL_SIDECAR_URL/KEY/MODEL or Zen availability")
-              debugLog(`session.idle: Deferred scoring error — scoringBroken=true, dropping payload: ${err}`)
-              pendingScoring = null
+          debugLog(`session.idle: sid=${sid}, debouncing 1.5s`)
+
+          idleTimers.set(sid, setTimeout(async () => {
+            idleTimers.delete(sid)
+
+            const ctx = sessionContextMap.get(sid)
+            const textParts = assistantTextParts.get(sid)
+
+            debugLog(`session.idle (debounced): sid=${sid}, userPrompt=${!!ctx?.userPrompt}, textParts=${textParts?.size || 0}`)
+
+            if (ctx?.userPrompt && textParts?.size) {
+              const assistantText = Array.from(textParts.values()).join("\n")
+              await storeExchange(sid, ctx.userPrompt, assistantText)
+              debugLog(`Stored exchange for session ${sid}`)
+
+              // Reset for next exchange
+              ctx.userPrompt = ""
             }
-          }
 
-          // v0.4.1: Sidecar is the sole scorer on OpenCode. No main LLM fallback.
-          // score_memories tool is hidden from MCP tool list.
-          const scoringData = pendingScoringData.get(sid)
-          if (scoringData) {
-            pendingScoringData.delete(sid)
-
-            // ROAMPAL_SIDECAR_DISABLED: skip sidecar entirely (testing mode)
-            if (SIDECAR_DISABLED) {
-              debugLog(`session.idle: Sidecar DISABLED (testing) — skipping scoring entirely`)
-            } else {
-              debugLog(`session.idle: Running sidecar for ${sid} (memories=${scoringData.memories?.length || 0}, broken=${scoringBroken})`)
+            // Retry deferred scoring from previous failures FIRST (before current scoring).
+            // This ensures failed scoring from exchange N-1 gets retried when exchange N completes.
+            if (pendingScoring && !SIDECAR_DISABLED) {
+              debugLog(`session.idle: Retrying deferred scoring for ${pendingScoring.sessionId}`)
               try {
-                const ok = await scoreExchangeViaLLM(sid, scoringData.userMessage, scoringData.exchange, scoringData.memories)
-                if (!ok) {
-                  pendingScoring = { sessionId: sid, ...scoringData }
-                  debugLog(`session.idle: Sidecar failed — queued for deferred retry`)
+                const ok = await scoreExchangeViaLLM(pendingScoring.sessionId, pendingScoring.userMessage, pendingScoring.exchange, pendingScoring.memories)
+                if (ok) {
+                  debugLog(`session.idle: Deferred scoring succeeded`)
+                  pendingScoring = null
+                } else {
+                  scoringBroken = true
+                  console.warn("[roampal] Memory scoring failed twice in a row — check ROAMPAL_SIDECAR_URL/KEY/MODEL or Zen availability")
+                  debugLog(`session.idle: Deferred scoring also failed — scoringBroken=true, dropping payload`)
+                  pendingScoring = null
                 }
               } catch (err) {
-                pendingScoring = { sessionId: sid, ...scoringData }
-                debugLog(`session.idle: Sidecar error — queued for deferred retry: ${err}`)
+                scoringBroken = true
+                console.warn("[roampal] Memory scoring failed twice in a row — check ROAMPAL_SIDECAR_URL/KEY/MODEL or Zen availability")
+                debugLog(`session.idle: Deferred scoring error — scoringBroken=true, dropping payload: ${err}`)
+                pendingScoring = null
               }
             }
-          }
 
-          // v0.3.6: Auto-summarize one old memory during idle (Change 10)
-          // Sidecar-first on server, Zen fallback in plugin. One per idle cycle.
-          try {
-            await autoSummarizeOldMemory()
-          } catch (err) {
-            debugLog(`session.idle: autoSummarize error: ${err}`)
-          }
+            // v0.4.1: Sidecar is the sole scorer on OpenCode. No main LLM fallback.
+            const scoringData = pendingScoringData.get(sid)
+            if (scoringData) {
+              pendingScoringData.delete(sid)
 
-          // Clear state for next exchange
-          assistantMessageIds.delete(sid)
-          assistantTextParts.delete(sid)
-          cachedContext.delete(sid)
+              if (SIDECAR_DISABLED) {
+                debugLog(`session.idle: Sidecar DISABLED (testing) — skipping scoring entirely`)
+              } else {
+                debugLog(`session.idle: Running sidecar for ${sid} (memories=${scoringData.memories?.length || 0}, broken=${scoringBroken})`)
+                try {
+                  const ok = await scoreExchangeViaLLM(sid, scoringData.userMessage, scoringData.exchange, scoringData.memories)
+                  if (!ok) {
+                    pendingScoring = { sessionId: sid, ...scoringData }
+                    debugLog(`session.idle: Sidecar failed — queued for deferred retry`)
+                  }
+                } catch (err) {
+                  pendingScoring = { sessionId: sid, ...scoringData }
+                  debugLog(`session.idle: Sidecar error — queued for deferred retry: ${err}`)
+                }
+              }
+            }
+
+            // v0.3.6: Auto-summarize one old memory during idle
+            try {
+              await autoSummarizeOldMemory()
+            } catch (err) {
+              debugLog(`session.idle: autoSummarize error: ${err}`)
+            }
+
+            // Clear state for next exchange
+            assistantMessageIds.delete(sid)
+            assistantTextParts.delete(sid)
+            cachedContext.delete(sid)
+          }, 1500))
           break
         }
 
@@ -1500,52 +1590,13 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           break
         }
 
-        case "experimental.session.compacting": {
-          // Fire BEFORE compaction — can inject context INTO the compaction prompt
-          // so the model's own summary includes recent exchanges
-          const sid = event.properties?.sessionID || event.properties?.info?.id
-          if (!sid) break
-          debugLog(`experimental.session.compacting: Injecting recent exchanges into compaction for ${sid}`)
-          try {
-            const recentResp = await fetch(`${ROAMPAL_API_URL}/search`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                query: "recent exchange",
-                collections: ["working"],
-                limit: 4,
-                sort_by: "recency",
-                metadata_filters: { memory_type: "exchange_summary" }
-              }),
-              signal: AbortSignal.timeout(5000)
-            })
-            if (recentResp.ok) {
-              const data = await recentResp.json() as { results: Array<{ text?: string; content?: string; metadata: { recency?: string; text?: string; content?: string } }> }
-              if (data.results?.length > 0) {
-                const recentText = data.results
-                  .map((r, i) => {
-                    const body = r.text || r.content || r.metadata?.text || r.metadata?.content || ""
-                    return `${i + 1}. ${r.metadata?.recency ? `[${r.metadata.recency}] ` : ""}${body.slice(0, 200)}`
-                  })
-                  .join("\n")
-                // Inject into compaction context if the event supports output
-                const output = (event as any).output
-                if (output?.context && Array.isArray(output.context)) {
-                  output.context.push(`<recent-exchanges>\n${recentText}\n</recent-exchanges>`)
-                  debugLog(`experimental.session.compacting: Injected ${data.results.length} recent exchanges`)
-                }
-              }
-            }
-          } catch (err) {
-            debugLog(`experimental.session.compacting: Failed to fetch recent exchanges: ${err}`)
-          }
-          break
-        }
+        // v0.4.2: experimental.session.compacting moved to top-level hook (see below)
 
         case "session.deleted": {
           // Cleanup all session state
           const sid = event.properties?.info?.id
           if (!sid) break
+          if (idleTimers.has(sid)) { clearTimeout(idleTimers.get(sid)); idleTimers.delete(sid) }
           sessionContextMap.delete(sid)
           lastUserMessage.delete(sid)
           assistantMessageIds.delete(sid)
