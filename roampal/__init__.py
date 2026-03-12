@@ -17,10 +17,18 @@ How it works:
 
 __version__ = "0.4.2.2"
 
-from roampal.backend.modules.memory import (
-    UnifiedMemorySystem,
-    MemoryConfig,
-)
+# Lazy imports: chromadb/sentence-transformers are heavy and crash in minimal
+# environments (e.g., Glama Docker inspection).  The MCP server only needs
+# stdlib + mcp, so we defer the backend imports until someone actually asks
+# for UnifiedMemorySystem or MemoryConfig.
+def __getattr__(name):
+    if name == "UnifiedMemorySystem":
+        from roampal.backend.modules.memory import UnifiedMemorySystem
+        return UnifiedMemorySystem
+    if name == "MemoryConfig":
+        from roampal.backend.modules.memory import MemoryConfig
+        return MemoryConfig
+    raise AttributeError(f"module 'roampal' has no attribute {name}")
 
 __all__ = [
     "UnifiedMemorySystem",
