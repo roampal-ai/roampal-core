@@ -715,7 +715,9 @@ Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         """Handle MCP tool calls — all proxied through FastAPI (v0.3.2)."""
         # v0.4.3: Stub responses for inspection mode (no backend available)
-        if os.environ.get("ROAMPAL_INSPECT_ONLY"):
+        if (os.environ.get("ROAMPAL_INSPECT_ONLY")
+                or os.path.exists("/.dockerenv")
+                or os.path.exists("/app/.inspect_mode")):
             return [types.TextContent(
                 type="text",
                 text=f"Tool '{name}' is available. Backend not running in inspect mode."
