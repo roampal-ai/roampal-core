@@ -257,11 +257,11 @@ def _start_fastapi_server():
     global _fastapi_started, _fastapi_process
 
     # v0.4.3: Skip backend startup for MCP inspection (e.g., Glama server scoring)
-    # Detects Docker via /.dockerenv or explicit env var
-    if os.environ.get("ROAMPAL_INSPECT_ONLY") or os.path.exists("/.dockerenv"):
+    # Checks: env var, /.dockerenv, or sentinel file created during Docker build
+    if (os.environ.get("ROAMPAL_INSPECT_ONLY")
+            or os.path.exists("/.dockerenv")
+            or os.path.exists("/app/.inspect_mode")):
         _fastapi_started = True
-        logger.info("Inspect mode — skipping FastAPI backend startup (docker=%s, env=%s)",
-                     os.path.exists("/.dockerenv"), bool(os.environ.get("ROAMPAL_INSPECT_ONLY")))
         return
 
     if _fastapi_started:
