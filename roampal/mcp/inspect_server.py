@@ -1,19 +1,20 @@
 """
 Minimal MCP server for Glama inspection.
 
-Zero backend dependencies — just exposes tool definitions over stdio.
-Used when the full server can't run (e.g., Docker inspection).
+Serves MCP over streamable HTTP on port 8080 — no mcp-proxy needed.
+Zero backend dependencies — just exposes tool definitions.
 """
 import asyncio
-import sys
 import os
 
-# Force unbuffered output so mcp-proxy sees it immediately
 os.environ["PYTHONUNBUFFERED"] = "1"
 
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
+from mcp.server.streamable_http import StreamableHTTPServerTransport
 from mcp import types
+from starlette.applications import Starlette
+from starlette.routing import Mount
+from starlette.responses import PlainTextResponse
 
 
 def run():
@@ -100,13 +101,35 @@ def run():
             )
         ]
 
-    async def main():
-        async with stdio_server() as (read_stream, write_stream):
+    transport = StreamableHTTPServerTransport(
+        mcp_session_id=None,
+        is_json_response_enabled=True,
+    )
+
+    async def run_server():
+        async with transport.connect() as (read_stream, write_stream):
             await server.run(
                 read_stream, write_stream, server.create_initialization_options()
             )
 
-    asyncio.run(main())
+    # Ping endpoint for health checks
+    async def ping(request):
+        return PlainTextResponse("pong")
+
+    app = Starlette(
+        routes=[
+            Mount("/mcp", app=transport.handle_request),
+            Mount("/ping", app=ping),
+        ],
+    )
+
+    import uvicorn
+
+    # Run MCP server handler in background, uvicorn in foreground
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.create_task(run_server())
+    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
 
 
 if __name__ == "__main__":
