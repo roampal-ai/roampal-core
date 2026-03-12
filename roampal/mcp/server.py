@@ -257,10 +257,11 @@ def _start_fastapi_server():
     global _fastapi_started, _fastapi_process
 
     # v0.4.3: Skip backend startup for MCP inspection (e.g., Glama server scoring)
-    # Checks: env var, /.dockerenv, or sentinel file created during Docker build
+    # Checks: env var, Docker markers, sentinel file, or /app workdir (Glama)
     if (os.environ.get("ROAMPAL_INSPECT_ONLY")
             or os.path.exists("/.dockerenv")
-            or os.path.exists("/app/.inspect_mode")):
+            or os.path.exists("/app/.inspect_mode")
+            or (os.path.exists("/app/pyproject.toml") and not os.path.exists(os.path.expanduser("~/.roampal")))):
         _fastapi_started = True
         return
 
@@ -717,7 +718,8 @@ Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -
         # v0.4.3: Stub responses for inspection mode (no backend available)
         if (os.environ.get("ROAMPAL_INSPECT_ONLY")
                 or os.path.exists("/.dockerenv")
-                or os.path.exists("/app/.inspect_mode")):
+                or os.path.exists("/app/.inspect_mode")
+                or (os.path.exists("/app/pyproject.toml") and not os.path.exists(os.path.expanduser("~/.roampal")))):
             return [types.TextContent(
                 type="text",
                 text=f"Tool '{name}' is available. Backend not running in inspect mode."
