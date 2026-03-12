@@ -256,6 +256,12 @@ def _start_fastapi_server():
     """
     global _fastapi_started, _fastapi_process
 
+    # v0.4.3: Skip backend startup for MCP inspection (e.g., Glama server scoring)
+    if os.environ.get("ROAMPAL_INSPECT_ONLY"):
+        _fastapi_started = True
+        logger.info("ROAMPAL_INSPECT_ONLY set — skipping FastAPI backend startup")
+        return
+
     if _fastapi_started:
         return
 
@@ -706,6 +712,13 @@ Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         """Handle MCP tool calls — all proxied through FastAPI (v0.3.2)."""
+        # v0.4.3: Stub responses for inspection mode (no backend available)
+        if os.environ.get("ROAMPAL_INSPECT_ONLY"):
+            return [types.TextContent(
+                type="text",
+                text=f"Tool '{name}' is available. Backend not running in inspect mode."
+            )]
+
         # v0.4.1: Ensure FastAPI is healthy — bump timeout to 15s (parity with hooks/plugin)
         # and check return value to avoid raw httpx errors
         if not _ensure_server_running(timeout=15.0):
