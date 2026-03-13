@@ -2,6 +2,7 @@
 Unit Tests for EmbeddingService.
 
 Tests text embedding generation and batch operations.
+v0.4.3: Updated mocks for ONNX Runtime + tokenizers backend.
 """
 
 import sys
@@ -9,7 +10,8 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', '..')))
 
 import pytest
-from unittest.mock import MagicMock, patch
+import numpy as np
+from unittest.mock import MagicMock, patch, PropertyMock
 
 
 class TestEmbeddingServiceInit:
@@ -31,7 +33,49 @@ class TestEmbeddingServiceInit:
         """Model should not be loaded until first use."""
         from roampal.backend.modules.memory.embedding_service import EmbeddingService
         service = EmbeddingService()
-        assert service._model is None
+        assert service._session is None
+        assert service._tokenizer is None
+
+
+def _make_mock_service():
+    """Create an EmbeddingService with mocked ONNX session and tokenizer."""
+    from roampal.backend.modules.memory.embedding_service import EmbeddingService
+
+    service = EmbeddingService()
+
+    # Mock tokenizer encode_batch — returns objects with .ids and .attention_mask
+    mock_tokenizer = MagicMock()
+
+    def fake_encode_batch(texts):
+        results = []
+        for _ in texts:
+            enc = MagicMock()
+            enc.ids = [101] + [1000] * 5 + [102]  # 7 tokens
+            enc.attention_mask = [1] * 7
+            results.append(enc)
+        return results
+
+    mock_tokenizer.encode_batch = fake_encode_batch
+
+    # Mock ONNX session — returns fake last_hidden_state
+    mock_session = MagicMock()
+    mock_session.get_inputs.return_value = [
+        MagicMock(name="input_ids"),
+        MagicMock(name="attention_mask"),
+    ]
+
+    def fake_run(output_names, feeds):
+        batch_size = feeds["input_ids"].shape[0]
+        seq_len = feeds["input_ids"].shape[1]
+        # Return last_hidden_state with constant values
+        return [np.ones((batch_size, seq_len, 768), dtype=np.float32) * 0.1]
+
+    mock_session.run = fake_run
+
+    service._session = mock_session
+    service._tokenizer = mock_tokenizer
+
+    return service
 
 
 class TestEmbedText:
@@ -39,17 +83,7 @@ class TestEmbedText:
 
     @pytest.fixture
     def mock_service(self):
-        """Create service with mocked model."""
-        from roampal.backend.modules.memory.embedding_service import EmbeddingService
-        service = EmbeddingService()
-
-        # Mock the model
-        mock_model = MagicMock()
-        mock_model.encode.return_value = MagicMock(tolist=lambda: [0.1] * 768)
-        mock_model.get_sentence_embedding_dimension.return_value = 768
-        service._model = mock_model
-
-        return service
+        return _make_mock_service()
 
     @pytest.mark.asyncio
     async def test_embed_text_returns_list(self, mock_service):
@@ -57,6 +91,13 @@ class TestEmbedText:
         result = await mock_service.embed_text("test text")
         assert isinstance(result, list)
         assert len(result) == 768
+
+    @pytest.mark.asyncio
+    async def test_embed_text_normalized(self, mock_service):
+        """Embeddings should be L2-normalized (unit length)."""
+        result = await mock_service.embed_text("test text")
+        norm = np.linalg.norm(result)
+        assert abs(norm - 1.0) < 1e-5
 
     @pytest.mark.asyncio
     async def test_embed_empty_text_returns_zeros(self, mock_service):
@@ -70,26 +111,20 @@ class TestEmbedText:
         result = await mock_service.embed_text("   ")
         assert result == [0.0] * 768
 
+    @pytest.mark.asyncio
+    async def test_embed_text_caching(self, mock_service):
+        """Second call with same text should return cached result."""
+        r1 = await mock_service.embed_text("cached query")
+        r2 = await mock_service.embed_text("cached query")
+        assert r1 == r2
+
 
 class TestEmbedTexts:
     """Test batch embedding."""
 
     @pytest.fixture
     def mock_service(self):
-        """Create service with mocked model."""
-        from roampal.backend.modules.memory.embedding_service import EmbeddingService
-        import numpy as np
-
-        service = EmbeddingService()
-
-        # Mock the model
-        mock_model = MagicMock()
-        # Return array of embeddings
-        mock_model.encode.return_value = np.array([[0.1] * 768, [0.2] * 768])
-        mock_model.get_sentence_embedding_dimension.return_value = 768
-        service._model = mock_model
-
-        return service
+        return _make_mock_service()
 
     @pytest.mark.asyncio
     async def test_embed_texts_returns_list_of_lists(self, mock_service):
@@ -118,14 +153,9 @@ class TestGetDimension:
     """Test dimension retrieval."""
 
     def test_get_embedding_dimension(self):
-        """Should return model dimension."""
+        """Should return 768 (model dimension)."""
         from roampal.backend.modules.memory.embedding_service import EmbeddingService
-
         service = EmbeddingService()
-        mock_model = MagicMock()
-        mock_model.get_sentence_embedding_dimension.return_value = 768
-        service._model = mock_model
-
         assert service.get_embedding_dimension() == 768
 
 
@@ -134,15 +164,16 @@ class TestPrewarm:
 
     @pytest.mark.asyncio
     async def test_prewarm_loads_model(self):
-        """Prewarm should load the model."""
+        """Prewarm should trigger model load."""
         from roampal.backend.modules.memory.embedding_service import EmbeddingService
 
         service = EmbeddingService()
+        # Mock _load_model so it doesn't actually download anything
+        service._load_model = MagicMock()
+        service._session = MagicMock()  # pretend it's loaded
 
-        # Mock the model property to track access
-        with patch.object(EmbeddingService, 'model', new_callable=lambda: property(lambda self: MagicMock())):
-            await service.prewarm()
-            # No error means success
+        await service.prewarm()
+        # No error means success — session property was accessed
 
 
 if __name__ == "__main__":
