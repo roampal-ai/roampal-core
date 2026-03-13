@@ -496,7 +496,7 @@ async def lifespan(app: FastAPI):
     except ImportError as e:
         logger.error(
             f"Missing dependency: {e}\n"
-            "Fix: pip install roampal[all]  (or: pip install sentence-transformers)"
+            "Fix: pip install roampal  (needs: onnxruntime, tokenizers, huggingface-hub)"
         )
         raise SystemExit(1)
     except Exception as e:

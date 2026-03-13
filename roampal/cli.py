@@ -1605,7 +1605,8 @@ def cmd_doctor(args):
     print(f"\n{BOLD}Dependencies:{RESET}")
     deps = [
         ("chromadb", "chromadb"),
-        ("sentence_transformers", "sentence-transformers"),
+        ("onnxruntime", "onnxruntime"),
+        ("tokenizers", "tokenizers"),
         ("mcp", "mcp"),
         ("httpx", "httpx"),
         ("fastapi", "fastapi"),
@@ -1618,6 +1619,16 @@ def cmd_doctor(args):
             check_pass(f"{display_name} v{version}")
         except ImportError:
             check_fail(f"{display_name} not installed")
+
+    # v0.4.3: Hint about legacy torch no longer needed
+    try:
+        import torch as _torch
+        check_warn(
+            f"torch v{_torch.__version__} installed but no longer required by roampal. "
+            f"Reclaim ~420MB: pip uninstall torch sentence-transformers"
+        )
+    except ImportError:
+        pass  # Good — torch not installed
 
     # Summary
     print(f"\n{BOLD}{'='*50}{RESET}")

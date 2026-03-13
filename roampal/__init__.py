@@ -15,9 +15,9 @@ How it works:
     4. You see your original message; the AI sees your message + context
 """
 
-__version__ = "0.4.2.2"
+__version__ = "0.4.3"
 
-# Lazy imports: chromadb/sentence-transformers are heavy and crash in minimal
+# Lazy imports: chromadb/onnxruntime are heavy and crash in minimal
 # environments (e.g., Glama Docker inspection).  The MCP server only needs
 # stdlib + mcp, so we defer the backend imports until someone actually asks
 # for UnifiedMemorySystem or MemoryConfig.
