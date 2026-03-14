@@ -41,11 +41,13 @@ v0.3.2 ARCHITECTURE:
   one FastAPI server with one ChromaDB connection (single-writer pattern)
 """
 
+import os
+os.environ["PYTHONUNBUFFERED"] = "1"
+
 import logging
 import json
 import asyncio
 import socket
-import os
 import sys
 import atexit
 import subprocess
@@ -1008,9 +1010,12 @@ Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -
 
     # Run the server
     async def main():
+        print("[roampal-mcp] entering stdio_server context", file=sys.stderr, flush=True)
         async with stdio_server() as (read_stream, write_stream):
+            print("[roampal-mcp] stdio_server ready, starting server.run()", file=sys.stderr, flush=True)
             await server.run(read_stream, write_stream, server.create_initialization_options())
 
+    print("[roampal-mcp] starting asyncio.run(main())", file=sys.stderr, flush=True)
     asyncio.run(main())
 
 
@@ -1023,5 +1028,15 @@ if __name__ == "__main__":
     # Check BOTH --dev flag AND ROAMPAL_DEV env var
     is_dev = args.dev or os.environ.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")
 
+    # v0.4.3: Diagnostic output for Docker/Glama inspection debugging
+    import sys as _sys
+    print(f"[roampal-mcp] startup: python={_sys.version}, inspect_only={os.environ.get('ROAMPAL_INSPECT_ONLY', '')}", file=_sys.stderr, flush=True)
+    try:
+        from importlib.metadata import version as _v
+        print(f"[roampal-mcp] mcp_sdk={_v('mcp')}, roampal={_v('roampal')}", file=_sys.stderr, flush=True)
+    except Exception:
+        pass
+
     logging.basicConfig(level=logging.INFO)
+    print("[roampal-mcp] calling run_mcp_server()", file=_sys.stderr, flush=True)
     run_mcp_server(dev=is_dev)
