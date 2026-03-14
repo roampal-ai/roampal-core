@@ -12,7 +12,6 @@
   <a href="https://github.com/roampal-ai/roampal-core/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue?style=flat-square" alt="Python"></a>
   <a href="https://discord.com/invite/F87za86R3v"><img src="https://img.shields.io/badge/discord-join-blue?style=flat-square" alt="Discord"></a>
-  <a href="https://glama.ai/mcp/servers/roampal-ai/roampal-core"><img width="380" height="200" src="https://glama.ai/mcp/servers/roampal-ai/roampal-core/badge" alt="roampal-core MCP server" /></a>
 </p>
 
 <p align="center">
