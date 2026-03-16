@@ -691,6 +691,7 @@ OPTIONAL - Only use for significant exchanges:
 • Important context that would be lost
 
 Most routine exchanges don't need this - the transcript is enough.
+NOT for permanent preferences or standing rules — use add_to_memory_bank for those.
 
 Key takeaways start at 0.7 (user explicitly asked to remember = higher confidence).
 Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -0.3 failed.""",

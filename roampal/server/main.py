@@ -1129,6 +1129,8 @@ def create_app() -> FastAPI:
             context_type = await _memory.detect_context_type() or "general"
             collections_updated = set()
 
+            # v0.4.4: Build actions and record concurrently
+            action_tasks = []
             for doc_id in doc_ids:
                 # Extract collection from doc_id prefix
                 collection = None
@@ -1137,7 +1139,6 @@ def create_app() -> FastAPI:
                         collection = coll_name
                         break
 
-                # Track in Action KG
                 action = ActionOutcome(
                     action_type="score_memories",
                     context_type=context_type,
@@ -1145,15 +1146,20 @@ def create_app() -> FastAPI:
                     doc_id=doc_id,
                     collection=collection
                 )
-                await _memory.record_action_outcome(action)
+                action_tasks.append(_memory.record_action_outcome(action))
 
                 if collection:
                     collections_updated.add(collection)
 
-            # Update Routing KG
-            if cached_query:
-                for collection in collections_updated:
-                    await _memory._update_kg_routing(cached_query, collection, outcome)
+            if action_tasks:
+                await asyncio.gather(*action_tasks)
+
+            # Update Routing KG concurrently
+            if cached_query and collections_updated:
+                await asyncio.gather(*(
+                    _memory._update_kg_routing(cached_query, collection, outcome)
+                    for collection in collections_updated
+                ))
 
             logger.info(f"[Background] Action KG updates completed for {len(doc_ids)} docs")
 
@@ -1267,11 +1273,17 @@ def create_app() -> FastAPI:
                     logger.info(f"Using cache from session {most_recent_key} (MCP used {conversation_id})")
 
             # v0.2.8: Per-memory scoring - process each memory with individual outcome
+            # v0.4.4: Score all memories concurrently
             if request.memory_scores:
+                outcome_tasks = []
                 for doc_id, mem_outcome in request.memory_scores.items():
                     if mem_outcome in ["worked", "failed", "partial", "unknown"]:
-                        await _memory.record_outcome(doc_ids=[doc_id], outcome=mem_outcome)
+                        outcome_tasks.append(
+                            _memory.record_outcome(doc_ids=[doc_id], outcome=mem_outcome)
+                        )
                         doc_ids_scored.append(doc_id)
+                if outcome_tasks:
+                    await asyncio.gather(*outcome_tasks)
                 logger.info(f"Per-memory scoring: {len(doc_ids_scored)} memories with individual outcomes")
 
             # DEPRECATED: related param (backward compat)

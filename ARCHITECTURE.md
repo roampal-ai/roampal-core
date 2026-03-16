@@ -34,7 +34,7 @@ roampal init --opencode   # Or configure explicitly
   OpenCode MCP         hook subprocesses   TypeScript plugin
 ```
 
-**Architecture (v0.4.2):** MCP servers are thin HTTP clients — no ChromaDB, PyTorch, or sentence-transformers in the MCP process. All access is serialized through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running.
+**Architecture (v0.4.4):** MCP servers are thin HTTP clients — no ChromaDB or heavy ML frameworks in the MCP process. Embeddings use pure ONNX Runtime (no PyTorch). All access is serialized through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running.
 
 `roampal start` is available for standalone use (e.g., OpenCode-only setups where no MCP auto-starts the server).
 
@@ -170,7 +170,7 @@ roampal-core/
 │   │           ├── __init__.py              # Exports all memory types
 │   │           ├── unified_memory_system.py # Main orchestrator
 │   │           ├── chromadb_adapter.py      # Vector storage
-│   │           ├── embedding_service.py     # sentence-transformers
+│   │           ├── embedding_service.py     # ONNX embeddings
 │   │           ├── search_service.py        # Hybrid search + Wilson scoring
 │   │           ├── scoring_service.py       # Wilson score calculation
 │   │           ├── routing_service.py       # KG-based collection routing
@@ -363,6 +363,8 @@ Only use when the transcript alone won't capture something important:
 - User corrections (what you got wrong and why)
 - Important context that would be lost
 
+NOT for permanent preferences or standing rules — use `add_to_memory_bank` for those.
+
 **Initial Scoring (optional):** Score the takeaway at creation time based on the current exchange:
 - `initial_score="worked"` → starts at 0.7 (boosted)
 - `initial_score="failed"` → starts at 0.2 (demoted, but stored as "what not to do")
@@ -428,7 +430,7 @@ score_delta = base_delta * time_weight
 ### ChromaDB (Vector Store)
 - Location: `%APPDATA%/Roampal/data/chromadb` (Windows prod)
 - Location: `%APPDATA%/Roampal_DEV/data/chromadb` (Windows dev, `ROAMPAL_DEV=1`)
-- Embeddings: `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` (768-dim)
+- Embeddings: `paraphrase-multilingual-mpnet-base-v2` via ONNX Runtime (768-dim)
 - Collections: `roampal_books`, `roampal_working`, `roampal_history`, `roampal_patterns`, `roampal_memory_bank` (matches Desktop)
 
 ### Session Files (JSONL)
@@ -787,7 +789,10 @@ All content is stored and returned in full - no character limits or truncation:
 [project]
 dependencies = [
     "chromadb>=1.0.0,<2.0.0",
-    "sentence-transformers>=3.2.0",
+    "onnxruntime>=1.14.0",
+    "tokenizers>=0.14.0",
+    "huggingface-hub>=0.20.0",
+    "numpy>=1.24.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.22.0",
     "mcp>=1.0.0,<2.0.0",
@@ -796,7 +801,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-onnx = ["onnxruntime>=1.14.0", "optimum>=1.14.0"]
+pytorch = ["sentence-transformers>=3.2.0"]
 dev = ["pytest>=7.0.0", "pytest-asyncio>=0.21.0", "mypy>=1.0.0"]
 ```
 
