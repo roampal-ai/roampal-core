@@ -13,7 +13,7 @@ from mcp.server import Server
 from mcp.server.streamable_http import StreamableHTTPServerTransport
 from mcp import types
 from starlette.applications import Starlette
-from starlette.routing import Mount
+from starlette.routing import Mount, Route
 from starlette.responses import PlainTextResponse
 
 
@@ -119,7 +119,7 @@ def run():
     app = Starlette(
         routes=[
             Mount("/mcp", app=transport.handle_request),
-            Mount("/ping", app=ping),
+            Route("/ping", endpoint=ping),
         ],
     )
 
