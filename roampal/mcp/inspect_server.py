@@ -106,11 +106,22 @@ def run():
         is_json_response_enabled=True,
     )
 
-    async def run_server():
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(app):
         async with transport.connect() as (read_stream, write_stream):
-            await server.run(
-                read_stream, write_stream, server.create_initialization_options()
+            task = asyncio.create_task(
+                server.run(
+                    read_stream, write_stream, server.create_initialization_options()
+                )
             )
+            yield
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     # Ping endpoint for health checks
     async def ping(request):
@@ -121,14 +132,11 @@ def run():
             Mount("/mcp", app=transport.handle_request),
             Route("/ping", endpoint=ping),
         ],
+        lifespan=lifespan,
     )
 
     import uvicorn
 
-    # Run MCP server handler in background, uvicorn in foreground
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.create_task(run_server())
     uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
 
 
