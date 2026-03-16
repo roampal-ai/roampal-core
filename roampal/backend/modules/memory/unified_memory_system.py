@@ -6,6 +6,7 @@ Stripped: Ollama, KG service, complex routing.
 Kept: Core search, outcome tracking, memory bank operations.
 """
 
+import asyncio
 import logging
 import json
 import sys
@@ -451,12 +452,17 @@ class UnifiedMemorySystem:
             "patterns": "roampal_patterns",
             "memory_bank": "roampal_memory_bank"
         }
+        # v0.4.4: Initialize all collection adapters concurrently
+        adapters = []
         for short_name, chroma_name in collection_mapping.items():
             adapter = ChromaDBAdapter(
                 collection_name=chroma_name,
                 persist_directory=str(self.data_path / "chromadb")
             )
-            await adapter.initialize()
+            adapters.append((short_name, chroma_name, adapter))
+
+        await asyncio.gather(*(adapter.initialize() for _, _, adapter in adapters))
+        for short_name, chroma_name, adapter in adapters:
             self.collections[short_name] = adapter
             logger.info(f"Initialized collection: {short_name} -> {chroma_name}")
 
@@ -564,11 +570,11 @@ class UnifiedMemorySystem:
         if deleted_count > 0:
             logger.info(f"Startup cleanup: {deleted_count} garbage deleted")
 
-        # Also clean old working memories (> 24 hours)
-        await self._promotion_service.cleanup_old_working_memory(max_age_hours=24.0)
-
-        # Clean old history memories (> 30 days)
-        await self._promotion_service.cleanup_old_history(max_age_hours=720.0)
+        # v0.4.4: Run both cleanup tasks concurrently
+        await asyncio.gather(
+            self._promotion_service.cleanup_old_working_memory(max_age_hours=24.0),
+            self._promotion_service.cleanup_old_history(max_age_hours=720.0),
+        )
 
     # ==================== Core Search ====================
 
@@ -1003,33 +1009,23 @@ class UnifiedMemorySystem:
         # 2. Get KG recommendations (informational - we still search all)
         kg_recs = self.get_tier_recommendations(concepts)
 
-        # 3. Reserved slot: Always include 1 working memory for session context
-        working_results = await self.search(
-            query=query,
-            limit=1,
-            collections=["working"]
+        # 3. v0.4.4: Run all three searches concurrently
+        other_collections = ["working", "patterns", "history", "memory_bank"]
+        working_results, history_results, other_results = await asyncio.gather(
+            self.search(query=query, limit=1, collections=["working"]),
+            self.search(query=query, limit=1, collections=["history"]),
+            self.search(query=query, limit=4, collections=other_collections),
         )
+
+        # Reserved slot: 1 working memory for session context
         working_scored = self._scoring_service.apply_scoring_to_results(working_results)
         reserved_working = [m for m in working_scored if m.get("content") or m.get("text")][:1]
         reserved_ids = {m.get("id") for m in reserved_working if m.get("id")}
 
-        # 3b. Reserved slot: Always include 1 history memory for scoring feedback loop
-        history_results = await self.search(
-            query=query,
-            limit=1,
-            collections=["history"]
-        )
+        # Reserved slot: 1 history memory for scoring feedback loop
         history_scored = self._scoring_service.apply_scoring_to_results(history_results)
         reserved_history = [m for m in history_scored if m.get("content") or m.get("text")][:1]
         reserved_ids.update(m.get("id") for m in reserved_history if m.get("id"))
-
-        # 4. Search all collections (except books) for best-match slots
-        other_collections = ["working", "patterns", "history", "memory_bank"]
-        other_results = await self.search(
-            query=query,
-            limit=4,
-            collections=other_collections
-        )
 
         # 5. Apply Wilson scoring for proper ranking
         scored_results = self._scoring_service.apply_scoring_to_results(other_results)
@@ -1105,7 +1101,7 @@ class UnifiedMemorySystem:
         memories = context.get("memories", [])
 
         if user_name or memories:
-            parts.append("You have persistent memory about this user via Roampal. Scored memories include Wilson confidence and outcome history. [id:...] tags can be looked up with search_memory(id=...). Memories may be outdated or wrong. Verify before treating as ground truth. The context below was retrieved from past conversations. If the user references past interactions or asks if you remember them, use your roampal memory — you DO remember.")
+            parts.append("You have persistent memory about this user via Roampal. Memory tags: wilson:N% = reliability from past scoring, used:Nx = times retrieved, last:worked/failed/partial/unknown = whether this memory was *helpful* last time (not whether a task succeeded). [id:...] tags can be looked up with search_memory(id=...). Memories may be outdated or wrong. Verify before treating as ground truth. The context below was retrieved from past conversations. If the user references past interactions or asks if you remember them, use this context — you DO remember.")
             parts.append("")
             parts.append("═══ KNOWN CONTEXT ═══")
 
@@ -1121,20 +1117,22 @@ class UnifiedMemorySystem:
                 collection = normalized.get("collection", "unknown")
                 doc_id = normalized.get("id", "")
                 age = normalized.get("age", "")
-
-                # Get Wilson score and effectiveness
+                uses = normalized.get("uses", 0)
                 wilson = normalized.get("wilson_score", 0)
-                effectiveness = normalized.get("effectiveness", 0)
+                last_outcome = normalized.get("last_outcome", "")
 
-                # Build tag string: age + score + collection
+                # Build tag string with full metadata
                 tag_parts = []
                 if age:
                     tag_parts.append(age)
-                if wilson >= 0.7:
-                    tag_parts.append(f"{int(wilson*100)}% proven")
-                elif effectiveness > 0:
-                    tag_parts.append(f"{int(effectiveness*100)}% effective")
                 tag_parts.append(collection)
+                if collection == "books":
+                    tag_parts.append("reference")
+                elif uses > 0:
+                    tag_parts.append(f"wilson:{wilson:.0%}")
+                    tag_parts.append(f"used:{uses}x")
+                    if last_outcome:
+                        tag_parts.append(f"last:{last_outcome}")
 
                 id_str = f" [id:{doc_id}]" if doc_id else ""
                 parts.append(f"• {content}{id_str} ({', '.join(tag_parts)})")

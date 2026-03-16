@@ -10,6 +10,7 @@ Responsibilities:
 - Document effectiveness tracking
 """
 
+import asyncio
 import json
 import logging
 import math
@@ -353,16 +354,24 @@ class SearchService:
         limit: int,
         metadata_filters: Optional[Dict[str, Any]]
     ) -> List[Dict]:
-        """Search specified collections and apply boosts."""
-        all_results = []
+        """Search specified collections and apply boosts (parallel)."""
+        valid_collections = [c for c in collections if c in self.collections]
+        if not valid_collections:
+            return []
 
-        for coll_name in collections:
-            if coll_name not in self.collections:
-                continue
-
-            results = await self._search_single_collection(
+        # v0.4.4: Search all collections concurrently
+        coll_results = await asyncio.gather(*(
+            self._search_single_collection(
                 coll_name, query_embedding, processed_query, limit, metadata_filters
             )
+            for coll_name in valid_collections
+        ), return_exceptions=True)
+
+        all_results = []
+        for coll_name, results in zip(valid_collections, coll_results):
+            if isinstance(results, Exception):
+                logger.warning(f"Search failed for {coll_name}: {results}")
+                continue
 
             # Apply collection-specific boosts
             for r in results:

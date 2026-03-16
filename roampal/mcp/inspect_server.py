@@ -81,7 +81,7 @@ def run():
             ),
             types.Tool(
                 name="record_response",
-                description="Store key takeaways from significant exchanges",
+                description="Store key takeaways from significant exchanges. NOT for permanent preferences or standing rules — use add_to_memory_bank for those.",
                 inputSchema={
                     "type": "object",
                     "properties": {
