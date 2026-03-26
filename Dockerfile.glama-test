@@ -1,0 +1,21 @@
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    ROAMPAL_INSPECT_ONLY=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl git nodejs npm \
+    && npm install -g mcp-proxy@6.4.3 \
+    && curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="/usr/local/bin" sh \
+    && uv python install 3.12 --default --preview \
+    && ln -s $(uv python find) /usr/local/bin/python \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+WORKDIR /app
+
+RUN git clone https://github.com/roampal-ai/roampal-core . && git checkout b7b5f8e
+
+RUN uv venv /app/venv --python 3.12 && VIRTUAL_ENV=/app/venv uv pip install .
+
+CMD ["mcp-proxy", "/app/venv/bin/python", "-u", "-m", "roampal.mcp.server"]

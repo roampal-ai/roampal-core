@@ -1,6 +1,6 @@
 # v0.4.3 Release Notes
 
-**Platforms:** All (Claude Code, OpenCode, Cursor)
+**Platforms:** Claude Code, OpenCode
 **Theme:** Lightweight install — drop PyTorch, go pure ONNX
 
 ---

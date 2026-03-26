@@ -15,6 +15,10 @@
 </p>
 
 <p align="center">
+  <a href="https://glama.ai/mcp/servers/roampal-ai/roampal-core"><img src="https://glama.ai/mcp/servers/roampal-ai/roampal-core/badges/card.svg" alt="roampal-core MCP server"></a>
+</p>
+
+<p align="center">
   <strong>Two commands. Your AI coding assistant gets outcome-based memory.</strong><br>
   Works with <strong>Claude Code</strong> and <strong>OpenCode</strong>.
 </p>
