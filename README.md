@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="assets/banner.svg" alt="Roampal - Outcome-Based Memory for AI Coding Tools" width="900">
-</p>
-
 # Roampal — Outcome-Based Persistent Memory MCP Server
 
 <p align="center">
@@ -58,6 +54,10 @@ roampal init
 Auto-detects installed tools. Restart your editor and start chatting.
 
 > Target a specific tool: `roampal init --claude-code` or `roampal init --opencode`
+
+<p align="center">
+  <img src="assets/init-demo.svg" alt="roampal init demo" width="720">
+</p>
 
 <details>
 <summary><strong>Platform Differences</strong></summary>
