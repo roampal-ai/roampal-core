@@ -31,6 +31,21 @@ AI coding assistants forget everything between sessions. You explain your archit
 
 Roampal is an MCP server that gives your AI persistent, outcome-based memory across every session. Good advice gets promoted. Bad advice gets demoted. Your AI learns what works and what doesn't — automatically, with zero workflow changes.
 
+### Benchmarks
+
+**85.8% on LoCoMo** (non-adversarial, end-to-end answer accuracy) — validated on 1,986 questions across 10 conversations with dual grading.
+
+| Result | Score |
+|--------|-------|
+| Conversational learning vs raw ingestion | **+23 points** (76.6% vs 53.0%, p<0.0001) |
+| Architecture vs model effect | Architecture **~10x larger** contributor |
+| Poison resilience (1,135 adversarial memories) | **-2.6 to -4.2 points** only |
+| TagCascade retrieval (tags-first + CE rerank) | **+1.9 Hit@1** vs pure CE (p<0.0001) |
+
+Benchmark pipeline runs on a single GPU with no cloud dependencies. Roampal itself runs on CPU — no GPU required. Full methodology, data, and evaluation scripts: [roampal-labs](https://github.com/roampal-ai/roampal-labs)
+
+Paper: *"Beyond Ingestion: What Conversational Memory Learning Reveals on a Corrected LoCoMo Benchmark"* (Logan Teague, April 2026)
+
 ---
 
 ## Quick Start
@@ -43,10 +58,6 @@ roampal init
 Auto-detects installed tools. Restart your editor and start chatting.
 
 > Target a specific tool: `roampal init --claude-code` or `roampal init --opencode`
-
-<p align="center">
-  <img src="assets/init-demo.svg" alt="roampal init demo" width="720">
-</p>
 
 <details>
 <summary><strong>Platform Differences</strong></summary>
@@ -143,31 +154,7 @@ Your AI gets these memory tools:
 
 > **How scoring works:** Claude Code's hooks prompt the main LLM to call `score_memories` every turn. OpenCode uses an independent sidecar that scores silently in the background — the model never sees a scoring prompt and `score_memories` is not registered as a tool. If the sidecar is unavailable, a warning prompts the user to run `roampal sidecar setup`. Choose your scoring model during `roampal init` or via `roampal sidecar setup`.
 
-## What's Different?
-
-| Without Roampal | With Roampal |
-|-----------------|--------------|
-| Forgets everything between sessions | Remembers you, your preferences, what worked |
-| You repeat context every time | Context injected automatically |
-| No learning from mistakes | Outcomes tracked — bad advice gets demoted |
-| No document memory | Ingest docs, searchable forever |
-
-### Benchmarks
-
-**85.8% on LoCoMo** (non-adversarial, end-to-end answer accuracy) — validated on 1,986 questions across 10 conversations with dual grading.
-
-| Result | Score |
-|--------|-------|
-| Conversational learning vs raw ingestion | **+23 points** (76.6% vs 53.0%, p<0.0001) |
-| Architecture vs model effect | Architecture **~10x larger** contributor |
-| Poison resilience (1,135 adversarial memories) | **-2.6 to -4.2 points** only |
-| TagCascade retrieval (tags-first + CE rerank) | **+1.9 Hit@1** vs pure CE (p<0.0001) |
-
-Benchmark pipeline runs on a single GPU with no cloud dependencies. Roampal itself runs on CPU — no GPU required. Full methodology, data, and evaluation scripts: [roampal-labs](https://github.com/roampal-ai/roampal-labs)
-
-Paper: *"Beyond Ingestion: What Conversational Memory Learning Reveals on a Corrected LoCoMo Benchmark"* (Logan Teague, April 2026)
-
-### How Roampal Compares
+## How Roampal Compares
 
 | Feature | Roampal Core | Claude Code built-in (CLAUDE.md / auto memory) | OpenCode built-in |
 |---------|-------------|--------------------------------------------------|-------------------|
