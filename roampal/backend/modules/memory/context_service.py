@@ -29,21 +29,19 @@ class ContextService:
     def __init__(
         self,
         collections: Dict[str, Any],
-        kg_service: Any = None,
         embed_fn: Optional[Callable[[str], Awaitable[List[float]]]] = None,
-        config: Optional[MemoryConfig] = None
+        config: Optional[MemoryConfig] = None,
+        **kwargs,  # Accept and ignore kg_service for backward compat
     ):
         """
         Initialize ContextService.
 
         Args:
             collections: Dict of collection name -> adapter
-            kg_service: KnowledgeGraphService for pattern/routing access
             embed_fn: Async function to embed text for similarity search
             config: Memory configuration
         """
         self.collections = collections
-        self.kg_service = kg_service
         self.embed_fn = embed_fn
         self.config = config or MemoryConfig()
 
@@ -112,71 +110,15 @@ class ContextService:
         """Find relevant patterns from past conversations."""
         patterns = []
 
-        if not self.kg_service or not concepts:
-            return patterns
-
-        # Create pattern signature from concepts
-        pattern_signature = "_".join(sorted(concepts[:3]))
-
-        # Check problem categories
-        problem_categories = self.kg_service.get_problem_categories()
-        if pattern_signature in problem_categories:
-            past_solutions = problem_categories[pattern_signature]
-
-            for doc_id in past_solutions[:2]:
-                # Look in patterns and history collections
-                for coll_name in ["patterns", "history"]:
-                    if coll_name not in self.collections:
-                        continue
-
-                    doc = self.collections[coll_name].get_fragment(doc_id)
-                    if doc:
-                        metadata = doc.get("metadata", {})
-                        score = metadata.get("score", 0.5)
-                        uses = metadata.get("uses", 0)
-                        last_outcome = metadata.get("last_outcome", "unknown")
-
-                        # Only include proven patterns
-                        if score >= self.config.promotion_score_threshold and last_outcome == "worked":
-                            # v0.2.8: Full content, no truncation
-                            patterns.append({
-                                "text": doc.get("content", ""),
-                                "score": score,
-                                "uses": uses,
-                                "collection": coll_name,
-                                "insight": f"Based on {uses} past use(s), this approach had a {int(score*100)}% success rate"
-                            })
-                        break
-
+        # v0.4.5: KG removed. Pattern recognition via tag-routed retrieval now.
         return patterns
 
     def _check_failure_patterns(
         self,
         concepts: List[str]
     ) -> List[Dict[str, Any]]:
-        """Check if similar attempts failed before."""
-        past_outcomes = []
-
-        if not self.kg_service:
-            return past_outcomes
-
-        failure_patterns = self.kg_service.get_failure_patterns()
-
-        for failure_key, failures in failure_patterns.items():
-            # Check if current message relates to past failures
-            if any(concept in failure_key.lower() for concept in concepts):
-                recent_failures = [f for f in failures if f.get("timestamp", "")][-2:]
-
-                for failure in recent_failures:
-                    # v0.2.8: Full content, no truncation
-                    past_outcomes.append({
-                        "outcome": "failed",
-                        "reason": failure_key,
-                        "when": failure.get("timestamp", ""),
-                        "insight": f"Note: Similar approach failed before due to: {failure_key}"
-                    })
-
-        return past_outcomes
+        """Check if similar attempts failed before. v0.4.5: KG removed."""
+        return []
 
     def _detect_topic_continuity(
         self,
@@ -221,28 +163,8 @@ class ContextService:
         self,
         concepts: List[str]
     ) -> List[Dict[str, Any]]:
-        """Get proactive insights based on routing patterns."""
-        insights = []
-
-        if not self.kg_service:
-            return insights
-
-        routing_patterns = self.kg_service.get_routing_patterns()
-
-        for concept in concepts[:3]:
-            if concept in routing_patterns:
-                pattern = routing_patterns[concept]
-                success_rate = pattern.get("success_rate", 0)
-                best_collection = pattern.get("best_collection", "unknown")
-
-                if success_rate > 0.7:
-                    insights.append({
-                        "concept": concept,
-                        "success_rate": success_rate,
-                        "recommendation": f"For '{concept}', check {best_collection} collection (historically {int(success_rate*100)}% effective)"
-                    })
-
-        return insights
+        """Get proactive insights. v0.4.5: KG removed."""
+        return []
 
     async def _detect_repetition(
         self,
@@ -284,15 +206,7 @@ class ContextService:
         return repetitions
 
     def _extract_concepts(self, text: str) -> List[str]:
-        """
-        Extract concepts from text.
-
-        Uses KG service if available, otherwise basic extraction.
-        """
-        if self.kg_service:
-            return self.kg_service.extract_concepts(text)
-
-        # Basic extraction fallback
+        """Extract concepts from text using basic extraction."""
         return self._basic_concept_extraction(text)
 
     def _basic_concept_extraction(self, text: str) -> List[str]:
@@ -329,88 +243,8 @@ class ContextService:
         return concepts[:10]
 
     async def find_known_solutions(self, query: str) -> List[Dict[str, Any]]:
-        """
-        Find known solutions for similar problems.
-
-        Args:
-            query: The problem query
-
-        Returns:
-            List of known solutions with boost information
-        """
-        if not query or not self.kg_service:
-            return []
-
-        try:
-            # Extract concepts
-            query_concepts = self._extract_concepts(query)
-            query_signature = "_".join(sorted(query_concepts[:5]))
-
-            known_solutions = []
-            problem_solutions = self.kg_service.get_problem_solutions()
-
-            # Look for exact matches
-            if query_signature in problem_solutions:
-                solutions = problem_solutions[query_signature]
-
-                # Sort by success count and recency
-                sorted_solutions = sorted(
-                    solutions,
-                    key=lambda x: (x.get("success_count", 0), x.get("last_used", "")),
-                    reverse=True
-                )
-
-                # Get actual documents
-                for solution in sorted_solutions[:3]:
-                    doc_id = solution.get("doc_id")
-                    if doc_id:
-                        doc = self._get_document(doc_id)
-                        if doc:
-                            doc["distance"] = doc.get("distance", 1.0) * 0.5  # 50% boost
-                            doc["is_known_solution"] = True
-                            doc["solution_success_count"] = solution.get("success_count", 0)
-                            known_solutions.append(doc)
-                            logger.info(f"Found known solution: {doc_id}")
-
-            # Check partial matches
-            for problem_sig, solutions in problem_solutions.items():
-                if problem_sig != query_signature:
-                    problem_concepts_stored = set(problem_sig.split("_"))
-                    overlap = len(set(query_concepts) & problem_concepts_stored)
-
-                    if overlap >= 3:  # Significant overlap
-                        for solution in solutions[:1]:
-                            doc_id = solution.get("doc_id")
-                            existing_ids = [s.get("id") for s in known_solutions]
-
-                            if doc_id and doc_id not in existing_ids:
-                                doc = self._get_document(doc_id)
-                                if doc:
-                                    doc["distance"] = doc.get("distance", 1.0) * 0.7  # 30% boost
-                                    doc["is_partial_solution"] = True
-                                    doc["concept_overlap"] = overlap
-                                    known_solutions.append(doc)
-
-            return known_solutions
-
-        except Exception as e:
-            logger.error(f"Error finding known solutions: {e}")
-            return []
-
-    def _get_document(self, doc_id: str) -> Optional[Dict[str, Any]]:
-        """Get document from appropriate collection."""
-        for coll_name, adapter in self.collections.items():
-            if doc_id.startswith(coll_name + "_"):
-                doc = adapter.get_fragment(doc_id)
-                if doc:
-                    return {
-                        "id": doc_id,
-                        "content": doc.get("content", ""),
-                        "metadata": doc.get("metadata", {}),
-                        "distance": 1.0,
-                        "collection": coll_name
-                    }
-        return None
+        """Find known solutions. v0.4.5: KG removed — tag-routed search handles this."""
+        return []
 
     def get_context_summary(
         self,

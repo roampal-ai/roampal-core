@@ -54,7 +54,7 @@ __version__ = _pkg_version("roampal")
 from roampal.backend.modules.memory import UnifiedMemorySystem
 from roampal.backend.modules.memory.scoring_service import wilson_score_lower
 from roampal.backend.modules.memory.unified_memory_system import ActionOutcome
-from roampal.backend.modules.memory.content_graph import ContentGraph
+# v0.4.5: ContentGraph removed (KG deleted)
 from roampal.hooks import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -400,6 +400,7 @@ class StopHookRequest(BaseModel):
     assistant_response: str = ""  # v0.3.6: Optional — Claude Code sends empty (state-only)
     transcript: Optional[str] = None  # Full transcript to check for record_response call
     metadata: Optional[Dict[str, Any]] = None  # v0.3.6: Extra metadata (e.g., memory_type: "exchange_summary")
+    noun_tags: Optional[List[str]] = None  # v0.4.5: content nouns for TagCascade retrieval
     lifecycle_only: bool = False  # v0.3.6: Track in session JSONL but skip ChromaDB storage
 
 
@@ -428,6 +429,7 @@ class MemoryBankAddRequest(BaseModel):
     """Request to add to memory bank."""
     content: str
     tags: Optional[List[str]] = None
+    noun_tags: Optional[List[str]] = None  # v0.4.5: content nouns for TagCascade retrieval
     importance: float = 0.7
     confidence: float = 0.7
     always_inject: bool = False
@@ -447,12 +449,15 @@ class RecordOutcomeRequest(BaseModel):
     memory_scores: Optional[Dict[str, str]] = None  # v0.2.8: Per-memory scoring (doc_id -> outcome)
     exchange_summary: Optional[str] = None  # v0.3.6: ~300 char summary from main LLM
     exchange_outcome: Optional[str] = None  # v0.3.6: backward compat alias for outcome
+    noun_tags: Optional[List[str]] = None  # v0.4.5: content nouns for TagCascade retrieval
+    facts: Optional[List[str]] = None  # v0.4.5: atomic facts from exchange
 
 
 class RecordResponseRequest(BaseModel):
     """Request to record a key takeaway (MCP tool proxy)."""
     key_takeaway: str
     conversation_id: str
+    noun_tags: Optional[List[str]] = None  # v0.4.5: content nouns for TagCascade retrieval
 
 
 class UpdateContentRequest(BaseModel):
@@ -460,6 +465,7 @@ class UpdateContentRequest(BaseModel):
     doc_id: str
     collection: str
     new_content: str
+    noun_tags: Optional[List[str]] = None  # v0.4.5: content nouns for TagCascade
 
 
 # ==================== Lifecycle ====================
@@ -788,7 +794,8 @@ def create_app() -> FastAPI:
                     doc_id = await _memory.store_working(
                         content=content,
                         conversation_id=conversation_id,
-                        metadata=store_metadata
+                        metadata=store_metadata,
+                        noun_tags=request.noun_tags
                     )
 
                     await _session_manager.store_exchange(
@@ -937,6 +944,7 @@ def create_app() -> FastAPI:
             doc_id = await _memory.store_memory_bank(
                 text=content,
                 tags=request.tags,
+                noun_tags=request.noun_tags,
                 importance=request.importance,
                 confidence=request.confidence,
                 always_inject=request.always_inject
@@ -1104,7 +1112,8 @@ def create_app() -> FastAPI:
                     "type": "key_takeaway",
                     "timestamp": datetime.now().isoformat()
                 },
-                initial_score=0.7
+                initial_score=0.7,
+                noun_tags=request.noun_tags
             )
             logger.info(f"Recorded takeaway (score=0.7): {request.key_takeaway[:50]}...")
             return {"success": True, "doc_id": doc_id}
@@ -1319,6 +1328,10 @@ def create_app() -> FastAPI:
                                 metadata["exchange_outcome"] = request.outcome
                                 metadata["summarized_at"] = datetime.now().isoformat()
                                 metadata["original_length"] = len(doc.get("content", ""))
+                                # v0.4.5: noun_tags for TagCascade retrieval
+                                if request.noun_tags:
+                                    import json as _json
+                                    metadata["noun_tags"] = _json.dumps(request.noun_tags)
 
                                 embedding = await _memory._embedding_service.embed_text(request.exchange_summary)
                                 await adapter.upsert_vectors(
@@ -1338,12 +1351,37 @@ def create_app() -> FastAPI:
                                 "exchange_outcome": request.outcome or "unknown",
                                 "summarized_at": datetime.now().isoformat(),
                                 "turn_type": "exchange",
-                            }
+                            },
+                            noun_tags=request.noun_tags
                         )
                         summary_stored = True
                         logger.info(f"Stored exchange summary {summary_doc_id} directly ({len(request.exchange_summary)} chars)")
                 except Exception as e:
                     logger.error(f"Failed to store exchange summary: {e}")
+
+            # v0.4.5: Store atomic facts as separate working memories
+            if request.facts and _memory:
+                for fact_text in request.facts:
+                    if not fact_text or len(fact_text.strip()) < 10:
+                        continue
+                    try:
+                        # Extract noun_tags from fact via regex (no LLM call)
+                        from roampal.backend.modules.memory.tag_service import extract_tags_regex
+                        fact_noun_tags = extract_tags_regex(fact_text)
+
+                        await _memory.store_working(
+                            content=fact_text,
+                            conversation_id=conversation_id,
+                            metadata={
+                                "memory_type": "fact",
+                                "timestamp": datetime.now().isoformat(),
+                            },
+                            noun_tags=fact_noun_tags if fact_noun_tags else None
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to store fact: {e}")
+                if request.facts:
+                    logger.info(f"Stored {len([f for f in request.facts if f and len(f.strip()) >= 10])} atomic facts")
 
             # Log final result and trigger background updates
             if doc_ids_scored:
@@ -1409,6 +1447,9 @@ def create_app() -> FastAPI:
             metadata["content"] = request.new_content
             metadata["summarized_at"] = datetime.now().isoformat()
             metadata["original_length"] = len(doc.get("content", ""))
+            # v0.4.5: noun_tags for TagCascade retrieval
+            if request.noun_tags:
+                metadata["noun_tags"] = json.dumps(request.noun_tags)
 
             # Re-embed with new content
             embedding = await _memory._embedding_service.embed_text(request.new_content)

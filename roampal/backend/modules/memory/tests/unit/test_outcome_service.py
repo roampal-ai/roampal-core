@@ -33,15 +33,12 @@ class TestOutcomeServiceInit:
         assert service.config.promotion_score_threshold == 0.8
 
     def test_init_with_services(self):
-        """Should accept KG and promotion services."""
-        kg_mock = MagicMock()
+        """v0.4.5: Should accept promotion service (kg_service removed)."""
         promo_mock = MagicMock()
         service = OutcomeService(
             collections={},
-            kg_service=kg_mock,
             promotion_service=promo_mock
         )
-        assert service.kg_service == kg_mock
         assert service.promotion_service == promo_mock
 
 
@@ -332,23 +329,8 @@ class TestOutcomeStats:
         assert stats["error"] == "not_found"
 
 
-class TestKGIntegration:
-    """Test KG service integration."""
-
-    @pytest.fixture
-    def mock_kg_service(self):
-        kg = MagicMock()
-        kg.extract_concepts = MagicMock(return_value=["test", "concept"])
-        kg.update_kg_routing = AsyncMock()
-        kg.build_concept_relationships = MagicMock()
-        kg.add_problem_category = MagicMock()
-        kg.add_solution_pattern = MagicMock()
-        kg.update_success_rate = MagicMock()
-        kg.add_failure_pattern = MagicMock()
-        kg.add_problem_solution = MagicMock()
-        kg.add_solution_pattern_entry = MagicMock()
-        kg.debounced_save_kg = AsyncMock()
-        return kg
+class TestNoKGDependency:
+    """v0.4.5: Verify OutcomeService works without KG."""
 
     @pytest.fixture
     def mock_collections(self):
@@ -369,47 +351,25 @@ class TestKGIntegration:
         return {"working": working}
 
     @pytest.fixture
-    def service(self, mock_collections, mock_kg_service):
-        return OutcomeService(
+    def service(self, mock_collections):
+        return OutcomeService(collections=mock_collections)
+
+    @pytest.mark.asyncio
+    async def test_record_outcome_without_kg(self, service):
+        """v0.4.5: Should record outcome without KG service."""
+        result = await service.record_outcome("working_test123", "worked")
+        assert result is not None
+        assert result["score"] > 0.5  # worked should increase score
+
+    @pytest.mark.asyncio
+    async def test_accepts_kg_service_kwarg(self, mock_collections):
+        """v0.4.5: Should accept and ignore kg_service via **kwargs."""
+        service = OutcomeService(
             collections=mock_collections,
-            kg_service=mock_kg_service
+            kg_service=MagicMock()  # Should be ignored
         )
-
-    @pytest.mark.asyncio
-    async def test_updates_kg_routing(self, service, mock_kg_service):
-        """Should update KG routing on outcome."""
-        await service.record_outcome("working_test123", "worked")
-
-        assert mock_kg_service.update_kg_routing.call_count >= 1  # Desktop calls twice
-
-    @pytest.mark.asyncio
-    async def test_builds_relationships_on_success(self, service, mock_kg_service):
-        """Should build concept relationships on worked outcome."""
-        await service.record_outcome("working_test123", "worked")
-        await asyncio.sleep(0.1)  # v0.2.3: Let deferred learning task run
-
-        mock_kg_service.build_concept_relationships.assert_called()
-        mock_kg_service.add_problem_category.assert_called()
-
-    @pytest.mark.asyncio
-    async def test_tracks_failure_patterns(self, service, mock_kg_service):
-        """Should track failure patterns on failed outcome."""
-        await service.record_outcome(
-            "working_test123",
-            "failed",
-            failure_reason="Test failure"
-        )
-        await asyncio.sleep(0.1)  # v0.2.3: Let deferred learning task run
-
-        mock_kg_service.add_failure_pattern.assert_called()
-
-    @pytest.mark.asyncio
-    async def test_saves_kg_after_update(self, service, mock_kg_service):
-        """Should save KG after updates."""
-        await service.record_outcome("working_test123", "worked")
-        await asyncio.sleep(0.1)  # v0.2.3: Let deferred learning task run
-
-        mock_kg_service.debounced_save_kg.assert_called()
+        result = await service.record_outcome("working_test123", "worked")
+        assert result is not None
 
 
 class TestPromotionIntegration:

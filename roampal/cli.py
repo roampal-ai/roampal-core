@@ -3,7 +3,7 @@ Roampal CLI - One command install for AI coding tools
 
 Usage:
     pip install roampal
-    roampal init          # Configure Claude Code / Cursor / OpenCode
+    roampal init          # Configure Claude Code / OpenCode
     roampal start         # Start the memory server
     roampal stop          # Stop the memory server
     roampal status        # Check server status
@@ -1620,7 +1620,7 @@ def cmd_doctor(args):
         except ImportError:
             check_fail(f"{display_name} not installed")
 
-    # v0.4.3: Hint about legacy torch no longer needed
+    # v0.4.5: Hint about legacy torch/sentence-transformers no longer needed
     try:
         import torch as _torch
         check_warn(
@@ -1629,6 +1629,14 @@ def cmd_doctor(args):
         )
     except ImportError:
         pass  # Good — torch not installed
+    try:
+        import sentence_transformers as _st
+        check_warn(
+            f"sentence-transformers installed but no longer required by roampal. "
+            f"Reclaim space: pip uninstall sentence-transformers"
+        )
+    except ImportError:
+        pass  # Good — sentence-transformers not installed
 
     # Summary
     print(f"\n{BOLD}{'='*50}{RESET}")
@@ -1691,7 +1699,7 @@ def cmd_books(args):
 
 
 def cmd_score(args):
-    """Score the last exchange using the sidecar (Haiku via claude CLI)."""
+    """Score the last exchange using the sidecar."""
     import hashlib
     import httpx
 
@@ -2175,28 +2183,54 @@ def cmd_summarize(args):
         if len(summary) > max_chars:
             summary = summary[:max_chars - 20] + "... [truncated]"
 
-        # Update the memory with the summary
+        # v0.4.5: Extract noun_tags from summary and facts from original content
+        from roampal.sidecar_service import extract_tags, extract_facts
+        noun_tags = extract_tags(summary) or []
+        facts = extract_facts(content) or []
+
+        # Update the memory with the summary + noun_tags
         try:
+            update_payload = {
+                "doc_id": doc_id,
+                "collection": coll_name,
+                "new_content": summary
+            }
+            if noun_tags:
+                update_payload["noun_tags"] = noun_tags
+
             update_resp = httpx.post(
                 f"{base_url}/api/memory/update-content",
-                json={
-                    "doc_id": doc_id,
-                    "collection": coll_name,
-                    "new_content": summary
-                },
+                json=update_payload,
                 timeout=10.0
             )
 
             if update_resp.status_code == 200:
                 total_summarized += 1
                 batch_count += 1
-                print(f"  [{i+1}/{len(all_candidates)}] {doc_id}: {len(content)} -> {len(summary)} chars")
+                tag_info = f", tags={noun_tags}" if noun_tags else ""
+                fact_info = f", {len(facts)} facts" if facts else ""
+                print(f"  [{i+1}/{len(all_candidates)}] {doc_id}: {len(content)} -> {len(summary)} chars{tag_info}{fact_info}")
             else:
                 total_skipped += 1
                 print(f"  {YELLOW}[{i+1}] Failed to update {doc_id}: {update_resp.status_code}{RESET}")
         except Exception as e:
             total_skipped += 1
             print(f"  {RED}[{i+1}] Error updating {doc_id}: {e}{RESET}")
+
+        # v0.4.5: Store extracted facts as separate working memories
+        for fact_text in facts:
+            try:
+                httpx.post(
+                    f"{base_url}/api/record-response",
+                    json={
+                        "key_takeaway": fact_text,
+                        "conversation_id": "summarize_cmd",
+                        "noun_tags": extract_tags(fact_text) or []
+                    },
+                    timeout=10.0
+                )
+            except Exception:
+                pass  # Best effort — summary is stored regardless
 
     print()
     if dry_run:
@@ -2630,6 +2664,8 @@ def cmd_sidecar(args):
         _cmd_sidecar_setup(args)
     elif subcommand == "disable":
         _cmd_sidecar_disable(args)
+    elif subcommand == "test":
+        _cmd_sidecar_test(args)
     else:
         print(f"{RED}Unknown sidecar command: {subcommand}{RESET}")
 
@@ -2807,6 +2843,53 @@ def _cmd_sidecar_disable(args):
     print(f"{YELLOW}Restart OpenCode to take effect.{RESET}")
 
 
+def _cmd_sidecar_test(args):
+    """Test sidecar scoring with a sample exchange and validate response format."""
+    from roampal.sidecar_service import get_backend_info, test_sidecar_scoring
+
+    print(f"{BOLD}Testing sidecar scoring...{RESET}")
+    backend = get_backend_info()
+    print(f"Backend: {GREEN}{backend}{RESET}")
+
+    if backend == "none available":
+        print(f"\n{RED}No sidecar backend available.{RESET}")
+        print(f"Run {BLUE}roampal sidecar setup{RESET} to configure one.")
+        return
+
+    print()
+    print(f"Sending test exchange:")
+    print(f"  User: \"I'm working on a Python project called Roampal\"")
+    print(f"  Assistant: \"I'll help with your Roampal project\"")
+    print(f"  Follow-up: \"Thanks, that's exactly right\"")
+    print()
+
+    result = test_sidecar_scoring()
+
+    if result.get("error"):
+        print(f"{RED}Error: {result['error']}{RESET}")
+        return
+
+    fields = result.get("fields", {})
+    all_pass = True
+
+    for field_name, field_result in fields.items():
+        ok = field_result["ok"]
+        value = field_result["value"]
+        if ok:
+            print(f"  {field_name}: {GREEN}OK{RESET} ({value})")
+        else:
+            all_pass = False
+            print(f"  {field_name}: {RED}FAIL{RESET} ({value})")
+
+    print()
+    if all_pass:
+        print(f"{GREEN}Sidecar is working correctly.{RESET}")
+    else:
+        print(f"{RED}Sidecar response is missing required fields.{RESET}")
+        print(f"The scoring model may need to be changed — try a larger model.")
+        print(f"Run {BLUE}roampal sidecar setup{RESET} to reconfigure.")
+
+
 def main():
     """Main CLI entry point."""
     from roampal import __version__
@@ -2817,7 +2900,7 @@ def main():
         allow_abbrev=False,
         epilog="""commands:
   Setup:
-    init              Initialize for Claude Code / Cursor / OpenCode
+    init              Initialize for Claude Code / OpenCode
     doctor            Diagnose installation and configuration
 
   Server:
@@ -2835,6 +2918,7 @@ def main():
   Scoring (OpenCode):
     sidecar status    Check scoring model configuration
     sidecar setup     Configure scoring model
+    sidecar test      Test scoring model response format
     sidecar disable   Remove scoring model configuration
 
   Advanced:
@@ -2853,7 +2937,7 @@ examples:
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
     # init command
-    init_parser = subparsers.add_parser("init", help="Initialize Roampal for Claude Code / Cursor / OpenCode")
+    init_parser = subparsers.add_parser("init", help="Initialize Roampal for Claude Code / OpenCode")
     init_parser.add_argument("--dev", action="store_true", help="Initialize for DEV mode (separate data directory)")
     init_parser.add_argument("--claude-code", action="store_true", help="Configure Claude Code only (skip auto-detect)")
     init_parser.add_argument("--cursor", action="store_true", help="Configure Cursor only (skip auto-detect)")
@@ -2903,7 +2987,7 @@ examples:
     books_parser = subparsers.add_parser("books", help="List all books in memory")
 
     # score command (v0.3.6)
-    score_parser = subparsers.add_parser("score", help="Score the last exchange using sidecar (Haiku)")
+    score_parser = subparsers.add_parser("score", help="Score the last exchange using sidecar")
     score_parser.add_argument("--from-hook", action="store_true", help="Read Stop hook event data from stdin")
     score_parser.add_argument("--session-id", type=str, default=None, help="Claude Code session ID (transcript filename)")
     score_parser.add_argument("--transcript", type=str, default=None, help="Direct path to transcript file")
@@ -2932,6 +3016,7 @@ examples:
     sidecar_setup = sidecar_sub.add_parser("setup", help="Auto-detect and configure a scorer")
     sidecar_setup.add_argument("--auto", action="store_true", help="Auto-select best model (no prompts)")
     sidecar_sub.add_parser("status", help="Show current sidecar configuration")
+    sidecar_sub.add_parser("test", help="Test sidecar with sample exchange")
     sidecar_sub.add_parser("disable", help="Remove sidecar fallback")
 
     # doctor command

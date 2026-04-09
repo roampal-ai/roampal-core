@@ -379,25 +379,25 @@ def _call_llm(prompt: str) -> Optional[Dict[str, Any]]:
     2. Zen free models (~5s, $0)
     3. Ollama / LM Studio local (~5-14s, $0)
     """
-    # 0. Custom endpoint (user-configured — takes priority over everything)
+    # 0. Custom endpoint (user-configured via roampal sidecar setup — takes priority)
     result = _call_custom(prompt)
     if result:
         return result
 
-    # 1. Direct API (fastest, cheapest per-call)
-    result = _call_haiku(prompt)
-    if result:
-        return result
-
-    # 2. Zen free models (free, no auth)
+    # 1. Zen free models (free, no auth)
     result = _call_zen(prompt)
     if result:
         return result
 
-    # 3. Ollama / LM Studio local (free, no network)
+    # 2. Ollama / LM Studio local (free, no network)
     result = _call_local(prompt)
     if result:
         return result
+
+    # v0.4.5: Haiku removed from auto-fallback chain.
+    # Never silently use ANTHROPIC_API_KEY — users must explicitly configure
+    # a sidecar via `roampal sidecar setup` (sets ROAMPAL_SIDECAR_URL).
+    # _call_haiku() still exists for explicit use (e.g. ROAMPAL_SUMMARIZE_MODEL).
 
     logger.error("All sidecar backends failed")
     return None
@@ -409,8 +409,7 @@ def get_backend_info() -> str:
         return f"Anthropic API ({SUMMARIZE_MODEL}) via ROAMPAL_SUMMARIZE_MODEL"
     if CUSTOM_URL and CUSTOM_MODEL:
         return f"Custom ({CUSTOM_MODEL} @ {CUSTOM_URL})"
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return "Haiku API (direct)"
+    # v0.4.5: Haiku removed from auto-detect — must be configured explicitly
     # Quick Zen check (chat endpoint — /models returns 403 outside OpenCode)
     try:
         test_data = json.dumps({
@@ -562,3 +561,142 @@ Respond with ONLY a JSON object:
 
     result = _call_llm(prompt)
     return result.get("summary") if result else None
+
+
+def extract_tags(text: str, timeout: int = 10) -> Optional[List[str]]:
+    """
+    Extract key noun tags from text using sidecar LLM.
+
+    v0.4.5: Used for ongoing tag extraction on new memories.
+    Prompt proven at 67.8% accuracy in LoCoMo benchmark (EntityRouted strategy).
+
+    Returns:
+        List of lowercase tag strings (max 8), or None on failure
+    """
+    prompt = (
+        "Extract the key TOPIC nouns from this text — people's names, places, objects, "
+        "and specific things the text is actually about. "
+        'Return ONLY a JSON object like: {"tags": ["calvin", "muscle car", "boston"]}\n'
+        "Rules:\n"
+        "- Use actual names, not pronouns (skip 'he', 'she', 'they', 'user', 'assistant')\n"
+        "- Keep each tag as a short noun phrase (1-3 words)\n"
+        "- Include both proper nouns and important common nouns\n"
+        "- Skip meta-words about the conversation itself: source, answer, details, accuracy, "
+        "response, question, topic, context, information, correction, update, memory\n"
+        "- Skip generic verbs/actions: said, told, mentioned, discussed, talked, asked\n"
+        "- Focus on WHO and WHAT the text is about, not how it was communicated\n"
+        f"- Maximum 8 tags\n\nText: \"{text[:500]}\""
+    )
+
+    result = _call_llm(prompt)
+    if not result:
+        return None
+
+    tags = result.get("tags")
+    if not isinstance(tags, list):
+        return None
+
+    skip = {"he", "she", "they", "it", "user", "assistant", "the user",
+            "the assistant", "i", "you", "we", "them", "his", "her"}
+    cleaned = [
+        t.lower().strip() for t in tags
+        if isinstance(t, str) and t.lower().strip() not in skip and len(t.strip()) >= 2
+    ]
+    return cleaned[:8] if cleaned else None
+
+
+def extract_facts(text: str, timeout: int = 15) -> Optional[List[str]]:
+    """
+    Extract atomic facts from text using sidecar LLM.
+
+    v0.4.5: Used for fact extraction alongside summarization.
+    Prompt matches benchmark (runner.py:175-196).
+
+    Returns:
+        List of fact strings (max 150 chars each), or None on failure
+    """
+    prompt = (
+        "Extract key facts worth remembering from this text. Rules:\n"
+        "- Include WHO or WHAT each fact is about — names, projects, topics\n"
+        "- Combine related details into ONE rich fact rather than many fragments\n"
+        "- Include specifics: dates, versions, preferences, decisions, reasons\n"
+        "- ONE fact per line, max 150 characters\n"
+        "- Skip vague feelings, pleasantries, or generic observations\n"
+        "\n"
+        'GOOD: "The auth service uses JWT with 24h expiry, needs refresh token rotation added"\n'
+        'GOOD: "User prefers TypeScript over JavaScript and uses Zod for validation"\n'
+        'BAD: "They discussed something" (no specifics)\n'
+        'BAD: "It was helpful" (no content)\n'
+        "\n"
+        'Return ONLY a JSON object: {"facts": ["fact 1", "fact 2"]}\n'
+        "If no useful facts, return: {\"facts\": []}\n"
+        f"\nText: \"{text[:800]}\""
+    )
+
+    result = _call_llm(prompt)
+    if not result:
+        return None
+
+    facts = result.get("facts")
+    if not isinstance(facts, list):
+        return None
+
+    cleaned = [
+        f.strip().lstrip("•-*0123456789. ")
+        for f in facts
+        if isinstance(f, str) and len(f.strip()) > 10
+    ]
+    return cleaned[:10] if cleaned else None
+
+
+def test_sidecar_scoring() -> Dict[str, Any]:
+    """
+    Test sidecar with a full scoring prompt and validate response format.
+
+    v0.4.5: Used by `roampal sidecar test` to verify the sidecar
+    returns all required fields (summary, outcome, noun_tags, facts).
+
+    Returns:
+        Dict with test results: {passed: bool, fields: {field: {ok, value}}, raw: str}
+    """
+    prompt = """The user said:
+"I'm working on a Python project called Roampal that adds persistent memory to AI coding tools"
+
+You responded:
+"I'll help with your Roampal project. It sounds like a memory system for AI assistants."
+
+The user then followed up with:
+"Thanks, that's exactly right"
+
+Respond with ONLY a JSON object:
+{ "summary": "<~300 chars>", "outcome": "<worked|failed|partial|unknown>", "noun_tags": ["<lowercase nouns>"], "facts": ["<atomic fact 1>", "<atomic fact 2>"] }
+
+SUMMARY (under 300 chars): Capture what happened AND what changed.
+OUTCOME: Based on the user's follow-up (worked/failed/partial/unknown).
+NOUN_TAGS: Key topic nouns — lowercase, 1-3 words each, max 8.
+FACTS: Key facts worth remembering — WHO/WHAT, specifics, max 150 chars each."""
+
+    result = _call_llm(prompt)
+
+    fields = {}
+    if result is None:
+        return {"passed": False, "fields": {}, "error": "All backends failed"}
+
+    # Validate summary
+    summary = result.get("summary", "")
+    fields["summary"] = {"ok": isinstance(summary, str) and len(summary) > 0, "value": summary[:100] if summary else "(missing)"}
+
+    # Validate outcome
+    outcome = result.get("outcome", "")
+    fields["outcome"] = {"ok": outcome in ("worked", "failed", "partial", "unknown"), "value": outcome or "(missing)"}
+
+    # Validate noun_tags
+    noun_tags = result.get("noun_tags", [])
+    fields["noun_tags"] = {"ok": isinstance(noun_tags, list) and len(noun_tags) > 0, "value": noun_tags if isinstance(noun_tags, list) else "(missing)"}
+
+    # Validate facts
+    facts = result.get("facts", [])
+    fields["facts"] = {"ok": isinstance(facts, list) and len(facts) > 0, "value": facts if isinstance(facts, list) else "(missing)"}
+
+    passed = all(f["ok"] for f in fields.values())
+    return {"passed": passed, "fields": fields}

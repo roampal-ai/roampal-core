@@ -521,6 +521,11 @@ VERIFICATION USE:
                             "type": "string",
                             "enum": ["relevance", "recency", "score"],
                             "description": "Sort order. 'recency' for temporal queries like 'last thing we did'. Auto-detected if omitted."
+                        },
+                        "type": {
+                            "type": "string",
+                            "enum": ["fact", "summary"],
+                            "description": "Filter by memory type. 'fact' = atomic facts, 'summary' = exchange summaries. Only applies to working/history/patterns. Omit to search all types."
                         }
                     },
                     "required": []
@@ -580,11 +585,12 @@ STORAGE DISCIPLINE:
                     "properties": {
                         "content": {"type": "string", "description": "The fact to remember"},
                         "tags": {"type": "array", "items": {"type": "string"}, "description": "Categories: identity, preference, goal, project, system_mastery, agent_growth"},
+                        "noun_tags": {"type": "array", "items": {"type": "string"}, "description": "Key nouns from the content — people names, places, objects, specific things. Lowercase."},
                         "importance": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.7, "description": "How critical (0.0-1.0)"},
                         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.7, "description": "How certain (0.0-1.0)"},
                         "always_inject": {"type": "boolean", "default": False, "description": "If true, this memory appears in EVERY context (use for core identity only)"}
                     },
-                    "required": ["content"]
+                    "required": ["content", "noun_tags"]
                 }
             ),
             types.Tool(
@@ -674,6 +680,16 @@ ACTIVE MEMORY MANAGEMENT:
                             "type": "string",
                             "enum": ["worked", "failed", "partial", "unknown"],
                             "description": "Was the previous response effective?"
+                        },
+                        "noun_tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Key nouns from the exchange summary — people names, places, topics. Lowercase."
+                        },
+                        "facts": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Atomic facts from this exchange. One fact per string, max 150 chars. Include WHO/WHAT, specifics (dates, names, preferences, decisions). Skip vague observations."
                         }
                     },
                     "required": ["memory_scores"]
@@ -701,9 +717,14 @@ Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -
                     "key_takeaway": {
                         "type": "string",
                         "description": "1-2 sentence summary of the important learning"
+                    },
+                    "noun_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Key nouns from the takeaway — people names, places, objects, specific things. Lowercase."
                     }
                 },
-                "required": ["key_takeaway"]
+                "required": ["key_takeaway", "noun_tags"]
             }
         ))
         # v0.3.6: get_context_insights REMOVED — hooks/plugin already inject KNOWN CONTEXT
@@ -741,10 +762,17 @@ Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -
                 query = arguments.get("query", "")
                 collections = arguments.get("collections")
                 limit = arguments.get("limit", 5)
-                metadata = arguments.get("metadata")
+                metadata = arguments.get("metadata") or {}
                 sort_by = arguments.get("sort_by")
                 days_back = arguments.get("days_back")
                 doc_id = arguments.get("id")
+                type_filter = arguments.get("type")
+
+                # v0.4.5: type filter for fact/summary distinction
+                if type_filter == "fact":
+                    metadata["memory_type"] = "fact"
+                elif type_filter == "summary":
+                    metadata["memory_type"] = {"$ne": "fact"}
 
                 # Validation: at least one of query, days_back, or id must be provided
                 if not query and not days_back and not doc_id:
@@ -887,12 +915,14 @@ Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -
             elif name == "add_to_memory_bank":
                 content = arguments.get("content")
                 tags = arguments.get("tags", [])
+                noun_tags = arguments.get("noun_tags", [])
                 importance = arguments.get("importance", 0.7)
                 confidence = arguments.get("confidence", 0.7)
                 always_inject = arguments.get("always_inject", False)
 
                 result = await _api_call("POST", "/api/memory-bank/add", {
                     "content": content,
+                    "noun_tags": noun_tags,
                     "tags": tags,
                     "importance": importance,
                     "confidence": confidence,
@@ -948,6 +978,8 @@ Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -
                 memory_scores = arguments.get("memory_scores", {})
                 exchange_summary = arguments.get("exchange_summary")
                 exchange_outcome = arguments.get("exchange_outcome")
+                noun_tags = arguments.get("noun_tags", [])
+                facts = arguments.get("facts", [])
                 # Backward compat: accept old "outcome" param as fallback
                 outcome = exchange_outcome or arguments.get("outcome", "unknown")
 
@@ -959,6 +991,10 @@ Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -
                     payload["memory_scores"] = memory_scores
                 if exchange_summary:
                     payload["exchange_summary"] = exchange_summary
+                if noun_tags:
+                    payload["noun_tags"] = noun_tags
+                if facts:
+                    payload["facts"] = facts
 
                 scored_count = 0
                 try:
@@ -978,6 +1014,7 @@ Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -
 
             elif name == "record_response":
                 key_takeaway = arguments.get("key_takeaway", "")
+                noun_tags = arguments.get("noun_tags", [])
 
                 if not key_takeaway:
                     return [types.TextContent(
@@ -987,7 +1024,8 @@ Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -
 
                 result = await _api_call("POST", "/api/record-response", {
                     "key_takeaway": key_takeaway,
-                    "conversation_id": _mcp_session_id
+                    "conversation_id": _mcp_session_id,
+                    "noun_tags": noun_tags
                 })
 
                 logger.info(f"Recorded takeaway (score=0.7): {key_takeaway[:50]}...")

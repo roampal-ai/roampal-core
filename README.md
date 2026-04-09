@@ -124,6 +124,7 @@ roampal books               # List all ingested books
 roampal remove <title>      # Remove a book by title
 roampal sidecar status      # Check scoring model configuration (OpenCode)
 roampal sidecar setup       # Configure scoring model (OpenCode)
+roampal sidecar test        # Test scoring model response format (OpenCode)
 roampal sidecar disable     # Remove scoring model configuration (OpenCode)
 ```
 
@@ -153,27 +154,30 @@ Your AI gets these memory tools:
 
 ### Benchmarks
 
-Tested across 10 adversarial scenarios designed to trick similarity search (200 total tests):
+**85.8% on LoCoMo** (non-adversarial, end-to-end answer accuracy) — validated on 1,986 questions across 10 conversations with dual grading.
 
-| Condition | Top-1 Accuracy |
-|-----------|---------------|
-| RAG baseline (vector search only) | 10% |
-| + Cross-encoder reranking | 20% |
-| **Full Roampal (outcomes + reranking)** | **10% → 60% at maturity** |
+| Result | Score |
+|--------|-------|
+| Conversational learning vs raw ingestion | **+23 points** (76.6% vs 53.0%, p<0.0001) |
+| Architecture vs model effect | Architecture **~10x larger** contributor |
+| Poison resilience (1,135 adversarial memories) | **-2.6 to -4.2 points** only |
+| TagCascade retrieval (tags-first + CE rerank) | **+1.9 Hit@1** vs pure CE (p<0.0001) |
 
-Outcome learning provides a **5x improvement** over reranking alone (+50 pts vs +10 pts). Roampal vs plain vector DB: **40% vs 0%** accuracy on adversarial queries (p=0.000135).
+Benchmark pipeline runs on a single GPU with no cloud dependencies. Roampal itself runs on CPU — no GPU required. Full methodology, data, and evaluation scripts: [roampal-labs](https://github.com/roampal-ai/roampal-labs)
 
-Full benchmark data: [`dev/benchmarks/results/`](dev/benchmarks/results/)
+Paper: *"Beyond Ingestion: What Conversational Memory Learning Reveals on a Corrected LoCoMo Benchmark"* (Logan Teague, April 2026)
 
 ### How Roampal Compares
 
-| Feature | Roampal Core | .cursorrules / CLAUDE.md | Mem0 |
-|---------|-------------|--------------------------|------|
+| Feature | Roampal Core | Claude Code built-in (CLAUDE.md / auto memory) | OpenCode built-in |
+|---------|-------------|--------------------------------------------------|-------------------|
 | Learns from outcomes | Yes — bad advice demoted, good advice promoted | No | No |
-| Zero-config context injection | Yes — injected automatically (hooks or plugin) | Manual file editing | API calls required |
-| Works across sessions | Yes — 5 memory collections with promotion | Per-project static files | Yes |
-| Fully local / private | Yes — all data on your machine | Yes | Cloud or self-hosted |
-| Open source | Apache 2.0 | N/A | Apache 2.0 |
+| Semantic retrieval | Yes — TagCascade + cross-encoder reranking | No — files loaded in full, no search | No memory system |
+| Context injection | Automatic — relevant memories per query | Full CLAUDE.md every session, auto memory on demand | None |
+| Atomic fact extraction | Yes — summaries + facts, two-lane retrieval | No — saves what Claude decides is useful | No |
+| Works across projects | Yes — shared memory across all projects | Per-project only (per git repo) | No memory |
+| Scales with history | Yes — 5 collections, promotion/demotion/decay | CLAUDE.md unbounded, auto memory first 200 lines | No memory |
+| Fully local / private | Yes — ChromaDB on your machine | Yes | Yes |
 
 <details>
 <summary><strong>Architecture</strong></summary>
@@ -216,6 +220,10 @@ See [`dev/docs/`](dev/docs/) for full technical details.
 - Python 3.10+
 - One of: **Claude Code** or **OpenCode**
 - **Platforms:** Windows, macOS, Linux (primarily developed and tested on Windows)
+- **RAM:** ~800MB available (cross-encoder reranker + embeddings + ChromaDB)
+- **Disk:** ~500MB for models (multilingual embedding + reranker, downloaded automatically on first use)
+- **CPU:** Any modern x86-64 processor with AVX2 (Intel Haswell 2013+ / AMD Excavator 2015+)
+- **GPU:** Not required — all inference runs on CPU via ONNX Runtime
 
 ## Troubleshooting
 

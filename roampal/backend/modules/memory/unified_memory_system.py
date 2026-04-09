@@ -26,7 +26,8 @@ from .memory_bank_service import MemoryBankService
 from .context_service import ContextService
 from .promotion_service import PromotionService
 from .routing_service import RoutingService
-from .knowledge_graph_service import KnowledgeGraphService
+from .tag_service import TagService
+from .tag_migration import TagMigration
 from .search_service import SearchService
 
 logger = logging.getLogger(__name__)
@@ -314,34 +315,14 @@ class UnifiedMemorySystem:
         self.collections: Dict[str, ChromaDBAdapter] = {}
         self.initialized = False
 
-        # Knowledge Graph - shared with Desktop
-        self.kg_path = self.data_path / "knowledge_graph.json"
-        self.knowledge_graph = self._load_kg()
+        # v0.4.5: KG removed. Tag service handles routing now.
 
         # Ghost Registry - tracks deleted book IDs without modifying ChromaDB
         # v0.2.2: Non-destructive delete to avoid HNSW index corruption
         self.ghost_registry_path = self.data_path / "ghost_ids.json"
         self.ghost_ids: set = self._load_ghost_registry()
 
-    def _load_kg(self) -> Dict[str, Any]:
-        """Load knowledge graph from disk, or return default structure."""
-        if self.kg_path.exists():
-            try:
-                with open(self.kg_path, 'r') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.warning(f"Failed to load KG from {self.kg_path}: {e}")
-
-        # Default empty KG structure
-        return {
-            "routing_patterns": {},
-            "success_rates": {},
-            "failure_patterns": {},
-            "problem_categories": {},
-            "problem_solutions": {},
-            "solution_patterns": {},
-            "context_action_effectiveness": {}
-        }
+    # v0.4.5: _load_kg removed — KG replaced by tag-routed retrieval
 
     def _load_ghost_registry(self) -> set:
         """
@@ -469,19 +450,14 @@ class UnifiedMemorySystem:
         # Initialize services with dependencies
         self._scoring_service = ScoringService(config=self.config)
 
-        # KG service (Desktop parity)
-        self._kg_service = KnowledgeGraphService(
-            kg_path=self.data_path / "knowledge_graph.json",
-            content_graph_path=self.data_path / "content_graph.json",
-            relationships_path=self.data_path / "memory_relationships.json",
-            config=self.config
-        )
+        # v0.4.5: Tag service replaces KG
+        # Regex-only extraction for now. Claude Code: main LLM will pass
+        # noun_tags via MCP tool params (future). OpenCode: sidecar handles
+        # tag extraction separately. No sidecar LLM calls from server side.
+        self._tag_service = TagService()
 
-        # Routing service (Desktop parity)
-        self._routing_service = RoutingService(
-            kg_service=self._kg_service,
-            config=self.config
-        )
+        # Routing service (v0.4.5: simplified, no KG)
+        self._routing_service = RoutingService(config=self.config)
 
         # Initialize PromotionService for auto-deletion/promotion when scores drop
         self._promotion_service = PromotionService(
@@ -490,10 +466,9 @@ class UnifiedMemorySystem:
             config=self.config
         )
 
-        # OutcomeService wired to PromotionService and KG - garbage now gets deleted
+        # OutcomeService wired to PromotionService — garbage now gets deleted
         self._outcome_service = OutcomeService(
             collections=self.collections,
-            kg_service=self._kg_service,
             promotion_service=self._promotion_service,
             config=self.config
         )
@@ -511,21 +486,39 @@ class UnifiedMemorySystem:
             config=self.config
         )
 
-        # v0.3.7: Cross-encoder removed — Wilson scoring is the reranker now.
+        # v0.4.5: Tag-routed search replaces KG-based search
         self._search_service = SearchService(
             collections=self.collections,
             scoring_service=self._scoring_service,
             routing_service=self._routing_service,
-            kg_service=self._kg_service,
+            tag_service=self._tag_service,
             embed_fn=self._embedding_service.embed_text,
             config=self.config,
         )
+
+        # v0.4.5: Rebuild known tag index from existing memories
+        self._tag_service.rebuild_known_tags(self.collections)
 
         self.initialized = True
         logger.info("UnifiedMemorySystem initialized successfully")
 
         # Startup cleanup: delete garbage memories (score < 0.2)
         await self._startup_cleanup()
+
+        # v0.4.5: Run tag migration in background if needed
+        migration = TagMigration(self.collections, self.data_path)
+        if migration.needs_migration():
+            asyncio.create_task(self._run_tag_migration(migration))
+
+    async def _run_tag_migration(self, migration: TagMigration):
+        """Background tag migration task."""
+        try:
+            stats = await migration.run_migration(show_progress=False)
+            logger.info(f"Tag migration complete: {stats}")
+            # Rebuild known tags after migration
+            self._tag_service.rebuild_known_tags(self.collections)
+        except Exception as e:
+            logger.error(f"Tag migration failed: {e}")
 
     async def _startup_cleanup(self):
         """
@@ -589,8 +582,8 @@ class UnifiedMemorySystem:
         """
         Search memory with optional collection filtering.
 
-        v0.3.2: Delegates to SearchService for hybrid search (vector + BM25),
-        cross-encoder reranking, entity boost, and KG-based routing.
+        v0.4.5: Delegates to SearchService for TagCascade retrieval
+        (tags-first cascade + cross-encoder reranking).
 
         Args:
             query: Search query
@@ -605,7 +598,7 @@ class UnifiedMemorySystem:
         if not self.initialized:
             await self.initialize()
 
-        # Delegate to SearchService (hybrid search + cross-encoder + entity boost)
+        # Delegate to SearchService (TagCascade + cross-encoder)
         if self._search_service:
             try:
                 all_results = await self._search_service.search(
@@ -763,16 +756,16 @@ class UnifiedMemorySystem:
                 metadatas=[final_metadata]
             )
 
-            # v0.3.6: Extract entities for KG-powered entity boost
-            if hasattr(self, '_kg_service') and self._kg_service:
+            # v0.4.5: Extract noun tags for TagCascade retrieval
+            if hasattr(self, '_tag_service') and self._tag_service:
                 try:
-                    self._kg_service.add_entities_from_text(
-                        text=text,
-                        doc_id=doc_id,
-                        collection=collection
-                    )
+                    tags = self._tag_service.extract_tags(text)
+                    if tags:
+                        self.collections[collection].update_fragment_metadata(
+                            doc_id, {"noun_tags": json.dumps(tags)}
+                        )
                 except Exception as e:
-                    logger.warning(f"Entity extraction failed for {doc_id}: {e}")
+                    logger.warning(f"Tag extraction failed for {doc_id}: {e}")
 
             return doc_id
         else:
@@ -785,6 +778,7 @@ class UnifiedMemorySystem:
         self,
         text: str,
         tags: List[str] = None,
+        noun_tags: Optional[List[str]] = None,
         importance: float = 0.7,
         confidence: float = 0.7,
         always_inject: bool = False
@@ -795,6 +789,7 @@ class UnifiedMemorySystem:
         Args:
             text: The fact to remember
             tags: Categories (identity, preference, goal, project)
+            noun_tags: Content nouns for TagCascade retrieval (from LLM)
             importance: How critical (0.0-1.0)
             confidence: How certain (0.0-1.0)
             always_inject: If True, appears in every context
@@ -813,17 +808,22 @@ class UnifiedMemorySystem:
             always_inject=always_inject
         )
 
-        # v0.3.6: Extract entities for KG-powered entity boost
-        if hasattr(self, '_kg_service') and self._kg_service:
+        # v0.4.5: noun_tags for TagCascade retrieval
+        if noun_tags:
+            self.collections["memory_bank"].update_fragment_metadata(
+                doc_id, {"noun_tags": json.dumps(noun_tags)}
+            )
+            if hasattr(self, '_tag_service') and self._tag_service:
+                self._tag_service.add_known_tags(noun_tags)
+        elif hasattr(self, '_tag_service') and self._tag_service:
             try:
-                self._kg_service.add_entities_from_text(
-                    text=text,
-                    doc_id=doc_id,
-                    collection="memory_bank",
-                    quality_score=importance * confidence
-                )
+                extracted = self._tag_service.extract_tags(text)
+                if extracted:
+                    self.collections["memory_bank"].update_fragment_metadata(
+                        doc_id, {"noun_tags": json.dumps(extracted)}
+                    )
             except Exception as e:
-                logger.warning(f"Entity extraction failed for {doc_id}: {e}")
+                logger.warning(f"Tag extraction failed for {doc_id}: {e}")
 
         return doc_id
 
@@ -968,10 +968,8 @@ class UnifiedMemorySystem:
         """
         Get context to inject into LLM prompt via hooks.
 
-        4-slot allocation:
-          - 1 reserved working (current session context)
-          - 1 reserved history (breaks scoring feedback loop)
-          - 2 best matches from any collection except books, ranked by Wilson score
+        v0.4.5: TagCascade retrieval — tags-first cascade fills candidate pool,
+        CE reranks, top results injected into LLM context.
 
         Always_inject memory_bank facts (identity, preferences) are fetched
         separately and included outside the 4 scored slots.
@@ -1003,49 +1001,31 @@ class UnifiedMemorySystem:
                 if mem.get("id"):
                     result["doc_ids"].append(mem["id"])
 
-        # 1. Extract concepts for KG routing insight
-        concepts = self._extract_concepts(query)
+        # v0.4.5: Two-lane retrieval matching benchmark (4 summaries + 4 facts = 8)
+        all_collections = ["working", "patterns", "history", "memory_bank"]
 
-        # 2. Get KG recommendations (informational - we still search all)
-        kg_recs = self.get_tier_recommendations(concepts)
-
-        # 3. v0.4.4: Run all three searches concurrently
-        other_collections = ["working", "patterns", "history", "memory_bank"]
-        working_results, history_results, other_results = await asyncio.gather(
-            self.search(query=query, limit=1, collections=["working"]),
-            self.search(query=query, limit=1, collections=["history"]),
-            self.search(query=query, limit=4, collections=other_collections),
+        # Lane 1: summaries/context (4 slots)
+        # memory_bank items included (no memory_type field, $ne "fact" includes them)
+        summary_results = await self.search(
+            query=query, limit=4, collections=all_collections,
+            metadata_filters={"memory_type": {"$ne": "fact"}}
         )
 
-        # Reserved slot: 1 working memory for session context
-        working_scored = self._scoring_service.apply_scoring_to_results(working_results)
-        reserved_working = [m for m in working_scored if m.get("content") or m.get("text")][:1]
-        reserved_ids = {m.get("id") for m in reserved_working if m.get("id")}
+        # Lane 2: facts (4 slots)
+        # memory_bank excluded naturally (no items have memory_type: "fact")
+        fact_results = await self.search(
+            query=query, limit=4, collections=all_collections,
+            metadata_filters={"memory_type": "fact"}
+        )
 
-        # Reserved slot: 1 history memory for scoring feedback loop
-        history_scored = self._scoring_service.apply_scoring_to_results(history_results)
-        reserved_history = [m for m in history_scored if m.get("content") or m.get("text")][:1]
-        reserved_ids.update(m.get("id") for m in reserved_history if m.get("id"))
+        # Merge: 4 summaries + 4 facts
+        all_results = summary_results + fact_results
 
-        # 5. Apply Wilson scoring for proper ranking
-        scored_results = self._scoring_service.apply_scoring_to_results(other_results)
-
-        # 6. Filter empty memories, exclude any duplicates from reserved slots
-        valid_results = [
-            m for m in scored_results
-            if (m.get("content") or m.get("text")) and m.get("id") not in reserved_ids
+        # Filter empty — keep all 8 (4 summaries + 4 facts)
+        top_memories = [
+            m for m in all_results
+            if m.get("content") or m.get("text")
         ]
-
-        # 7. Combine: 1 working + 1 history + backfill from best matches = 4 total
-        reserved = reserved_working + reserved_history
-        top_memories = reserved + valid_results[:4 - len(reserved)]
-
-        # 8. Enrich with Action KG effectiveness stats
-        for mem in top_memories:
-            coll = mem.get("collection", "unknown")
-            eff = self.get_action_effectiveness("general", "search", coll)
-            if eff:
-                mem["effectiveness"] = eff.get("success_rate", 0)
 
         result["memories"] = top_memories
         result["relevant_memories"] = top_memories  # Alias for selective scoring in hooks
@@ -1059,7 +1039,7 @@ class UnifiedMemorySystem:
         """
         Format context for injection into LLM prompt.
 
-        Shows top 4 memories across all collections with effectiveness stats.
+        v0.4.5: Shows all memories (4 summaries + 4 facts from two-lane retrieval).
         Extracts user name from identity-tagged memories.
         """
         import re
@@ -1109,10 +1089,18 @@ class UnifiedMemorySystem:
             if user_name:
                 parts.append(f"User: {user_name}")
 
-            for mem in memories[:4]:
-                # Normalize for consistent field access
+            # v0.4.5: Separate summaries and facts for clarity
+            summaries = []
+            facts = []
+            for mem in memories:
                 normalized = normalize_memory(dict(mem), mem.get("collection", "unknown"))
+                mem_type = mem.get("metadata", {}).get("memory_type", "")
+                if mem_type == "fact":
+                    facts.append(normalized)
+                else:
+                    summaries.append(normalized)
 
+            def _format_mem(normalized):
                 content = normalized.get("content", "")
                 collection = normalized.get("collection", "unknown")
                 doc_id = normalized.get("id", "")
@@ -1121,7 +1109,6 @@ class UnifiedMemorySystem:
                 wilson = normalized.get("wilson_score", 0)
                 last_outcome = normalized.get("last_outcome", "")
 
-                # Build tag string with full metadata
                 tag_parts = []
                 if age:
                     tag_parts.append(age)
@@ -1135,7 +1122,17 @@ class UnifiedMemorySystem:
                         tag_parts.append(f"last:{last_outcome}")
 
                 id_str = f" [id:{doc_id}]" if doc_id else ""
-                parts.append(f"• {content}{id_str} ({', '.join(tag_parts)})")
+                return f"• {content}{id_str} ({', '.join(tag_parts)})"
+
+            if summaries:
+                for s in summaries:
+                    parts.append(_format_mem(s))
+
+            if facts:
+                parts.append("")
+                parts.append("Facts:")
+                for f in facts:
+                    parts.append(_format_mem(f))
 
             parts.append("═══ END CONTEXT ═══")
             parts.append("")
@@ -1321,7 +1318,11 @@ class UnifiedMemorySystem:
             doc_id = f"{base_id}_chunk_{i}"
             doc_ids.append(doc_id)
 
-            metadatas.append({
+            # v0.4.5: Regex tags on book chunks for TagCascade
+            from .tag_service import extract_tags_regex
+            chunk_tags = extract_tags_regex(chunk)
+
+            meta = {
                 "content": chunk,
                 "text": chunk,
                 "title": title or "Untitled",
@@ -1329,7 +1330,11 @@ class UnifiedMemorySystem:
                 "chunk_index": i,
                 "total_chunks": len(chunks),
                 "created_at": created_at
-            })
+            }
+            if chunk_tags:
+                meta["noun_tags"] = json.dumps(chunk_tags)
+
+            metadatas.append(meta)
 
         # v0.2.0: Batch upsert with rollback on failure
         try:
@@ -1397,52 +1402,13 @@ class UnifiedMemorySystem:
         self._save_ghost_registry()
         logger.info(f"Ghosted {len(doc_ids)} chunks for book '{title}' (non-destructive)")
 
-        # Clean Action KG references
-        cleaned_refs = await self.cleanup_action_kg_for_doc_ids(doc_ids)
+        # v0.4.5: Action KG cleanup removed (KG deleted)
 
         return {
             "removed": len(doc_ids),
             "title": title,
-            "cleaned_kg_refs": cleaned_refs,
             "method": "ghost_registry"
         }
-
-    async def cleanup_action_kg_for_doc_ids(self, doc_ids: List[str]) -> int:
-        """
-        Remove Action KG examples that reference specific doc_ids.
-
-        Called when books are deleted to maintain KG integrity.
-
-        Args:
-            doc_ids: List of document IDs being deleted
-
-        Returns:
-            Number of examples removed
-        """
-        if not doc_ids:
-            return 0
-
-        try:
-            doc_id_set = set(doc_ids)
-            cleaned = 0
-
-            for key, stats in self.knowledge_graph.get("context_action_effectiveness", {}).items():
-                examples = stats.get("examples", [])
-                original_count = len(examples)
-                stats["examples"] = [
-                    ex for ex in examples
-                    if ex.get("doc_id") not in doc_id_set
-                ]
-                cleaned += original_count - len(stats["examples"])
-
-            if cleaned > 0:
-                logger.info(f"Action KG cleanup: removed {cleaned} examples for deleted doc_ids")
-                self._save_kg()
-
-            return cleaned
-        except Exception as e:
-            logger.error(f"Error cleaning Action KG for doc_ids: {e}")
-            return 0
 
     async def list_books(self) -> List[Dict[str, Any]]:
         """
@@ -1489,23 +1455,7 @@ class UnifiedMemorySystem:
 
         return list(books_by_title.values())
 
-    def _save_kg(self):
-        """Save knowledge graph to disk and sync to _kg_service.
-
-        v0.2.0 FIX: After saving, reload _kg_service so SearchService sees updates.
-        This fixes the "Reading Your Own Writes" bug where UMS writes to self.knowledge_graph
-        but SearchService reads from _kg_service.knowledge_graph (which was stale).
-        """
-        try:
-            with open(self.kg_path, 'w') as f:
-                json.dump(self.knowledge_graph, f, indent=2)
-
-            # v0.2.0: Sync to _kg_service so SearchService sees the update
-            if hasattr(self, '_kg_service') and self._kg_service is not None:
-                self._kg_service.reload_kg()
-
-        except Exception as e:
-            logger.error(f"Failed to save knowledge graph: {e}")
+    # v0.4.5: _save_kg removed — KG replaced by tag-routed retrieval
 
     # ==================== Working Memory Operations ====================
 
@@ -1514,7 +1464,8 @@ class UnifiedMemorySystem:
         content: str,
         conversation_id: str = None,
         metadata: Dict[str, Any] = None,
-        initial_score: float = 0.5
+        initial_score: float = 0.5,
+        noun_tags: Optional[List[str]] = None
     ) -> str:
         """
         Store content in working memory.
@@ -1526,6 +1477,7 @@ class UnifiedMemorySystem:
             conversation_id: Session identifier
             metadata: Additional metadata
             initial_score: Starting score (default 0.5, can be boosted/demoted based on outcome)
+            noun_tags: Content nouns for TagCascade retrieval (from LLM)
 
         Returns:
             Document ID
@@ -1539,7 +1491,7 @@ class UnifiedMemorySystem:
         meta = {
             "content": content,
             "text": content,
-            "score": initial_score,  # Can be adjusted based on outcome at creation time
+            "score": initial_score,
             "uses": 0,
             "created_at": datetime.now().isoformat(),
             "conversation_id": conversation_id or "unknown"
@@ -1547,22 +1499,25 @@ class UnifiedMemorySystem:
         if metadata:
             meta.update(metadata)
 
+        # v0.4.5: noun_tags for TagCascade retrieval
+        # Use provided tags (from LLM via MCP tool), fall back to regex for migration
+        if noun_tags:
+            meta["noun_tags"] = json.dumps(noun_tags)
+            if hasattr(self, '_tag_service') and self._tag_service:
+                self._tag_service.add_known_tags(noun_tags)
+        elif hasattr(self, '_tag_service') and self._tag_service:
+            try:
+                tags = self._tag_service.extract_tags(content)
+                if tags:
+                    meta["noun_tags"] = json.dumps(tags)
+            except Exception as e:
+                logger.warning(f"Tag extraction failed for working memory: {e}")
+
         await self.collections["working"].upsert_vectors(
             ids=[doc_id],
             vectors=[embedding],
             metadatas=[meta]
         )
-
-        # v0.3.6: Extract entities for KG-powered entity boost
-        if hasattr(self, '_kg_service') and self._kg_service:
-            try:
-                self._kg_service.add_entities_from_text(
-                    text=content,
-                    doc_id=doc_id,
-                    collection="working"
-                )
-            except Exception as e:
-                logger.warning(f"Entity extraction failed for {doc_id}: {e}")
 
         return doc_id
 
@@ -1615,312 +1570,20 @@ class UnifiedMemorySystem:
         concepts = [w for w in words if w not in stop_words]
         return concepts[:10]
 
+    # v0.4.5: KG methods removed (get_tier_recommendations, get_action_effectiveness,
+    # get_facts_for_entities, _get_doc_effectiveness, detect_context_type,
+    # analyze_conversation_context, record_action_outcome, _update_kg_routing).
+    # Tag-routed retrieval in SearchService handles all routing now.
+
     def get_tier_recommendations(self, concepts: List[str]) -> Dict[str, Any]:
-        """Query Routing KG for best collections given concepts."""
+        """v0.4.5: Stub for backward compat. Returns all collections."""
         ALL_COLLECTIONS = ["working", "patterns", "history", "books", "memory_bank"]
+        return {"top_collections": ALL_COLLECTIONS.copy(), "match_count": 0, "confidence_level": "exploration"}
 
-        if not concepts:
-            return {"top_collections": ALL_COLLECTIONS.copy(), "match_count": 0, "confidence_level": "exploration"}
-
-        collection_scores = {c: 0.0 for c in ALL_COLLECTIONS}
-        match_count = 0
-
-        routing_patterns = self.knowledge_graph.get("routing_patterns", {})
-        problem_categories = self.knowledge_graph.get("problem_categories", {})
-
-        for concept in concepts:
-            if concept in routing_patterns:
-                pattern_data = routing_patterns[concept]
-                # Handle both old format (string) and new format (dict with best_collection)
-                if isinstance(pattern_data, dict):
-                    best_coll = pattern_data.get("best_collection", "")
-                else:
-                    best_coll = pattern_data
-                if best_coll in collection_scores:
-                    collection_scores[best_coll] += 1.0
-                    match_count += 1
-
-            if concept in problem_categories:
-                preferred = problem_categories[concept]
-                if isinstance(preferred, list):
-                    for coll in preferred:
-                        if coll in collection_scores:
-                            collection_scores[coll] += 0.5
-                            match_count += 1
-
-        sorted_collections = sorted(collection_scores.items(), key=lambda x: x[1], reverse=True)
-
-        if match_count >= 3:
-            confidence = "high"
-        elif match_count >= 1:
-            confidence = "medium"
-        else:
-            confidence = "exploration"
-
-        return {"top_collections": [c[0] for c in sorted_collections], "match_count": match_count, "confidence_level": confidence}
-
-    def get_action_effectiveness(self, context_type: str, action_type: str, collection: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Get effectiveness stats for an action in a specific context."""
-        key = f"{context_type}|{action_type}|{collection or '*'}"
-        return self.knowledge_graph.get("context_action_effectiveness", {}).get(key)
-
-    async def get_facts_for_entities(self, entities: List[str], limit: int = 2) -> List[Dict[str, Any]]:
-        """Query Content KG to retrieve matching memory_bank facts."""
-        if not self.initialized:
-            await self.initialize()
-
-        facts = []
-        seen_ids = set()
-
-        for entity in entities:
-            if len(facts) >= limit:
-                break
-
-            try:
-                results = await self.search(query=entity, collections=["memory_bank"], limit=2)
-
-                for result in results:
-                    if len(facts) >= limit:
-                        break
-
-                    doc_id = result.get("id")
-                    if doc_id and doc_id not in seen_ids:
-                        seen_ids.add(doc_id)
-                        effectiveness = self._get_doc_effectiveness(doc_id)
-                        facts.append({
-                            "id": doc_id,
-                            "content": result.get("content", result.get("text", "")),
-                            "entity": entity,
-                            "effectiveness": effectiveness
-                        })
-            except Exception as e:
-                logger.warning(f"Error getting facts for entity '{entity}': {e}")
-
-        return facts
-
-    def _get_doc_effectiveness(self, doc_id: str) -> Optional[Dict[str, Any]]:
-        """Get doc effectiveness from Action KG examples."""
-        successes = failures = 0
-
-        for key, stats in self.knowledge_graph.get("context_action_effectiveness", {}).items():
-            for ex in stats.get("examples", []):
-                if ex.get("doc_id") == doc_id:
-                    if ex.get("outcome") == "worked":
-                        successes += 1
-                    elif ex.get("outcome") == "failed":
-                        failures += 1
-
-        total = successes + failures
-        return {"success_rate": successes / total, "total_uses": total, "successes": successes, "failures": failures} if total else None
-
-    async def detect_context_type(self, system_prompts: List[str] = None, recent_messages: List[Dict[str, Any]] = None) -> str:
-        """Detect context type from conversation (coding, fitness, general, etc.)."""
-        all_text = ""
-        if system_prompts:
-            all_text += " ".join(system_prompts)
-        if recent_messages:
-            for msg in recent_messages:
-                all_text += " " + msg.get("content", "")
-
-        all_text = all_text.lower()
-
-        context_keywords = {
-            "coding": ["code", "function", "class", "error", "debug", "api", "database", "python", "javascript", "typescript", "react", "git", "build", "test"],
-            "fitness": ["workout", "exercise", "gym", "weight", "muscle", "cardio", "diet", "protein", "calories"],
-            "finance": ["money", "budget", "invest", "stock", "savings", "expense", "income", "tax"],
-            "learning": ["learn", "study", "course", "book", "tutorial", "understand", "concept"],
-            "writing": ["write", "essay", "article", "blog", "content", "draft", "edit"]
-        }
-
-        scores = {ctx: sum(1 for kw in kws if kw in all_text) for ctx, kws in context_keywords.items()}
-        best_ctx = max(scores.items(), key=lambda x: x[1])
-        return best_ctx[0] if best_ctx[1] > 0 else "general"
-
-    async def analyze_conversation_context(self, current_message: str, recent_conversation: List[Dict[str, Any]], conversation_id: str) -> Dict[str, Any]:
-        """Analyze conversation context for organic memory injection."""
-        context = {"relevant_patterns": [], "past_outcomes": [], "topic_continuity": [], "proactive_insights": [], "matched_concepts": []}
-
-        try:
-            current_concepts = self._extract_concepts(current_message)
-            context["matched_concepts"] = current_concepts
-
-            if current_concepts:
-                pattern_signature = "_".join(sorted(current_concepts[:3]))
-
-                if pattern_signature in self.knowledge_graph.get("problem_categories", {}):
-                    past_solutions = self.knowledge_graph["problem_categories"][pattern_signature]
-
-                    for doc_id in past_solutions[:2]:
-                        for coll_name in ["patterns", "history"]:
-                            if coll_name in self.collections:
-                                doc = self.collections[coll_name].get_fragment(doc_id)
-                                if doc:
-                                    metadata = doc.get("metadata", {})
-                                    score = metadata.get("score", 0.5)
-                                    uses = metadata.get("uses", 0)
-                                    last_outcome = metadata.get("last_outcome", "unknown")
-
-                                    if score >= 0.7 and last_outcome == "worked":
-                                        context["relevant_patterns"].append({
-                                            "text": doc.get("content", ""),
-                                            "score": score,
-                                            "uses": uses,
-                                            "collection": coll_name,
-                                            "insight": f"Based on {uses} past use(s), this approach had a {int(score*100)}% success rate"
-                                        })
-                                    break
-
-            failure_patterns = self.knowledge_graph.get("failure_patterns", {})
-            for failure_key, failures in failure_patterns.items():
-                if any(concept in failure_key.lower() for concept in current_concepts):
-                    for failure in failures[-2:]:
-                        context["past_outcomes"].append({
-                            "outcome": "failed",
-                            "reason": failure_key,
-                            "when": failure.get("timestamp", ""),
-                            "insight": f"Note: Similar approach failed before due to: {failure_key}"
-                        })
-
-        except Exception as e:
-            logger.warning(f"Error analyzing conversation context: {e}")
-
-        return context
-
-    # ==================== Action KG Tracking ====================
-
-    async def record_action_outcome(self, action: ActionOutcome):
-        """
-        Record action-level outcome with context awareness (v0.2.1 Causal Learning).
-
-        This enables learning: "In context X, action Y on collection Z leads to outcome W"
-        Example: In "coding" context, search_memory on books → 90% success
-
-        Works for ALL collections including memory_bank and books (at collection level,
-        not individual doc scoring).
-
-        Args:
-            action: ActionOutcome with context type, action type, outcome, and causal attribution
-        """
-        # Build key for context-action-collection effectiveness tracking
-        # Format: "{context_type}|{action_type}|{collection}"
-        key = f"{action.context_type}|{action.action_type}|{action.collection or '*'}"
-
-        # Initialize tracking structure if needed
-        if key not in self.knowledge_graph["context_action_effectiveness"]:
-            self.knowledge_graph["context_action_effectiveness"][key] = {
-                "successes": 0,
-                "failures": 0,
-                "partials": 0,
-                "success_rate": 0.0,
-                "total_uses": 0,
-                "first_seen": datetime.now().isoformat(),
-                "last_used": datetime.now().isoformat(),
-                "examples": []
-            }
-
-        stats = self.knowledge_graph["context_action_effectiveness"][key]
-
-        # Update counts based on outcome
-        if action.outcome == "worked":
-            stats["successes"] += 1
-        elif action.outcome == "failed":
-            stats["failures"] += 1
-        else:  # partial
-            stats["partials"] += 1
-
-        stats["total_uses"] += 1
-        stats["last_used"] = datetime.now().isoformat()
-
-        # Calculate success rate (successes / total, treating partials as 0.5)
-        total = stats["successes"] + stats["failures"] + stats["partials"]
-        if total > 0:
-            weighted_successes = stats["successes"] + (stats["partials"] * 0.5)
-            stats["success_rate"] = weighted_successes / total
-
-        # Store example for debugging (keep last 5)
-        example = {
-            "timestamp": action.timestamp.isoformat(),
-            "outcome": action.outcome,
-            "doc_id": action.doc_id,
-            "params": action.action_params,
-            "chain_position": action.chain_position,
-            "chain_length": action.chain_length,
-            "caused_final": action.caused_final_outcome
-        }
-        if action.failure_reason:
-            example["failure_reason"] = action.failure_reason
-
-        stats["examples"] = (stats.get("examples", []) + [example])[-5:]
-
-        # Log learning for transparency
-        logger.info(
-            f"[Causal Learning] {key}: {action.outcome} "
-            f"(rate={stats['success_rate']:.2%}, uses={stats['total_uses']}, "
-            f"chain={action.chain_position+1}/{action.chain_length})"
-        )
-
-        # Save KG to disk
-        self._save_kg()
-
-    async def _update_kg_routing(self, query: str, collection: str, outcome: str):
-        """
-        Update KG routing patterns based on outcome.
-
-        Learns which collections work best for which query patterns.
-        Works for ALL collections including memory_bank and books.
-
-        Example: "Python tutorial" queries that work on books → routes future
-        similar queries to books first.
-        """
-        if not query:
-            return
-
-        concepts = self._extract_concepts(query)
-
-        for concept in concepts:
-            if concept not in self.knowledge_graph["routing_patterns"]:
-                self.knowledge_graph["routing_patterns"][concept] = {
-                    "collections_used": {},
-                    "best_collection": collection,
-                    "success_rate": 0.5
-                }
-
-            pattern = self.knowledge_graph["routing_patterns"][concept]
-
-            # Track collection performance
-            if collection not in pattern["collections_used"]:
-                pattern["collections_used"][collection] = {
-                    "successes": 0,
-                    "failures": 0,
-                    "total": 0
-                }
-
-            stats = pattern["collections_used"][collection]
-            stats["total"] += 1
-
-            if outcome == "worked":
-                stats["successes"] += 1
-            elif outcome == "failed":
-                stats["failures"] += 1
-
-            # Update best collection based on success rates
-            best_collection = collection
-            best_rate = 0.0
-
-            for coll_name, coll_stats in pattern["collections_used"].items():
-                total_with_feedback = coll_stats["successes"] + coll_stats["failures"]
-                if total_with_feedback > 0:
-                    rate = coll_stats["successes"] / total_with_feedback
-                else:
-                    rate = 0.5  # Neutral baseline
-
-                if rate > best_rate:
-                    best_rate = rate
-                    best_collection = coll_name
-
-            pattern["best_collection"] = best_collection
-            pattern["success_rate"] = best_rate if best_rate > 0 else 0.5
-
-        # Save KG
-        self._save_kg()
-        logger.info(f"[Routing KG] Updated patterns for '{query[:50]}' → {collection} ({outcome})")
+    # v0.4.5: All KG methods below this line removed. Only get_tier_recommendations
+    # stub kept above for backward compatibility. Removed methods:
+    # get_action_effectiveness, get_facts_for_entities, _get_doc_effectiveness,
+    # detect_context_type, analyze_conversation_context, record_action_outcome, _update_kg_routing
+    #
+    # End of UnifiedMemorySystem class.
+    # ==================== LEGACY KG CODE REMOVED v0.4.5 ====================

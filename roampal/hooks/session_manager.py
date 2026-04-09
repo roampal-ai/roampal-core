@@ -535,10 +535,36 @@ SCORING GUIDE:
 - failed = this memory was MISLEADING (gave bad advice)
 
 You MUST score every memory listed above.
+
+MEMORY SCORES: For each memory, judge based on topic relevance and exchange outcome.
+1. Memory is NOT about the topic discussed → "unknown"
+2. Memory IS about the topic AND outcome is "worked" → "worked"
+3. Memory IS about the topic AND outcome is "failed":
+   - Your response echoed/relied on info from this memory → "failed"
+   - The failure seems unrelated to this memory's content → "unknown"
+4. Memory IS about the topic AND outcome is "partial" → "partial"
+5. Your response contradicts what the memory says and the exchange worked → "unknown"
+6. Memory contains good advice the response IGNORED (didn't follow) → "unknown" not "failed". "failed" means the memory's content was WRONG and caused a bad response, not that the model failed to follow good advice.
+7. When in doubt → "unknown"
+
+SUMMARY (under 300 chars): Capture what happened AND what changed.
+- Include names, topics, and the flow of the conversation
+- Note corrections, decisions, and new information alongside the context
+- Help future retrieval understand WHY something matters, not just WHAT
+BAD: "User and assistant had a conversation" (empty, no content)
+GOOD: "User corrected the baking temp from 375F to 350F while adapting the recipe for a convection oven"
+
 exchange_summary: Write a ~300 char note about what happened in the previous exchange.
 exchange_outcome: Based on the user's follow-up, was your previous response effective?
 
-record_response(key_takeaway="...") is OPTIONAL - only for significant learnings.
+FACTS: Also extract 1-5 atomic facts from the previous exchange. Rules:
+- Include WHO or WHAT each fact is about — names, projects, topics
+- Include specifics: dates, versions, preferences, decisions
+- ONE fact per entry, max 150 chars
+- Skip vague observations or pleasantries
+- If no useful facts, pass empty array
+
+Separately, record_response(key_takeaway="...") is OPTIONAL - only for significant learnings.
 """
 
     # ========== Completion State Tracking ==========

@@ -57,9 +57,7 @@ class MemoryConfig:
     Currently hardcoded as `limit * 3` in 4 locations.
     """
 
-    # Timing (from line 398)
-    kg_debounce_seconds: int = 5
-    """Debounce window for knowledge graph saves"""
+    # v0.4.5: kg_debounce_seconds removed (KG deleted)
 
     # Wilson score
     wilson_confidence: float = 0.95

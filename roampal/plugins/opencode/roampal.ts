@@ -573,15 +573,36 @@ The user then followed up with:
 "${currentUserMessage}"
 ${memorySection}
 Respond with ONLY a JSON object:
-{ "summary": "<~300 chars>", "outcome": "<worked|failed|partial|unknown>"${memoryScoreSection} }
+{ "summary": "<~300 chars>", "outcome": "<worked|failed|partial|unknown>", "noun_tags": ["<lowercase nouns>"], "facts": ["<atomic fact 1>", "<atomic fact 2>"]${memoryScoreSection} }
 
-SUMMARY: Write a first-person note to your future self (~300 chars). Capture the important details — what the user needed, what you did, and any key specifics worth remembering.
+SUMMARY (under 300 chars): Capture what happened AND what changed. Summaries provide context and continuity — the story behind the facts.
+- Include names, topics, and the flow of the conversation
+- Note corrections, decisions, and new information alongside the context
+- Help future retrieval understand WHY something matters, not just WHAT
+BAD: "User and assistant had a conversation" (empty, no content)
+BAD: "Temperature is 350F" (that's a fact, not a summary)
+GOOD: "User corrected the baking temp from 375F to 350F while adapting the recipe for a convection oven — first attempt burned the edges"
+GOOD: "Discussed switching API from REST to GraphQL after mobile team reported nested query issues with the current setup"
 
 OUTCOME: Based on the user's follow-up:
 - worked: user confirmed, moved on, or was satisfied
 - failed: user corrected you, got frustrated, or asked to redo
 - partial: helped but incomplete or needed adjustment
 - unknown: no clear signal
+
+NOUN_TAGS: Extract key topic nouns from your summary — people's names, places, objects, specific things the exchange was about. Lowercase, 1-3 words each, max 8. Skip pronouns and meta-words (user, assistant, memory, response, question).
+
+FACTS: Extract key facts worth remembering from this exchange. Rules:
+- Include WHO or WHAT each fact is about — names, projects, topics
+- Combine related details into ONE rich fact rather than many fragments
+- Include specifics: dates, versions, preferences, decisions, reasons
+- ONE fact per entry, max 150 characters
+- Skip vague feelings, pleasantries, or generic observations
+- If no useful facts, return empty array
+GOOD: "The auth service uses JWT with 24h expiry, needs refresh token rotation added"
+GOOD: "User prefers TypeScript over JavaScript and uses Zod for validation"
+BAD: "They discussed something" (no specifics)
+BAD: "It was helpful" (no content)
 ${memoryInstructions}`
 
     // Build model queue. Simple and explicit — only models the user chose:
@@ -674,7 +695,7 @@ ${memoryInstructions}`
               messages: [
                 // /no_think disables qwen3's thinking mode (avoids burning all tokens on chain-of-thought).
                 // Other models ignore it as a harmless prefix. Scoring is simple — doesn't need reasoning.
-                { role: "system", content: "/no_think\nYou are part of a memory system. Return ONLY valid JSON with summary, outcome, and memory_scores fields. No other text. Be concise." },
+                { role: "system", content: "/no_think\nYou are part of a memory system. Return ONLY valid JSON with summary, outcome, noun_tags, facts, and memory_scores fields. No other text. Be concise." },
                 { role: "user", content: "/no_think\n" + scoringPrompt }
               ],
               max_tokens: 2000,
@@ -753,6 +774,8 @@ ${memoryInstructions}`
           }
 
           const summary = typeof result.summary === "string" ? result.summary : ""
+          const nounTags = Array.isArray(result.noun_tags) ? result.noun_tags.filter((t: unknown) => typeof t === "string") : []
+          const facts = Array.isArray(result.facts) ? result.facts.filter((f: unknown) => typeof f === "string" && (f as string).length > 10) : []
 
           // v0.3.6: Per-memory scoring from sidecar when available.
           // Falls back to blanket exchange outcome if model didn't return memory_scores.
@@ -787,7 +810,10 @@ ${memoryInstructions}`
               body: JSON.stringify({
                 conversation_id: sessionId,
                 outcome,
-                memory_scores: memoryScores
+                memory_scores: memoryScores,
+                exchange_summary: summary || undefined,
+                noun_tags: nounTags.length > 0 ? nounTags : undefined,
+                facts: facts.length > 0 ? facts : undefined
               })
             })
 
@@ -851,6 +877,7 @@ ${memoryInstructions}`
                   conversation_id: sessionId,
                   user_message: exchange.user.slice(0, 200),
                   assistant_response: summary,
+                  noun_tags: nounTags.length > 0 ? nounTags : undefined,
                   metadata: {
                     memory_type: "exchange_summary",
                     sidecar_outcome: outcome,

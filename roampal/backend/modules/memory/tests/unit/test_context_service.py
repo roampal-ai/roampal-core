@@ -1,7 +1,8 @@
 """
-Unit Tests for ContextService.
+Unit Tests for ContextService (v0.4.5).
 
-Tests conversation context analysis and pattern detection.
+v0.4.5: KG removed. Context service uses basic concept extraction only.
+KG-dependent methods return empty results.
 """
 
 import sys
@@ -18,28 +19,21 @@ class TestContextServiceInit:
     def test_init_with_collections(self):
         """Should initialize with collections."""
         from roampal.backend.modules.memory.context_service import ContextService
-
         collections = {"working": MagicMock(), "history": MagicMock()}
         service = ContextService(collections=collections)
-
         assert service.collections == collections
 
-    def test_init_with_kg_service(self):
-        """Should accept KG service."""
+    def test_init_accepts_kwargs(self):
+        """v0.4.5: Should accept and ignore kg_service via **kwargs."""
         from roampal.backend.modules.memory.context_service import ContextService
-
-        kg_service = MagicMock()
-        service = ContextService(collections={}, kg_service=kg_service)
-
-        assert service.kg_service == kg_service
+        service = ContextService(collections={}, kg_service=MagicMock())
+        # Should not crash — **kwargs absorbs kg_service
 
     def test_init_default_config(self):
         """Should use default config when not provided."""
         from roampal.backend.modules.memory.context_service import ContextService
         from roampal.backend.modules.memory.config import MemoryConfig
-
         service = ContextService(collections={})
-
         assert isinstance(service.config, MemoryConfig)
 
 
@@ -47,177 +41,125 @@ class TestAnalyzeContext:
     """Test conversation context analysis."""
 
     @pytest.fixture
-    def mock_service(self):
-        """Create service with mocks."""
+    def service(self):
         from roampal.backend.modules.memory.context_service import ContextService
-
         collections = {"working": MagicMock(), "patterns": MagicMock()}
-        kg_service = MagicMock()
-        kg_service.extract_concepts.return_value = ["python", "api"]
-        kg_service.get_problem_categories.return_value = {}
-        kg_service.get_failure_patterns.return_value = {}
-        kg_service.get_routing_patterns.return_value = {}
-
         embed_fn = AsyncMock(return_value=[0.1] * 768)
-
-        service = ContextService(
-            collections=collections,
-            kg_service=kg_service,
-            embed_fn=embed_fn
-        )
-
-        return service
+        return ContextService(collections=collections, embed_fn=embed_fn)
 
     @pytest.mark.asyncio
-    async def test_analyze_returns_expected_keys(self, mock_service):
+    async def test_analyze_returns_expected_keys(self, service):
         """Should return context with all expected keys."""
-        result = await mock_service.analyze_conversation_context(
+        result = await service.analyze_conversation_context(
             current_message="test message",
             recent_conversation=[],
             conversation_id="test123"
         )
-
         assert "relevant_patterns" in result
         assert "past_outcomes" in result
         assert "topic_continuity" in result
         assert "proactive_insights" in result
 
     @pytest.mark.asyncio
-    async def test_analyze_empty_message(self, mock_service):
-        """Empty message should return empty context."""
-        mock_service.kg_service.extract_concepts.return_value = []
-
-        result = await mock_service.analyze_conversation_context(
-            current_message="",
+    async def test_analyze_returns_empty_patterns(self, service):
+        """v0.4.5: KG removed — patterns and outcomes should be empty."""
+        result = await service.analyze_conversation_context(
+            current_message="python api question",
             recent_conversation=[],
             conversation_id="test123"
         )
-
         assert result["relevant_patterns"] == []
         assert result["past_outcomes"] == []
 
 
 class TestTopicContinuity:
-    """Test topic continuity detection."""
+    """Test topic continuity detection (KG-independent)."""
 
     @pytest.fixture
     def service(self):
-        """Create basic service."""
         from roampal.backend.modules.memory.context_service import ContextService
-
-        kg_service = MagicMock()
-        kg_service.extract_concepts.return_value = ["python", "api"]
-
-        return ContextService(collections={}, kg_service=kg_service)
+        return ContextService(collections={})
 
     def test_detect_continuing_topic(self, service):
-        """Should detect when topic continues."""
         current = ["python", "api", "test"]
-        # Need at least 2 messages for continuity check
         recent = [
             {"role": "assistant", "content": "I can help with python"},
             {"role": "user", "content": "python api test"}
         ]
-
         result = service._detect_topic_continuity(current, recent)
-
         assert len(result) > 0
         assert result[0].get("continuing") is True
 
     def test_detect_topic_shift(self, service):
-        """Should detect topic shift."""
         current = ["javascript", "react"]
-        # Need at least 2 messages for continuity check
         recent = [
             {"role": "assistant", "content": "Sure, about python"},
             {"role": "user", "content": "python api test"}
         ]
-
         result = service._detect_topic_continuity(current, recent)
-
-        # No overlap = topic shift
         assert len(result) > 0
         assert result[0].get("continuing") is False
 
     def test_empty_conversation(self, service):
-        """Empty conversation should return empty."""
         result = service._detect_topic_continuity(["test"], [])
         assert result == []
 
 
 class TestConceptExtraction:
-    """Test concept extraction."""
+    """Test concept extraction — v0.4.5: always uses basic extraction."""
 
-    def test_extract_with_kg_service(self):
-        """Should use KG service when available."""
+    def test_extract_uses_basic_extraction(self):
+        """v0.4.5: Should always use basic extraction (no KG)."""
         from roampal.backend.modules.memory.context_service import ContextService
-
-        kg_service = MagicMock()
-        kg_service.extract_concepts.return_value = ["test", "concept"]
-
-        service = ContextService(collections={}, kg_service=kg_service)
-        result = service._extract_concepts("test concept")
-
-        kg_service.extract_concepts.assert_called_with("test concept")
-        assert result == ["test", "concept"]
-
-    def test_basic_extraction_fallback(self):
-        """Should fall back to basic extraction."""
-        from roampal.backend.modules.memory.context_service import ContextService
-
-        service = ContextService(collections={}, kg_service=None)
-        result = service._basic_concept_extraction("Python programming language")
-
+        service = ContextService(collections={})
+        result = service._extract_concepts("Python programming language")
         assert "python" in result
         assert "programming" in result
-        assert "language" in result
 
-    def test_filters_stopwords(self):
-        """Should filter stopwords."""
+    def test_basic_extraction_filters_stopwords(self):
         from roampal.backend.modules.memory.context_service import ContextService
-
-        service = ContextService(collections={}, kg_service=None)
+        service = ContextService(collections={})
         result = service._basic_concept_extraction("the quick brown fox")
-
         assert "the" not in result
         assert "quick" in result
+
+
+class TestKnownSolutions:
+    """v0.4.5: find_known_solutions always returns empty."""
+
+    @pytest.mark.asyncio
+    async def test_find_known_solutions_returns_empty(self):
+        from roampal.backend.modules.memory.context_service import ContextService
+        service = ContextService(collections={})
+        result = await service.find_known_solutions("any query")
+        assert result == []
 
 
 class TestContextSummary:
     """Test context summary generation."""
 
     def test_get_context_summary(self):
-        """Should generate readable summary."""
         from roampal.backend.modules.memory.context_service import ContextService
-
         service = ContextService(collections={})
-
         context = {
             "relevant_patterns": [{"text": "pattern"}],
             "past_outcomes": [],
             "topic_continuity": [{"continuing": True, "common_concepts": ["python"]}],
             "proactive_insights": []
         }
-
         summary = service.get_context_summary(context)
-
         assert "pattern" in summary.lower() or "continuing" in summary.lower()
 
     def test_empty_context_summary(self):
-        """Empty context should return default message."""
         from roampal.backend.modules.memory.context_service import ContextService
-
         service = ContextService(collections={})
-
         context = {
             "relevant_patterns": [],
             "past_outcomes": [],
             "topic_continuity": [],
             "proactive_insights": []
         }
-
         summary = service.get_context_summary(context)
-
         assert "no significant" in summary.lower()
 
 

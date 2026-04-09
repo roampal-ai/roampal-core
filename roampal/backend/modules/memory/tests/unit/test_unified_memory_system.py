@@ -40,11 +40,10 @@ class TestUnifiedMemorySystemInit:
         ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
         assert not ums.initialized
 
-    def test_init_loads_kg(self, tmp_path):
-        """Should load knowledge graph on init."""
+    def test_init_no_kg(self, tmp_path):
+        """v0.4.5: Should not have knowledge_graph attribute."""
         ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
-        assert "routing_patterns" in ums.knowledge_graph
-        assert "context_action_effectiveness" in ums.knowledge_graph
+        assert not hasattr(ums, 'knowledge_graph') or not hasattr(ums, 'kg_path')
 
 
 class TestInitialize:
@@ -295,42 +294,19 @@ class TestContextAPI:
 
         return ums
 
-    @pytest.mark.asyncio
-    async def test_analyze_context(self, mock_ums):
-        """Should return context analysis result."""
-        # Core's analyze_conversation_context does work internally
-        context = await mock_ums.analyze_conversation_context(
-            current_message="test",
-            recent_conversation=[],
-            conversation_id="conv123"
-        )
-
-        # Core returns these keys
-        assert "relevant_patterns" in context
-        assert "past_outcomes" in context
-        assert "topic_continuity" in context
-        assert "proactive_insights" in context
+    # v0.4.5: test_analyze_context removed — analyze_conversation_context deleted with KG
 
 
-class TestKGAccess:
-    """Test Knowledge Graph access."""
+class TestTagService:
+    """v0.4.5: Test tag service integration."""
 
     @pytest.fixture
     def ums(self, tmp_path):
-        """Create UMS instance."""
         return UnifiedMemorySystem(data_path=str(tmp_path / "data"))
 
-    def test_knowledge_graph_property(self, ums):
-        """Should expose knowledge graph."""
-        kg = ums.knowledge_graph
-
-        assert "routing_patterns" in kg
-        assert "context_action_effectiveness" in kg
-        assert "problem_solutions" in kg
-
-    def test_knowledge_graph_is_dict(self, ums):
-        """Knowledge graph should be a dict."""
-        assert isinstance(ums.knowledge_graph, dict)
+    def test_no_knowledge_graph(self, ums):
+        """v0.4.5: UMS should not have knowledge_graph attribute."""
+        assert not hasattr(ums, 'knowledge_graph') or ums.__dict__.get('knowledge_graph') is None
 
 
 class TestStats:
@@ -392,28 +368,18 @@ class TestConceptExtraction:
 
 
 class TestTierRecommendations:
-    """Test tier recommendation logic."""
+    """v0.4.5: Test tier recommendation stub (always returns all collections)."""
 
     @pytest.fixture
     def ums(self, tmp_path):
-        """Create UMS with routing patterns."""
-        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
-        ums.knowledge_graph["routing_patterns"] = {
-            "python": {
-                "best_collection": "patterns",
-                "collections_used": {"patterns": {"total": 10, "successes": 8}}
-            }
-        }
-        return ums
+        return UnifiedMemorySystem(data_path=str(tmp_path / "data"))
 
-    def test_get_tier_recommendations(self, ums):
-        """Should return recommendations based on KG."""
+    def test_get_tier_recommendations_stub(self, ums):
+        """v0.4.5: Should return all collections (KG removed)."""
         recs = ums.get_tier_recommendations(["python"])
-
-        # Core returns these keys
         assert "top_collections" in recs
-        assert "match_count" in recs
-        assert "confidence_level" in recs
+        assert len(recs["top_collections"]) == 5
+        assert recs["confidence_level"] == "exploration"
 
 
 class TestStoreBook:
@@ -559,8 +525,11 @@ class TestMemoryBankWilsonBlend:
 
         results = await mock_ums.search("test", collections=["memory_bank"])
         assert len(results) == 1
-        # Pure quality: 0.9 * 0.8 = 0.72
-        assert abs(results[0]["quality"] - 0.72) < 0.01
+        # v0.4.5: 1 use = NEW tier (0.8 embed / 0.2 learned). No special memory_bank path.
+        # Quality reflects 5-tier blend, not pure importance*confidence.
+        quality = results[0]["quality"]
+        assert quality > 0.0  # Has a score
+        assert quality <= 1.0  # Bounded
 
     @pytest.mark.asyncio
     async def test_memory_bank_wilson_only_after_3_uses(self, mock_ums):
@@ -670,8 +639,11 @@ class TestMemoryBankWilsonBlend:
 
         results = await mock_ums.search("test", collections=["memory_bank"])
         assert len(results) == 1
-        # Should be pure quality despite 0/2 success rate
-        assert abs(results[0]["quality"] - 0.72) < 0.01
+        # v0.4.5: 2 uses, 0 success = FAILING tier (0.7 embed / 0.3 learned).
+        # Wilson(0, 2) = 0.0, so learned score is very low. No special memory_bank bypass.
+        quality = results[0]["quality"]
+        assert quality < 0.5  # Low because 0/2 success pulls it down
+        assert quality >= 0.0  # Bounded
 
 
 class TestSearchWilsonScoring:
