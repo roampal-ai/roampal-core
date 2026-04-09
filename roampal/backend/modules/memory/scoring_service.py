@@ -213,10 +213,7 @@ class ScoringService:
         Returns:
             Tuple of (embedding_weight, learned_weight)
         """
-        if collection == "memory_bank" and uses >= 3:
-            # v0.3.7: 100% Wilson for proven memory_bank facts — track record is the signal
-            return (0.0, 1.0)
-
+        # v0.4.5: memory_bank flows through same 5-tier system as all collections
         if uses >= 5 and learned_score >= 0.8:
             # PROVEN HIGH-VALUE MEMORY
             return (self.config.embedding_weight_proven, self.config.learned_weight_proven)
@@ -232,14 +229,6 @@ class ScoringService:
         elif uses >= 2:
             # FAILING PATTERN
             return (0.7, 0.3)
-
-        elif collection == "memory_bank":
-            # MEMORY BANK SPECIAL CASE - quality-based ranking
-            quality = importance * confidence
-            if quality >= 0.8:
-                return (0.45, 0.55)
-            else:
-                return (0.5, 0.5)
 
         else:
             # NEW/UNKNOWN MEMORY
@@ -299,14 +288,7 @@ class ScoringService:
             raw_score, uses, outcome_history, success_count
         )
 
-        # Special case: memory_bank uses pure Wilson for proven facts (v0.3.7)
-        if collection == "memory_bank":
-            quality = importance * confidence
-            if uses >= 3:
-                # v0.3.7: 100% Wilson — real-world track record is the only signal
-                learned_score = wilson_score
-            else:
-                learned_score = quality
+        # v0.4.5: memory_bank uses same learned_score path as all collections
 
         # Convert distance to similarity
         embedding_similarity = 1.0 / (1.0 + distance)

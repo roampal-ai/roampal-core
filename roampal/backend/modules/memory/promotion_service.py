@@ -165,8 +165,10 @@ class PromotionService:
         # v0.4.0: Store original_id so outcome scoring can find promoted docs
         metadata["original_id"] = doc_id
 
-        # v0.3.6: Carry Wilson forward — memory already proved itself via reserved slot scoring
-        # No reset. success_count and uses carry through from working → history → patterns.
+        # v0.4.5: Reset success_count on promotion — memory must re-prove itself
+        # in the new tier. Matches benchmark ce_lifecycle.py (required for
+        # history→patterns at success≥5 to be meaningful).
+        metadata["success_count"] = 0.0
         metadata["promoted_to_history_at"] = datetime.now().isoformat()
 
         # Get text for embedding
@@ -221,6 +223,9 @@ class PromotionService:
         metadata["promoted_from"] = "history"
         # v0.4.0: Store original_id so outcome scoring can find promoted docs
         metadata["original_id"] = doc_id
+
+        # v0.4.5: Reset success_count on promotion — memory must re-prove in new tier
+        metadata["success_count"] = 0.0
 
         # Get text for embedding
         text_for_embedding = metadata.get("text") or metadata.get("content") or doc.get("content", "")
@@ -380,7 +385,8 @@ class PromotionService:
                             "promoted_from": "working",
                             "promotion_time": datetime.now().isoformat(),
                             "promotion_reason": "batch_promotion",
-                            "promoted_to_history_at": datetime.now().isoformat()  # v0.3.6: parity with outcome path
+                            "promoted_to_history_at": datetime.now().isoformat(),
+                            "success_count": 0.0,  # v0.4.5: reset on promotion — re-prove in new tier
                         }]
                     )
 

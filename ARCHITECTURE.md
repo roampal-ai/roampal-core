@@ -23,7 +23,7 @@ roampal init --opencode   # Or configure explicitly
 │                                                                   │
 │  UnifiedMemorySystem → ChromaDB    Hook endpoints                │
 │  ScoringService, SearchService     /api/hooks/get-context        │
-│  KnowledgeGraphService             /api/hooks/stop               │
+│  TagService, TagMigration          /api/hooks/stop               │
 │                                    /api/record-outcome           │
 │                                    /api/search, etc.             │
 └──────────────────────────────────────────────────────────────────┘
@@ -64,11 +64,12 @@ This distinction prevents forcing the LLM to score when the user is just providi
 │      → Injects scoring prompt with previous exchange         │
 │      → Sets scoring_required=True                            │
 │    - If interrupted mid-work: skip scoring                   │
-│    - KG-ROUTED UNIFIED SEARCH:                               │
-│      → Extract concepts from user message                    │
-│      → Hybrid search (vector + BM25) + Wilson scoring       │
-│      → 4 slots: reserved working + reserved history          │
-│        + 2 best from all collections (Wilson-ranked)         │
+│    - TAGCASCADE TWO-LANE RETRIEVAL (v0.4.5):                  │
+│      → Lane 1: 4 summaries (working/history/patterns/membank)│
+│      → Lane 2: 4 facts (working/history/patterns)            │
+│      → Each lane: tags-first cascade → CE rerank              │
+│      → 8 total memories injected into context                 │
+│      → No Wilson in retrieval (metadata only)                 │
 │      → Cache doc_ids for scoring                             │
 │    ↓                                                         │
 │ 3. LLM SEES (only if scoring required):                      │
@@ -173,15 +174,15 @@ roampal-core/
 │   │           ├── embedding_service.py     # ONNX embeddings
 │   │           ├── search_service.py        # Hybrid search + Wilson scoring
 │   │           ├── scoring_service.py       # Wilson score calculation
-│   │           ├── routing_service.py       # KG-based collection routing
-│   │           ├── knowledge_graph_service.py # Dual KG system
+│   │           ├── routing_service.py       # Collection routing (all 5)
+│   │           ├── tag_service.py           # Noun tag extraction + matching
 │   │           ├── outcome_service.py       # Score updates from outcomes
 │   │           ├── promotion_service.py     # Promotion/demotion/cleanup
 │   │           ├── memory_bank_service.py   # Permanent user facts
 │   │           ├── context_service.py       # Context analysis
 │   │           ├── config.py                # MemoryConfig
 │   │           ├── memory_types.py          # TypedDicts, enums
-│   │           └── content_graph.py         # Content KG entity linking
+│   │           └── tag_migration.py         # Noun tag backfill for existing memories
 │   │
 │   ├── server/
 │   │   ├── __init__.py
@@ -255,7 +256,7 @@ working → history → patterns
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/hooks/get-context` | POST | 4-slot context injection: reserved working + reserved history + 2 best matches (Wilson-ranked). Returns `scoring_prompt`, `context_only`, and backward-compatible `formatted_injection`. |
+| `/api/hooks/get-context` | POST | v0.4.5: Two-lane TagCascade retrieval — 4 summaries + 4 facts = 8 memories. Tags-first cascade fills candidate pool, CE reranks, raw CE score as final ranking. Returns `scoring_prompt`, `context_only`, and `formatted_injection`. |
 | `/api/hooks/stop` | POST | Stores exchange, logs if score_memories not called |
 | `/api/record-outcome` | POST | Records outcome, updates scores |
 
@@ -446,67 +447,20 @@ roampal-core shares the same Knowledge Graph data as Roampal Desktop, enabling i
 
 ### Knowledge Graph Structure
 
-```
-knowledge_graph.json
-├── routing_patterns      # concept -> best_collection
-├── success_rates         # collection -> success_rate
-├── failure_patterns      # concept -> failure_reasons
-├── problem_categories    # problem_type -> preferred_collections
-├── problem_solutions     # problem_signature -> [solution_ids]
-├── solution_patterns     # pattern_hash -> {problem, solution, success_rate}
-└── context_action_effectiveness  # (context, action, collection) -> stats
-```
+### TagCascade Retrieval (v0.4.5)
 
-### KG Methods (on UnifiedMemorySystem)
+Tags-first cascade retrieval replaces the knowledge graph. Validated on LoCoMo benchmark (tag_cascade_cosine: 27.3% clean, 29.0% poison Hit@1).
 
-These methods live on `UnifiedMemorySystem`, which delegates to `KnowledgeGraphService` internally:
+**Pipeline:**
+1. Match query nouns against known tag index
+2. Per-tag ChromaDB queries, count overlaps per memory
+3. Fill 40-candidate pool from highest overlap tier down (cosine distance within tier)
+4. Cosine-fill remaining slots from unfiltered search
+5. CE reranks pool — raw CE score as final ranking (no Wilson blend)
 
-| Method | Description |
-|--------|-------------|
-| `get_tier_recommendations(concepts)` | Query Routing KG for best collections |
-| `get_action_effectiveness(context, action, collection)` | Get Action KG effectiveness stats |
-| `get_facts_for_entities(entities)` | Query Content KG for memory_bank facts |
-| `detect_context_type(messages)` | Classify query context (coding, fitness, etc.) |
-| `analyze_conversation_context(message)` | Find patterns, failures, insights |
-| `record_action_outcome(action)` | **Write** to Action KG - track tool effectiveness |
-| `_update_kg_routing(query, collection, outcome)` | **Write** to Routing KG - learn query→collection patterns |
+**Two-lane retrieval:** 4 summaries + 4 facts = 8 memories per context injection.
 
-### How KGs Improve Search
-
-1. **Routing KG**: Directs searches to collections that worked for similar concepts
-2. **Action KG**: Tracks which tools work in which contexts (e.g., search_memory on patterns: 92% success in coding)
-3. **Content KG**: Links entities to memory_bank facts for fast lookup
-
-### memory_bank and books KG Benefits
-
-While `memory_bank` and `books` don't get individual doc-level scoring (they're static reference material), they DO benefit from KG tracking at the **collection level**:
-
-**Action KG (`record_action_outcome`):**
-```python
-# Tracks: "In coding context, score_memories on memory_bank worked"
-# Key format: "{context_type}|{action_type}|{collection}"
-# Example: "coding|score_memories|memory_bank" → 85% success rate
-```
-
-**Routing KG (`_update_kg_routing`):**
-```python
-# Tracks: "Queries about 'user preferences' work best on memory_bank"
-# Learns concept→collection mappings from outcomes
-# Example: "python" concept → books collection (90% success)
-```
-
-This means:
-- memory_bank facts get surfaced more for queries where they've historically helped
-- books get prioritized for technical queries where they've worked
-- The learning happens even though individual docs aren't scored
-
-### Data Sharing with Desktop
-
-The KG files are stored in the same data directory as Roampal Desktop:
-- `%APPDATA%/Roampal/data/knowledge_graph.json` (Windows prod)
-- `%APPDATA%/Roampal_DEV/data/knowledge_graph.json` (Windows dev)
-
-Patterns learned in Desktop are available to roampal-core and vice versa.
+**Tag extraction:** LLM extracts `noun_tags` via MCP tool params (Claude Code: main LLM, OpenCode: sidecar). Regex fallback for migration/books.
 
 ---
 
@@ -559,7 +513,7 @@ Books are stored in the `books` ChromaDB collection with these operations:
 |-----------|--------------|
 | `roampal ingest <file>` | Chunks file, embeds, stores in ChromaDB |
 | `roampal books` | Lists all books grouped by title |
-| `roampal remove <title>` | Deletes all chunks + cleans Action KG refs |
+| `roampal remove <title>` | Deletes all chunks via ghost registry |
 
 **Book Removal Flow:**
 1. Find all chunks with matching title
@@ -801,7 +755,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-pytorch = ["sentence-transformers>=3.2.0"]
+# No PyTorch needed — embeddings and cross-encoder both run via ONNX Runtime
 dev = ["pytest>=7.0.0", "pytest-asyncio>=0.21.0", "mypy>=1.0.0"]
 ```
 
@@ -827,9 +781,8 @@ The `search()` method delegates to `SearchService` which provides a full retriev
 
 1. **Hybrid search**: Vector similarity + BM25 keyword matching with Reciprocal Rank Fusion
 2. **Wilson scoring**: Confidence intervals with dynamic weight shifts (NEW → EMERGING → ESTABLISHED → PROVEN)
-3. **Collection-specific boosts**: patterns priority, memory_bank 80/20 quality+Wilson blend (after 3 uses), books recency
-4. **Entity boost**: Content KG quality-weighted entity matching
-5. **KG routing**: Intelligent collection selection when no collections specified
+3. **Collection-specific boosts**: patterns priority (0.9x distance), memory_bank cold-start boost (< 3 uses), books recency
+4. **v0.4.5**: Wilson removed from retrieval entirely — metadata only for display/promotion
 
 Falls back to inline vector search + Wilson scoring if SearchService fails or isn't initialized.
 

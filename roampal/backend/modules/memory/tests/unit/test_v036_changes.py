@@ -37,62 +37,27 @@ class TestCollectionBoostDistanceMultiplier:
         from roampal.backend.modules.memory.scoring_service import ScoringService
         from roampal.backend.modules.memory.config import MemoryConfig
 
+        from roampal.backend.modules.memory.config import MemoryConfig
+        from roampal.backend.modules.memory.tag_service import TagService
+
         config = MemoryConfig()
         scoring = ScoringService(config=config)
         routing = MagicMock()
-        kg = MagicMock()
-        # _calculate_entity_boost needs _doc_entities on kg_service
-        kg._doc_entities = {}
+        tag_service = TagService()
         embed_fn = AsyncMock(return_value=[0.1, 0.2, 0.3])
 
         svc = SearchService(
             collections={},
             scoring_service=scoring,
             routing_service=routing,
-            kg_service=kg,
+            tag_service=tag_service,
             embed_fn=embed_fn,
             config=config
         )
         return svc
 
-    def test_memory_bank_wilson_only_bad_wilson(self, search_service):
-        """v0.3.7: Pure Wilson for 3+ uses — bad Wilson = weak boost."""
-        result = {
-            "distance": 1.0,
-            "id": "mb_test1",
-            "metadata": {
-                "importance": 0.9,
-                "confidence": 0.9,
-                "uses": 10,
-                "success_count": 3.0  # bad wilson
-            }
-        }
-        search_service._apply_collection_boost(result, "memory_bank", "test query")
-
-        # wilson = wilson_score_lower(3.0, 10) ≈ 0.147
-        # metadata_boost = 1.0 - 0.147 * 0.8 ≈ 0.882
-        assert 0.8 < result["distance"] < 0.95
-
-    def test_memory_bank_wilson_only_good_wilson(self, search_service):
-        """v0.3.7: Pure Wilson for 3+ uses — good Wilson = strong boost."""
-        result = {
-            "distance": 1.0,
-            "id": "mb_test2",
-            "metadata": {
-                "importance": 0.9,
-                "confidence": 0.9,
-                "uses": 10,
-                "success_count": 9.0  # great wilson
-            }
-        }
-        search_service._apply_collection_boost(result, "memory_bank", "test query")
-
-        # wilson = wilson_score_lower(9.0, 10) ≈ 0.596
-        # metadata_boost = 1.0 - 0.596 * 0.8 ≈ 0.523
-        assert 0.4 < result["distance"] < 0.6
-
-    def test_memory_bank_cold_start_quality_only(self, search_service):
-        """Cold start (uses < 3) uses quality only — no Wilson."""
+    def test_memory_bank_cold_start_quality_boost(self, search_service):
+        """v0.4.5: Cold start (uses < 3) gets light quality boost."""
         result = {
             "distance": 1.0,
             "id": "mb_test3",
@@ -104,28 +69,24 @@ class TestCollectionBoostDistanceMultiplier:
             }
         }
         search_service._apply_collection_boost(result, "memory_bank", "test query")
+        # quality = 0.64, light boost: 1.0 - 0.64 * 0.3 = 0.808
+        assert abs(result["distance"] - 0.808) < 0.01
 
-        # quality = 0.64, no wilson blend
-        # metadata_boost = 1.0 - 0.64 * 0.4 = 0.744
-        assert abs(result["distance"] - 0.744) < 0.01
-
-    def test_0_4_multiplier_not_0_8(self, search_service):
-        """v0.3.6: Perfect score gives 0.6 distance (40% boost), NOT 0.2 (80%)."""
+    def test_memory_bank_proven_no_distance_boost(self, search_service):
+        """v0.4.5: Memory bank with 3+ uses gets no distance manipulation."""
         result = {
             "distance": 1.0,
-            "id": "mb_test4",
+            "id": "mb_test2",
             "metadata": {
-                "importance": 1.0,
-                "confidence": 1.0,
-                "uses": 0,  # cold start — quality only
-                "success_count": 0.0
+                "importance": 0.9,
+                "confidence": 0.9,
+                "uses": 10,
+                "success_count": 9.0
             }
         }
         search_service._apply_collection_boost(result, "memory_bank", "test query")
-
-        # quality = 1.0 * 1.0 = 1.0 (cold start, quality only)
-        # metadata_boost = 1.0 - 1.0 * 0.4 = 0.6
-        assert abs(result["distance"] - 0.6) < 0.01
+        # v0.4.5: No Wilson distance boost for 3+ uses — scoring handles it
+        assert abs(result["distance"] - 1.0) < 0.01
 
     def test_patterns_get_0_9_boost(self, search_service):
         """Patterns collection gets 10% distance reduction."""
@@ -139,41 +100,25 @@ class TestCollectionBoostDistanceMultiplier:
         search_service._apply_collection_boost(result, "working", "test query")
         assert abs(result["distance"] - 1.0) < 0.01
 
-    def test_entity_boost_applies_to_all_collections(self, search_service):
-        """v0.3.6: Entity boost applies after collection-specific boosts."""
-        # Mock _calculate_entity_boost to return > 1.0
-        search_service._calculate_entity_boost = MagicMock(return_value=1.5)
+    def test_no_entity_boost(self, search_service):
+        """v0.4.5: Entity boost removed — no _calculate_entity_boost method."""
+        assert not hasattr(search_service, '_calculate_entity_boost')
 
-        for coll in ["working", "history", "patterns"]:
-            result = {"distance": 1.0, "id": f"{coll}_test", "metadata": {}}
-            search_service._apply_collection_boost(result, coll, "test query")
-            # distance = 1.0 / 1.5 ≈ 0.667 (for working/history which have no other boost)
-            assert result["distance"] < 1.0, f"Entity boost not applied to {coll}"
-
-    def test_wilson_uses_proper_function_not_naive_ratio(self, search_service):
-        """v0.3.6: Uses wilson_score_lower(), not naive success_count/uses."""
+    def test_memory_bank_proven_uses_scoring_not_distance(self, search_service):
+        """v0.4.5: Memory bank 3+ uses — no distance manipulation, scoring handles it."""
         result = {
             "distance": 1.0,
             "id": "mb_test5",
             "metadata": {
                 "importance": 0.7,
                 "confidence": 0.7,
-                "uses": 1,
-                "success_count": 1.0  # naive = 1.0, wilson ≈ 0.206
+                "uses": 3,
+                "success_count": 3.0
             }
         }
-        # uses < 3 = cold start, but let's test uses >= 3
-        result["metadata"]["uses"] = 3
-        result["metadata"]["success_count"] = 3.0
-
         search_service._apply_collection_boost(result, "memory_bank", "test query")
-
-        # v0.3.7: Pure Wilson * 0.8 coefficient
-        # If naive ratio: 3/3 = 1.0, boost = 1.0 - 1.0 * 0.8 = 0.2
-        # If wilson: wilson(3,3) ≈ 0.438, boost = 1.0 - 0.438 * 0.8 ≈ 0.649
-        # Wilson is more conservative (higher distance) than naive ratio
-        assert result["distance"] > 0.5, "Should use wilson_score_lower, not naive ratio"
-        assert result["distance"] < 0.8, "Wilson(3,3) should still provide some boost"
+        # v0.4.5: No distance manipulation for proven memories
+        assert abs(result["distance"] - 1.0) < 0.01
 
 
 # ============================================================================
@@ -232,9 +177,10 @@ class TestPromotionCarryForward:
         upserted_metadata = call_args.kwargs.get("metadatas") or call_args[1].get("metadatas", [{}])
         meta = upserted_metadata[0]
 
-        # v0.3.6: success_count and uses should be carried forward, NOT reset
-        assert meta["success_count"] == 3.0, "success_count should NOT be reset to 0"
-        assert meta["uses"] == 5, "uses should NOT be reset to 0"
+        # v0.4.5: success_count resets on promotion — memory must re-prove in new tier
+        # (matches benchmark ce_lifecycle.py; required for history→patterns success≥5)
+        assert meta["success_count"] == 0.0, "success_count should reset to 0 on promotion"
+        assert meta["uses"] == 5, "uses should carry forward"
         assert "promoted_to_history_at" in meta
 
     @pytest.mark.asyncio
@@ -324,9 +270,9 @@ class TestBatchPromotionParity:
 
         assert "promoted_to_history_at" in meta
         assert meta["promotion_reason"] == "batch_promotion"
-        # Counters should be carried forward (via **metadata spread)
-        assert meta["success_count"] == 2.0
-        assert meta["uses"] == 3
+        # v0.4.5: success_count resets on promotion (re-prove in new tier)
+        assert meta["success_count"] == 0.0
+        assert meta["uses"] == 3  # uses carry forward
 
 
 # ============================================================================

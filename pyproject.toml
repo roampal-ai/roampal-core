@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roampal"
-version = "0.4.4"
+version = "0.4.5"
 description = "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -40,9 +40,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-pytorch = [
-    "sentence-transformers>=3.2.0",
-]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
