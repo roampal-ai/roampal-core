@@ -585,7 +585,7 @@ STORAGE DISCIPLINE:
                     "properties": {
                         "content": {"type": "string", "description": "The fact to remember"},
                         "tags": {"type": "array", "items": {"type": "string"}, "description": "Categories: identity, preference, goal, project, system_mastery, agent_growth"},
-                        "noun_tags": {"type": "array", "items": {"type": "string"}, "description": "Key nouns from the content — people names, places, objects, specific things. Lowercase."},
+                        "noun_tags": {"type": "array", "items": {"type": "string"}, "description": "Key TOPIC nouns from the content. Use actual names not pronouns (skip he/she/they/user/assistant). Lowercase, 1-3 words each, max 8. Include proper nouns and important common nouns. Skip meta-words (source, answer, details, accuracy, response, question, topic, context, information, correction, update, memory) and verbs (said, told, mentioned, discussed, talked, asked). Focus on WHO and WHAT, not how it was communicated."},
                         "importance": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.7, "description": "How critical (0.0-1.0)"},
                         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.7, "description": "How certain (0.0-1.0)"},
                         "always_inject": {"type": "boolean", "default": False, "description": "If true, this memory appears in EVERY context (use for core identity only)"}
@@ -684,7 +684,7 @@ ACTIVE MEMORY MANAGEMENT:
                         "noun_tags": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Key nouns from the exchange summary — people names, places, topics. Lowercase."
+                            "description": "Key TOPIC nouns from the exchange. Use actual names not pronouns (skip he/she/they/user/assistant). Lowercase, 1-3 words each, max 8. Include proper nouns and important common nouns. Skip meta-words (source, answer, details, accuracy, response, question, topic, context, information, correction, update, memory) and verbs (said, told, mentioned, discussed, talked, asked). Focus on WHO and WHAT, not how it was communicated."
                         },
                         "facts": {
                             "type": "array",
@@ -721,7 +721,7 @@ Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -
                     "noun_tags": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Key nouns from the takeaway — people names, places, objects, specific things. Lowercase."
+                        "description": "Key TOPIC nouns from the takeaway. Use actual names not pronouns (skip he/she/they/user/assistant). Lowercase, 1-3 words each, max 8. Include proper nouns and important common nouns. Skip meta-words (source, answer, details, accuracy, response, question, topic, context, information, correction, update, memory) and verbs (said, told, mentioned, discussed, talked, asked). Focus on WHO and WHAT, not how it was communicated."
                     }
                 },
                 "required": ["key_takeaway", "noun_tags"]

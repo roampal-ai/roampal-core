@@ -590,7 +590,13 @@ OUTCOME: Based on the user's follow-up:
 - partial: helped but incomplete or needed adjustment
 - unknown: no clear signal
 
-NOUN_TAGS: Extract key topic nouns from your summary — people's names, places, objects, specific things the exchange was about. Lowercase, 1-3 words each, max 8. Skip pronouns and meta-words (user, assistant, memory, response, question).
+NOUN_TAGS: Extract the key TOPIC nouns from this exchange — people's names, places, objects, and specific things the exchange is actually about.
+- Use actual names, not pronouns (skip 'he', 'she', 'they', 'user', 'assistant')
+- Keep each tag as a short noun phrase (1-3 words), lowercase, max 8
+- Include both proper nouns and important common nouns
+- Skip meta-words about the conversation itself: source, answer, details, accuracy, response, question, topic, context, information, correction, update, memory
+- Skip generic verbs/actions: said, told, mentioned, discussed, talked, asked
+- Focus on WHO and WHAT the exchange is about, not how it was communicated
 
 FACTS: Extract key facts worth remembering from this exchange. Rules:
 - Include WHO or WHAT each fact is about — names, projects, topics
