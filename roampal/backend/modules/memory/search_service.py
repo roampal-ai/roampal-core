@@ -616,6 +616,11 @@ class SearchService:
             all_results.sort(key=lambda x: x.get("created_at", ""), reverse=True)
 
         paginated_results = all_results[offset:offset + limit]
+
+        # v0.4.7: Add recency metadata (same as semantic search path).
+        # Without this, empty-query results lack recency strings.
+        self._add_recency_metadata(paginated_results)
+
         if return_metadata:
             return {
                 "results": paginated_results,
@@ -634,9 +639,10 @@ class SearchService:
         """Add recency metadata to working memory results."""
         for r in results:
             metadata = r.get("metadata", {})
-            if metadata.get("timestamp"):
+            ts_str = metadata.get("timestamp") or metadata.get("created_at")
+            if ts_str:
                 try:
-                    timestamp = datetime.fromisoformat(metadata["timestamp"])
+                    timestamp = datetime.fromisoformat(ts_str)
                     minutes_ago = (datetime.now() - timestamp).total_seconds() / 60
 
                     if minutes_ago < 1:

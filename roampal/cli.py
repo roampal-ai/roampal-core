@@ -2236,11 +2236,14 @@ def cmd_context(args):
     if args.recent_exchanges:
         try:
             # Search for recent exchange summaries
+            # v0.4.7: Fetch most recent exchange summaries (no semantic query — pure recency).
+            # Empty query triggers _search_all path which now includes _add_recency_metadata.
+            # Search all three collections since summaries can be promoted across tiers.
             resp = httpx.post(
                 f"{base_url}/api/search",
                 json={
                     "query": "",
-                    "collections": ["working"],
+                    "collections": ["working", "history", "patterns"],
                     "limit": 4,
                     "sort_by": "recency",
                     "metadata_filters": {"memory_type": "exchange_summary"}
@@ -2255,16 +2258,29 @@ def cmd_context(args):
             if not results:
                 return
 
-            # Format output for platform hook injection
+            # Format output matching _format_mem() from unified_memory_system.py
             print("RECENT EXCHANGES (last 4):")
-            for i, r in enumerate(results, 1):
-                content = r.get("content", "")
+            for r in results:
+                content = r.get("text", "") or r.get("content", "") or r.get("metadata", {}).get("text", "")
                 metadata = r.get("metadata", {})
+                doc_id = r.get("id", "")
+                collection = r.get("collection", metadata.get("collection", "working"))
                 recency = metadata.get("recency", "")
-                time_str = f"[{recency}] " if recency else ""
-                # Truncate to keep output compact
+                wilson = r.get("wilson_score", metadata.get("wilson_score", 0)) or 0
+                uses = r.get("uses", metadata.get("uses", 0)) or 0
+                last_outcome = metadata.get("last_outcome", "")
+                tag_parts = []
+                if recency:
+                    tag_parts.append(recency)
+                tag_parts.append(collection)
+                if uses > 0:
+                    tag_parts.append(f"wilson:{wilson:.0%}")
+                    tag_parts.append(f"used:{uses}x")
+                    if last_outcome:
+                        tag_parts.append(f"last:{last_outcome}")
+                id_str = f" [id:{doc_id}]" if doc_id else ""
                 summary = content[:200] if content else "No content"
-                print(f"{i}. {time_str}{summary}")
+                print(f"• {summary}{id_str} ({', '.join(tag_parts)})")
 
         except httpx.ConnectError:
             pass  # Server not running, fail silently for hooks
