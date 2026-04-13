@@ -482,7 +482,19 @@ VERIFICATION USE:
 • If you find conflicting memories on the same topic, prefer the
   newer one and score the older one "failed" on the next scoring prompt
 • Use id= lookup to verify specific memories referenced in KNOWN CONTEXT
-  before building conclusions on them""",
+  before building conclusions on them
+
+RETURNS:
+Each result contains: content (the memory text), metadata (created_at, score, uses, outcome_history,
+noun_tags, Wilson confidence, collection name), and a formatted display line with age, scores, and
+usage stats. Results are pre-formatted with indicators like [YYN] (outcome history), s:0.7 (score),
+w:0.68 (Wilson), and use count.
+
+HOW THIS DIFFERS FROM OTHER TOOLS:
+• search_memory = READ existing memories (this tool)
+• add_to_memory_bank = WRITE new permanent facts
+• record_response = WRITE new exchange takeaways (auto-scored over time)
+• score_memories = EVALUATE existing memories for retrieval quality""",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -579,7 +591,15 @@ STORAGE DISCIPLINE:
   things the user told you that you couldn't confirm
 • Before storing, ask: "Will this still be true next week?" If not,
   it doesn't belong in memory_bank — let working/history handle it
-• One fact per memory. Don't combine unrelated information""",
+• One fact per memory. Don't combine unrelated information
+
+HOW THIS DIFFERS FROM record_response:
+• add_to_memory_bank = permanent, unscored facts (identity, preferences, goals). YOU manage the lifecycle via update_memory/delete_memory. Survives indefinitely.
+• record_response = exchange takeaways that enter the outcome-scored pipeline (working → history → patterns). The system manages lifecycle automatically based on scoring feedback.
+Use add_to_memory_bank for standing facts. Use record_response for session learnings.
+
+RETURNS:
+JSON with 'status' ('stored'), the assigned doc_id, and the collection ('memory_bank').""",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -595,23 +615,73 @@ STORAGE DISCIPLINE:
             ),
             types.Tool(
                 name="update_memory",
-                description="Update existing memory when information changes or needs correction.\n\nWHEN TO USE: When you discover a memory_bank fact is outdated, wrong, or incomplete — fix it immediately. Don't wait to be told. If you gave wrong info because of a stale memory, update it in the same turn you discover the error. This is YOUR memory — maintain it.\n\nUPDATE vs DELETE: Update when the fact is still relevant but details changed (version, path, status). Delete when the fact is no longer relevant at all or has been replaced by a different memory.",
+                description="""Update an existing memory_bank fact when information changes or needs correction.
+
+MEMORY LIFECYCLE:
+Roampal has 5 collections. This tool ONLY updates memory_bank (permanent, unscored facts).
+• working → auto-promotes to history after 24h (outcome-scored)
+• history → auto-promotes to patterns after 30d (outcome-scored)
+• patterns → permanent (outcome-scored, high-confidence)
+• memory_bank → permanent (NOT outcome-scored — you manage it manually)
+• books → permanent document storage (use 'roampal ingest' CLI)
+
+Working/history/patterns are managed by the scoring system (score_memories tool).
+memory_bank facts persist until YOU update or delete them — no automatic cleanup.
+
+WHEN TO USE:
+• A memory_bank fact is outdated (e.g., version changed, path moved, status updated)
+• You gave wrong info because of a stale memory — fix it in the same turn
+• A fact is incomplete and needs more detail
+• Don't wait to be told — this is YOUR memory, maintain it proactively
+
+UPDATE vs DELETE (use delete_memory instead when):
+• The fact is completely wrong or no longer relevant at all
+• The fact has been superseded by a different memory on a different topic
+• Use update_memory when the TOPIC is still relevant but DETAILS changed
+
+MATCHING BEHAVIOR:
+old_content is matched semantically (cosine similarity), not as an exact string.
+You don't need to paste the exact text — a close paraphrase will match.
+If no match is found, the update fails silently and nothing is changed.
+
+RETURNS:
+JSON with 'status' ('updated' or 'not_found') and the matched memory's doc_id if successful.""",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "old_content": {"type": "string", "description": "Old/incorrect fact to find"},
-                        "new_content": {"type": "string", "description": "Corrected/updated fact"}
+                        "old_content": {"type": "string", "description": "The existing fact to find and replace. Matched via semantic similarity — a close paraphrase works, exact text is not required."},
+                        "new_content": {"type": "string", "description": "The corrected or updated fact to store in place of the old one. Keep concise (~300 chars). One concept per fact."}
                     },
                     "required": ["old_content", "new_content"]
                 }
             ),
             types.Tool(
                 name="delete_memory",
-                description="Delete outdated/irrelevant memories from memory_bank.\n\nWHEN TO USE: When a memory_bank fact is wrong, stale, redundant, or harmful. Deleting bad memories is as important as storing good ones. If a memory has been misleading you across sessions, don't just score it 'failed' — delete it. memory_bank is not outcome-scored, so scoring alone won't remove it. You must act directly.\n\nUPDATE vs DELETE: Delete when the fact is completely wrong or no longer relevant. Update (use update_memory instead) when the fact is still relevant but details changed.",
+                description="""Permanently delete a memory_bank fact. This action is IRREVERSIBLE — the memory cannot be recovered.
+
+SCOPE: Only deletes from memory_bank (permanent unscored facts). Cannot delete from working, history, or patterns — those collections are managed automatically by the outcome scoring system (score_memories tool). Memories scored "failed" repeatedly in those collections are demoted or pruned automatically.
+
+WHEN TO USE:
+• A memory_bank fact is completely wrong, stale, or harmful
+• A fact is redundant (covered by a newer, better memory)
+• A memory has been misleading you across sessions — don't just note it, remove it
+• memory_bank is NOT outcome-scored, so scoring alone won't remove bad facts. You must delete them directly.
+
+WHEN TO USE update_memory INSTEAD:
+• The topic is still relevant but the details changed (version, path, status)
+• The fact needs correction, not removal
+
+MATCHING BEHAVIOR:
+content is matched via semantic similarity (cosine distance), not exact string match.
+A close paraphrase will find the right memory. If multiple memories match, the closest match is deleted.
+If no match is found, nothing is deleted and the operation reports 'not_found'.
+
+RETURNS:
+JSON with 'status' ('deleted' or 'not_found') and the matched memory's doc_id and content preview if successful.""",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "content": {"type": "string", "description": "Memory to delete (semantic match)"}
+                        "content": {"type": "string", "description": "The memory to delete, described in natural language. Matched via semantic similarity — use a close paraphrase of the fact you want to remove."}
                     },
                     "required": ["content"]
                 }
@@ -625,42 +695,35 @@ STORAGE DISCIPLINE:
         if not _hide_score_tool:
             tools.append(types.Tool(
                 name="score_memories",
-                description="""Score individual cached memories from your previous context. ONLY use when the <roampal-score-required> hook prompt appears.
+                description="""Score memories from your previous context to train the outcome-based retrieval system. This is the core feedback loop — memories scored "worked" get promoted, "failed" get demoted or pruned.
 
-Your job here is to:
-1. Score each cached memory individually — was it helpful, misleading, or unused?
-2. Summarize the previous exchange in ~300 chars
-3. Rate the exchange outcome (worked/failed/partial/unknown)
+WHEN TO USE: ONLY when the <roampal-score-required> hook prompt appears (once per exchange, automatically triggered). Do NOT call at other times. For storing learnings at any time, use record_response instead.
 
-⚠️ IMPORTANT: This tool is ONLY for scoring when prompted by the hook. Do NOT call it at other times.
-For storing important learnings at any time, use record_response(key_takeaway="...") instead.
+HOW IT WORKS:
+1. The hook prompt lists memory IDs to score (from [id:...] tags in KNOWN CONTEXT)
+2. You score each memory based on whether it helped your previous response
+3. Scores feed into Wilson confidence scoring — statistical lower-bound that balances signal vs noise
+4. Over time, helpful memories surface more; misleading ones get pruned
 
-FINDING MEMORY IDs:
-The scoring prompt lists memory IDs to score. These IDs correspond to [id:...] tags
-in the KNOWN CONTEXT block from the previous turn. Look at KNOWN CONTEXT to see what
-each memory contained, then score based on whether it helped your response.
+This tool differs from record_response: score_memories evaluates EXISTING memories for retrieval quality. record_response STORES NEW learnings. Use both — score_memories every turn (when prompted), record_response only for significant exchanges.
 
-PER-MEMORY SCORING:
-You MUST score each memory ID listed in the scoring prompt:
-• worked = this memory was helpful
-• partial = somewhat helpful
-• unknown = didn't use this memory
-• failed = this memory was MISLEADING (gave bad advice that led you astray)
+SCORING GUIDE:
+• worked = this memory directly helped your response
+• partial = somewhat helpful or tangentially relevant
+• unknown = present in context but you didn't use it
+• failed = this memory was MISLEADING — you gave wrong info because of it
 
-You MAY also score any other memory visible in KNOWN CONTEXT or earlier conversation.
+⚠️ "failed" means MISLEADING, not just unused. If you didn't use a memory, score "unknown" not "failed".
+A memory scored "failed" 3 times is demoted or deleted — this is intentional pruning, not punishment.
 
-⚠️ CRITICAL - "failed" means MISLEADING, not just unused.
-If you didn't use a memory, mark it "unknown" not "failed".
+SIDE EFFECTS:
+• Updates Wilson confidence scores on scored memories
+• Memories below score threshold are auto-demoted (working→history) or pruned
+• exchange_summary and facts are stored as new working memories for future retrieval
+• noun_tags are attached for tag-based retrieval (TagCascade)
 
-ACTIVE MEMORY MANAGEMENT:
-• "failed" is not punishment — it's pruning. A memory scored "failed"
-  3 times will be demoted or deleted. This is GOOD. Use it.
-• If a memory was MISLEADING in your response (you gave wrong info
-  because of it), score it "failed" even if the exchange went okay
-• If you notice a pattern memory surfacing repeatedly with "unknown"
-  scores, consider: is this memory actually useful? If not, scoring
-  "failed" once helps the system stop wasting context on it
-• You are the gardener. Pull the weeds.""",
+RETURNS:
+JSON confirmation with count of memories scored and summary storage status.""",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -670,16 +733,16 @@ ACTIVE MEMORY MANAGEMENT:
                                 "type": "string",
                                 "enum": ["worked", "failed", "partial", "unknown"]
                             },
-                            "description": "Score for each memory: doc_id -> outcome. MUST include all cached memories. MAY include extras from context."
+                            "description": "Map of memory doc_id to outcome score. Example: {\"patterns_abc123\": \"worked\", \"history_def456\": \"unknown\"}. MUST include all memory IDs listed in the scoring prompt. MAY include additional memories visible in KNOWN CONTEXT."
                         },
                         "exchange_summary": {
                             "type": "string",
-                            "description": "~300 char summary of the previous exchange"
+                            "description": "~300 char summary of the previous exchange. Stored as a new working memory for future retrieval. Should capture WHAT happened and the outcome, not just what was discussed."
                         },
                         "exchange_outcome": {
                             "type": "string",
                             "enum": ["worked", "failed", "partial", "unknown"],
-                            "description": "Was the previous response effective?"
+                            "description": "Overall effectiveness of your previous response. 'worked' = user confirmed or continued productively. 'failed' = user corrected you or was frustrated. 'partial' = mixed results. 'unknown' = can't determine."
                         },
                         "noun_tags": {
                             "type": "array",
@@ -689,7 +752,7 @@ ACTIVE MEMORY MANAGEMENT:
                         "facts": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Atomic facts from this exchange. One fact per string, max 150 chars. Include WHO/WHAT, specifics (dates, names, preferences, decisions). Skip vague observations."
+                            "description": "Atomic facts extracted from this exchange, stored as separate working memories. One fact per string, max 150 chars. Include WHO/WHAT with specifics (dates, names, preferences, decisions). Skip vague observations. Example: [\"User prefers snake_case in Python code\", \"v0.4.6 released on 2026-04-13\"]"
                         }
                     },
                     "required": ["memory_scores"]
