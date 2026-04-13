@@ -15,7 +15,8 @@ How it works:
     4. You see your original message; the AI sees your message + context
 """
 
-__version__ = "0.4.5.1"
+__version__ = "0.4.6"
+
 
 # Lazy imports: chromadb/onnxruntime are heavy and crash in minimal
 # environments (e.g., Glama Docker inspection).  The MCP server only needs
@@ -24,11 +25,14 @@ __version__ = "0.4.5.1"
 def __getattr__(name):
     if name == "UnifiedMemorySystem":
         from roampal.backend.modules.memory import UnifiedMemorySystem
+
         return UnifiedMemorySystem
     if name == "MemoryConfig":
         from roampal.backend.modules.memory import MemoryConfig
+
         return MemoryConfig
     raise AttributeError(f"module 'roampal' has no attribute {name}")
+
 
 __all__ = [
     "UnifiedMemorySystem",

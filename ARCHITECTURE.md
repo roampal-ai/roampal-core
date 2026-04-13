@@ -23,7 +23,7 @@ roampal init --opencode   # Or configure explicitly
 │                                                                   │
 │  UnifiedMemorySystem → ChromaDB    Hook endpoints                │
 │  ScoringService, SearchService     /api/hooks/get-context        │
-│  TagService, TagMigration          /api/hooks/stop               │
+│  TagService                       /api/hooks/stop               │
 │                                    /api/record-outcome           │
 │                                    /api/search, etc.             │
 └──────────────────────────────────────────────────────────────────┘
@@ -182,7 +182,7 @@ roampal-core/
 │   │           ├── context_service.py       # Context analysis
 │   │           ├── config.py                # MemoryConfig
 │   │           ├── memory_types.py          # TypedDicts, enums
-│   │           └── tag_migration.py         # Noun tag backfill for existing memories
+│   │           └── tag_service.py          # Noun tag extraction + matching
 │   │
 │   ├── server/
 │   │   ├── __init__.py
@@ -460,7 +460,7 @@ Tags-first cascade retrieval replaces the knowledge graph. Validated on LoCoMo b
 
 **Two-lane retrieval:** 4 summaries + 4 facts = 8 memories per context injection.
 
-**Tag extraction:** LLM extracts `noun_tags` via MCP tool params (Claude Code: main LLM, OpenCode: sidecar). Regex fallback for migration/books.
+**Tag extraction:** LLM extracts `noun_tags` via MCP tool params (Claude Code: main LLM, OpenCode: sidecar).
 
 ---
 

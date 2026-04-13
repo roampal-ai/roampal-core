@@ -89,11 +89,24 @@ secrets.json
 credentials.json
 
 # Dev artifacts
-dev/benchmarks/results/
-dev/benchmarks/*_data/
-dev/benchmarks/test_latency_data/
+dev/benchmarks/
+dev/tests/
+dev/docs/
+dev/find_positions.py
 test_venv/
+test_sidecar.py
+/test_*.py
 nul
+
+# Personal utility scripts
+*.ps1
+tools/
+
+# Embedded repos / cloned directories
+awesome-*/
+
+# Stray files (pip freeze artifacts, etc.)
+=*
 
 # PII Guard (local config with personal names - never commit)
 pii_guard_config.py
@@ -121,3 +134,4 @@ debug_*.txt
 *_providers.json
 *search_out.json
 *verify_fix.json
+

@@ -27,7 +27,6 @@ from .context_service import ContextService
 from .promotion_service import PromotionService
 from .routing_service import RoutingService
 from .tag_service import TagService
-from .tag_migration import TagMigration
 from .search_service import SearchService
 
 logger = logging.getLogger(__name__)
@@ -505,20 +504,6 @@ class UnifiedMemorySystem:
         # Startup cleanup: delete garbage memories (score < 0.2)
         await self._startup_cleanup()
 
-        # v0.4.5: Run tag migration in background if needed
-        migration = TagMigration(self.collections, self.data_path)
-        if migration.needs_migration():
-            asyncio.create_task(self._run_tag_migration(migration))
-
-    async def _run_tag_migration(self, migration: TagMigration):
-        """Background tag migration task."""
-        try:
-            stats = await migration.run_migration(show_progress=False)
-            logger.info(f"Tag migration complete: {stats}")
-            # Rebuild known tags after migration
-            self._tag_service.rebuild_known_tags(self.collections)
-        except Exception as e:
-            logger.error(f"Tag migration failed: {e}")
 
     async def _startup_cleanup(self):
         """
@@ -1130,7 +1115,7 @@ class UnifiedMemorySystem:
 
             if facts:
                 parts.append("")
-                parts.append("Facts:")
+                parts.append("Facts (auto-extracted from conversation — use for direction, not authority. Verify before citing as true):")
                 for f in facts:
                     parts.append(_format_mem(f))
 
@@ -1318,10 +1303,6 @@ class UnifiedMemorySystem:
             doc_id = f"{base_id}_chunk_{i}"
             doc_ids.append(doc_id)
 
-            # v0.4.5: Regex tags on book chunks for TagCascade
-            from .tag_service import extract_tags_regex
-            chunk_tags = extract_tags_regex(chunk)
-
             meta = {
                 "content": chunk,
                 "text": chunk,
@@ -1331,8 +1312,6 @@ class UnifiedMemorySystem:
                 "total_chunks": len(chunks),
                 "created_at": created_at
             }
-            if chunk_tags:
-                meta["noun_tags"] = json.dumps(chunk_tags)
 
             metadatas.append(meta)
 
