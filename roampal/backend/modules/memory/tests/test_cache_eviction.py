@@ -59,9 +59,11 @@ class TestFreshEntriesNotEvicted:
 
         assert "doc_a" in _injection_map
 
-    def test_entry_at_exactly_ttl_boundary_survives(self):
-        """Entry at exactly 30 minutes should NOT be evicted (> check, not >=)."""
-        boundary = (datetime.now() - timedelta(seconds=_CACHE_TTL_SECONDS)).isoformat()
+    def test_entry_just_inside_ttl_boundary_survives(self):
+        """Entry just inside TTL (1 second buffer) should NOT be evicted (> check, not >=)."""
+        # Use TTL - 1 to avoid race: datetime.now() in the test vs in _evict_stale_entries()
+        # can differ by milliseconds, pushing an exact-boundary entry past TTL.
+        boundary = (datetime.now() - timedelta(seconds=_CACHE_TTL_SECONDS - 1)).isoformat()
         _search_cache["boundary"] = {
             "doc_ids": ["doc_b"],
             "timestamp": boundary,
@@ -69,7 +71,6 @@ class TestFreshEntriesNotEvicted:
 
         _evict_stale_entries()
 
-        # At exactly TTL, (now - entry_time) == TTL, which is NOT > TTL
         assert "boundary" in _search_cache
 
 
