@@ -91,7 +91,6 @@ credentials.json
 # Dev artifacts
 dev/benchmarks/
 dev/tests/
-dev/docs/
 dev/find_positions.py
 test_venv/
 test_sidecar.py
