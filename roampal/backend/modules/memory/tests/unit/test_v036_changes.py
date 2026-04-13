@@ -352,7 +352,7 @@ class TestAutoSummarizeEndpoint:
         ac, mock_mem = async_client
         mock_mem.search = AsyncMock(return_value=[
             {
-                "content": "x" * 500,  # Long enough
+                "content": "x" * 600,  # Long enough
                 "metadata": {"summarized_at": "2026-01-01T00:00:00"},
                 "id": "working_already"
             }
@@ -385,7 +385,7 @@ class TestAutoSummarizeEndpoint:
         # Mock search to return a long memory
         mock_mem.search = AsyncMock(return_value=[
             {
-                "content": "x" * 500,
+                "content": "x" * 600,
                 "metadata": {},
                 "id": "working_long1",
                 "doc_id": "working_long1"
@@ -395,8 +395,8 @@ class TestAutoSummarizeEndpoint:
         # Mock the collection adapter
         adapter = MagicMock()
         adapter.get_fragment = MagicMock(return_value={
-            "content": "x" * 500,
-            "metadata": {"text": "x" * 500}
+            "content": "x" * 600,
+            "metadata": {"text": "x" * 600}
         })
         adapter.upsert_vectors = AsyncMock()
         mock_mem.collections = {"working": adapter}
@@ -408,7 +408,7 @@ class TestAutoSummarizeEndpoint:
         data = response.json()
         assert data["summarized"] is True
         assert data["doc_id"] == "working_long1"
-        assert data["old_len"] == 500
+        assert data["old_len"] == 600
         assert data["new_len"] > 0
 
     @pytest.mark.asyncio
@@ -443,7 +443,7 @@ class TestAutoSummarizeEndpoint:
 
         mock_mem.search = AsyncMock(return_value=[
             {
-                "content": "z" * 500,
+                "content": "z" * 600,
                 "metadata": {},
                 "id": "working_trunc1",
                 "doc_id": "working_trunc1"
@@ -452,8 +452,8 @@ class TestAutoSummarizeEndpoint:
 
         adapter = MagicMock()
         adapter.get_fragment = MagicMock(return_value={
-            "content": "z" * 500,
-            "metadata": {"text": "z" * 500}
+            "content": "z" * 600,
+            "metadata": {"text": "z" * 600}
         })
         adapter.upsert_vectors = AsyncMock()
         mock_mem.collections = {"working": adapter}
@@ -468,9 +468,120 @@ class TestAutoSummarizeEndpoint:
         # new_len should be <= 400 (truncated to 380 + "... [truncated]")
         assert data["new_len"] <= 400
 
+    @pytest.mark.asyncio
+    async def test_auto_summarize_extracts_tags(self, async_client):
+        """v0.4.7: Auto-summarize should extract tags alongside summary (no facts)."""
+        ac, mock_mem = async_client
+
+        long_content = "User asked about Python decorators and Logan explained how @property works with getter/setter pattern. " * 7  # > 500 chars
+        mock_mem.search = AsyncMock(return_value=[
+            {
+                "content": long_content,
+                "metadata": {"conversation_id": "test_conv"},
+                "id": "working_tagfact1",
+                "doc_id": "working_tagfact1"
+            }
+        ])
+
+        adapter = MagicMock()
+        adapter.get_fragment = MagicMock(return_value={
+            "content": long_content,
+            "metadata": {"text": long_content, "conversation_id": "test_conv"}
+        })
+        adapter.upsert_vectors = AsyncMock()
+        mock_mem.collections = {"working": adapter}
+
+        with patch("roampal.sidecar_service.summarize_only", return_value="Discussed Python decorators"), \
+             patch("roampal.sidecar_service.extract_tags", return_value=["python", "decorators", "property"]):
+            response = await ac.post("/api/memory/auto-summarize-one")
+
+        data = response.json()
+        assert data["summarized"] is True
+        assert data["tags"] == 3
+        # Verify tags were stored in metadata
+        upsert_call = adapter.upsert_vectors.call_args
+        stored_metadata = upsert_call[1]["metadatas"][0] if "metadatas" in upsert_call[1] else upsert_call[0][2][0]
+        assert "noun_tags" in stored_metadata
+
+    @pytest.mark.asyncio
+    async def test_auto_summarize_tags_extraction_failure_nonfatal(self, async_client):
+        """v0.4.7: Tag/fact extraction failure should not prevent summarization."""
+        ac, mock_mem = async_client
+
+        mock_mem.search = AsyncMock(return_value=[
+            {
+                "content": "x" * 600,
+                "metadata": {},
+                "id": "working_tagfail1",
+                "doc_id": "working_tagfail1"
+            }
+        ])
+
+        adapter = MagicMock()
+        adapter.get_fragment = MagicMock(return_value={
+            "content": "x" * 600,
+            "metadata": {"text": "x" * 600}
+        })
+        adapter.upsert_vectors = AsyncMock()
+        mock_mem.collections = {"working": adapter}
+
+        with patch("roampal.sidecar_service.summarize_only", return_value="Short summary"), \
+             patch("roampal.sidecar_service.extract_tags", side_effect=Exception("LLM down")), \
+             patch("roampal.sidecar_service.extract_facts", side_effect=Exception("LLM down")):
+            response = await ac.post("/api/memory/auto-summarize-one")
+
+        data = response.json()
+        assert data["summarized"] is True  # Summary still works despite tag/fact failure
+
 
 # ============================================================================
-# Test 5: ROAMPAL_SUMMARIZE_MODEL Override (Change 10)
+# Test 5: v0.4.7 Recency Metadata
+# ============================================================================
+
+class TestRecencyMetadata:
+    """v0.4.7: _add_recency_metadata should check both timestamp and created_at fields."""
+
+    def test_add_recency_metadata_uses_created_at_fallback(self):
+        """When timestamp is missing, should use created_at."""
+        from roampal.backend.modules.memory.search_service import SearchService
+        from datetime import datetime, timedelta
+
+        service = SearchService.__new__(SearchService)
+
+        now = datetime.now()
+        results = [
+            {"metadata": {"created_at": (now - timedelta(minutes=5)).isoformat()}},
+            {"metadata": {"timestamp": (now - timedelta(minutes=2)).isoformat()}},
+            {"metadata": {}},  # No timestamp at all
+        ]
+
+        service._add_recency_metadata(results)
+
+        assert results[0]["metadata"]["recency"] == "5 minutes ago"
+        assert results[1]["metadata"]["recency"] == "2 minutes ago"
+        assert "recency" not in results[2]["metadata"]
+
+    def test_add_recency_metadata_prefers_timestamp_over_created_at(self):
+        """When both fields exist, timestamp takes precedence."""
+        from roampal.backend.modules.memory.search_service import SearchService
+        from datetime import datetime, timedelta
+
+        service = SearchService.__new__(SearchService)
+
+        now = datetime.now()
+        results = [
+            {"metadata": {
+                "timestamp": (now - timedelta(minutes=3)).isoformat(),
+                "created_at": (now - timedelta(minutes=10)).isoformat(),
+            }},
+        ]
+
+        service._add_recency_metadata(results)
+        assert results[0]["metadata"]["recency"] == "3 minutes ago"
+
+
+# ============================================================================
+# Test 6: ROAMPAL_SUMMARIZE_MODEL Override (Change 10)
 # ============================================================================
 
 class TestSummarizeModelOverride:

@@ -12,7 +12,7 @@
  *
  * v0.3.6: Sidecar now summarizes + scores (matching Claude Code sidecar_service.py).
  *         Prompt updated to first-person voice. Summary stored as exchange_summary working memory.
- *         Compaction recovery via session.compacted + experimental.session.compacting events.
+ *         Compaction recovery via experimental.session.compacting hook + session.idle cleanup.
  * v0.3.4: Fix #1 — scoring prompt injection uses deep clone instead of in-place mutation.
  *         OpenCode holds refs to original message objects for UI rendering; mutating them
  *         caused garbled text in the input box. Clone goes to LLM, original stays in UI.
@@ -152,7 +152,7 @@ const FALLBACK_REQUEST_TIMEOUT_MS = 30000  // Per-request timeout for fallback (
 // Circuit breaker: skip models that failed recently (avoids burning timeout on dead models).
 // Map of model name → timestamp of last failure. Cleared after CIRCUIT_BREAKER_COOLDOWN_MS.
 const modelCircuitBreaker = new Map<string, number>()
-const CIRCUIT_BREAKER_COOLDOWN_MS = 1800000  // 30 minutes — dead Zen models don't recover in 5min
+const CIRCUIT_BREAKER_COOLDOWN_MS = 120000  // 2 minutes — recover quickly from transient failures
 
 // Deferred retry queue — if scoring fails, store the payload and retry next message.
 // Ensures scoring data is NEVER lost even if all models are temporarily down.
@@ -172,8 +172,13 @@ const pendingScoringData = new Map<string, {
   memories: Array<{ id: string; content: string }> | null
 }>()
 
-// v0.3.6: Post-compaction flag — inject recent exchanges on next system.transform
-const includeRecentOnNextTurn = new Map<string, boolean>()
+// v0.4.7: Post-compaction flag with generation counter.
+// compactionGen increments on each compaction; session.idle only clears
+// flags that predate the current generation (set before this idle ran).
+// This prevents session.idle from clearing a flag set by compaction
+// in the same turn (idle fires BEFORE compaction in that turn).
+let compactionGen = 0
+const includeRecentOnNextTurn = new Map<string, { flag: boolean; gen: number }>()
 
 // Cached context from chat.message for system.transform to use (avoids double-fetch)
 // Map<sessionID, { contextOnly, scoringRequired, scoringPromptSimple, scoringExchange, scoringMemories, timestamp }>
@@ -1220,16 +1225,20 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
       // v0.3.7: Pre-fetch recent exchanges here (runs ONCE per user message)
       // to avoid race in system.transform (OpenCode fires it concurrently for
       // main chat + title generator — async fetch resolves for wrong model).
+      // v0.4.7: Fetch most recent exchange summaries (no semantic query — pure recency).
+      // Empty query triggers _search_all path which now includes _add_recency_metadata.
+      // Search all three collections since summaries can be promoted across tiers.
       let recentExchanges: string | null = null
-      if (includeRecentOnNextTurn.get(sessionId)) {
+      const recEntry = includeRecentOnNextTurn.get(sessionId)
+      if (recEntry?.flag) {
         includeRecentOnNextTurn.delete(sessionId)
         try {
           const recentResp = await fetch(`${ROAMPAL_API_URL}/search`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              query: "recent exchange",
-              collections: ["working"],
+              query: "",
+              collections: ["working", "history", "patterns"],
               limit: 4,
               sort_by: "recency",
               metadata_filters: { memory_type: "exchange_summary" }
@@ -1237,18 +1246,32 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
             signal: AbortSignal.timeout(5000)
           })
           if (recentResp.ok) {
-            const data = await recentResp.json() as { results: Array<{ text?: string; content?: string; metadata: { recency?: string; text?: string; content?: string } }> }
+            const data = await recentResp.json() as { results: Array<{ id?: string; text?: string; content?: string; collection?: string; wilson_score?: number; uses?: number; metadata: Record<string, any> }> }
             if (data.results?.length > 0) {
               const lines = data.results
-                .map((r, i) => {
-                  // Search API returns `text` at root (from ChromaDB), or `content` if normalized.
-                  // Also check metadata.text/metadata.content as fallbacks.
+                .map((r) => {
                   const body = r.text || r.content || r.metadata?.text || r.metadata?.content || ""
-                  return `${i + 1}. ${r.metadata?.recency ? `[${r.metadata.recency}] ` : ""}${body.slice(0, 200)}`
+                  const docId = r.id || ""
+                  const collection = r.collection || r.metadata?.collection || "working"
+                  const recency = r.metadata?.recency || ""
+                  const wilson = r.wilson_score || r.metadata?.wilson_score || 0
+                  const uses = r.uses || r.metadata?.uses || 0
+                  const lastOutcome = r.metadata?.last_outcome || ""
+                  // Match _format_mem() from unified_memory_system.py
+                  const tagParts: string[] = []
+                  if (recency) tagParts.push(recency)
+                  tagParts.push(collection)
+                  if (uses > 0) {
+                    tagParts.push(`wilson:${Math.round(wilson * 100)}%`)
+                    tagParts.push(`used:${uses}x`)
+                    if (lastOutcome) tagParts.push(`last:${lastOutcome}`)
+                  }
+                  const idStr = docId ? ` [id:${docId}]` : ""
+                  return `• ${body.slice(0, 200)}${idStr} (${tagParts.join(", ")})`
                 })
                 .join("\n")
               recentExchanges = `RECENT EXCHANGES (last ${data.results.length}):\n${lines}`
-              debugLog(`chat.message: Pre-fetched ${data.results.length} recent exchanges for cold start`)
+              debugLog(`chat.message: Pre-fetched ${data.results.length} recent exchanges (cold start or compaction recovery):\n${recentExchanges}`)
             }
           }
         } catch (err) {
@@ -1383,12 +1406,15 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
       if (!sid) return
       debugLog(`experimental.session.compacting: Injecting recent exchanges into compaction for ${sid}`)
       try {
+        // v0.4.7: Fetch most recent exchange summaries (no semantic query — pure recency).
+        // Empty query triggers _search_all path which now includes _add_recency_metadata.
+        // Search all three collections since summaries can be promoted across tiers.
         const recentResp = await fetch(`${ROAMPAL_API_URL}/search`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            query: "recent exchange",
-            collections: ["working"],
+            query: "",
+            collections: ["working", "history", "patterns"],
             limit: 4,
             sort_by: "recency",
             metadata_filters: { memory_type: "exchange_summary" }
@@ -1396,23 +1422,42 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           signal: AbortSignal.timeout(5000)
         })
         if (recentResp.ok) {
-          const data = await recentResp.json() as { results: Array<{ text?: string; content?: string; metadata: { recency?: string; text?: string; content?: string } }> }
+          const data = await recentResp.json() as { results: Array<{ id?: string; text?: string; content?: string; collection?: string; wilson_score?: number; uses?: number; metadata: Record<string, any> }> }
           if (data.results?.length > 0) {
             const recentText = data.results
-              .map((r, i) => {
+              .map((r) => {
                 const body = r.text || r.content || r.metadata?.text || r.metadata?.content || ""
-                return `${i + 1}. ${r.metadata?.recency ? `[${r.metadata.recency}] ` : ""}${body.slice(0, 200)}`
+                const docId = r.id || ""
+                const collection = r.collection || r.metadata?.collection || "working"
+                const recency = r.metadata?.recency || ""
+                const wilson = r.wilson_score || r.metadata?.wilson_score || 0
+                const uses = r.uses || r.metadata?.uses || 0
+                const lastOutcome = r.metadata?.last_outcome || ""
+                const tagParts: string[] = []
+                if (recency) tagParts.push(recency)
+                tagParts.push(collection)
+                if (uses > 0) {
+                  tagParts.push(`wilson:${Math.round(wilson * 100)}%`)
+                  tagParts.push(`used:${uses}x`)
+                  if (lastOutcome) tagParts.push(`last:${lastOutcome}`)
+                }
+                const idStr = docId ? ` [id:${docId}]` : ""
+                return `• ${body.slice(0, 200)}${idStr} (${tagParts.join(", ")})`
               })
               .join("\n")
             if (output.context && Array.isArray(output.context)) {
               output.context.push(`<recent-exchanges>\n${recentText}\n</recent-exchanges>`)
               debugLog(`experimental.session.compacting: Injected ${data.results.length} recent exchanges`)
+            } else {
+              debugLog(`experimental.session.compacting: output.context not an array (type=${Array.isArray(output.context)}), skipping injection`)
             }
           }
         }
       } catch (err) {
         debugLog(`experimental.session.compacting: Failed to fetch recent exchanges: ${err}`)
       }
+      // Recovery flag is set by session.compacted (fires after compaction completes).
+      // This hook only handles injection into the compaction summary.
     },
 
     // ========================================================================
@@ -1461,10 +1506,10 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           const sid = event.properties?.info?.id
           if (!sid) break
           sessionContextMap.set(sid, { sessionId: sid, userPrompt: "" })
-          // v0.3.6: Cold start — inject recent exchanges on first system.transform
-          // Same mechanism as compaction recovery (reuses includeRecentOnNextTurn flag)
-          includeRecentOnNextTurn.set(sid, true)
-          debugLog(`Session created: ${sid}`)
+          // Cold start: inject recent exchanges on first message so model
+          // has continuity with previous sessions.
+          includeRecentOnNextTurn.set(sid, { flag: true, gen: compactionGen })
+          debugLog(`Session created: ${sid} (cold start flag set, gen=${compactionGen})`)
           break
         }
 
@@ -1585,7 +1630,13 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
               if (SIDECAR_DISABLED) {
                 debugLog(`session.idle: Sidecar DISABLED (testing) — skipping scoring entirely`)
               } else {
-                debugLog(`session.idle: Running sidecar for ${sid} (memories=${scoringData.memories?.length || 0}, broken=${scoringBroken})`)
+                // v0.4.7: Auto-reset scoringBroken — give sidecar another chance each exchange.
+                // Without this, one failure permanently kills scoring for the session.
+                if (scoringBroken) {
+                  scoringBroken = false
+                  debugLog(`session.idle: Resetting scoringBroken — giving sidecar another chance`)
+                }
+                debugLog(`session.idle: Running sidecar for ${sid} (memories=${scoringData.memories?.length || 0})`)
                 try {
                   const ok = await scoreExchangeViaLLM(sid, scoringData.userMessage, scoringData.exchange, scoringData.memories)
                   if (!ok) {
@@ -1599,31 +1650,44 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
               }
             }
 
-            // v0.3.6: Auto-summarize one old memory during idle
-            try {
-              await autoSummarizeOldMemory()
-            } catch (err) {
-              debugLog(`session.idle: autoSummarize error: ${err}`)
+            // v0.4.7: Auto-summarize ONLY when sidecar is healthy and scoring completed.
+            // autoSummarize hits Ollama via the server — if scoring also just hit Ollama,
+            // they compete for the single inference slot, causing timeouts and circuit breaks.
+            if (!scoringBroken && !pendingScoring) {
+              try {
+                await autoSummarizeOldMemory()
+              } catch (err) {
+                debugLog(`session.idle: autoSummarize error: ${err}`)
+              }
             }
 
             // Clear state for next exchange
             assistantMessageIds.delete(sid)
             assistantTextParts.delete(sid)
             cachedContext.delete(sid)
+            // v0.4.7: Clear compaction recovery flag ONLY if its gen is strictly
+            // less than current compactionGen (flag predates this idle). Compaction
+            // flags have gen === compactionGen (set after increment) and are NOT
+            // cleared here — they are consumed by chat.message pre-fetch instead.
+            const recEntry = includeRecentOnNextTurn.get(sid)
+            if (recEntry && recEntry.gen < compactionGen) {
+              includeRecentOnNextTurn.delete(sid)
+              debugLog(`session.idle: Cleared stale recent exchanges flag (gen=${recEntry.gen})`)
+            }
           }, 1500))
           break
         }
 
-        // v0.3.6: Compaction recovery — inject recent exchanges on next turn
+        // session.compacted fires AFTER compaction completes — set recovery flag
+        // so next chat.message pre-fetches recent exchanges.
         case "session.compacted": {
           const sid = event.properties?.sessionID || event.properties?.info?.id
           if (!sid) break
-          includeRecentOnNextTurn.set(sid, true)
-          debugLog(`session.compacted: Flagged ${sid} for recent exchange injection on next turn`)
+          compactionGen++
+          includeRecentOnNextTurn.set(sid, { flag: true, gen: compactionGen })
+          debugLog(`session.compacted: Flagged ${sid} for recent exchange injection on next turn (gen=${compactionGen})`)
           break
         }
-
-        // v0.4.2: experimental.session.compacting moved to top-level hook (see below)
 
         case "session.deleted": {
           // Cleanup all session state

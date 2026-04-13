@@ -34,7 +34,7 @@ roampal init --opencode   # Or configure explicitly
   OpenCode MCP         hook subprocesses   TypeScript plugin
 ```
 
-**Architecture (v0.4.4):** MCP servers are thin HTTP clients — no ChromaDB or heavy ML frameworks in the MCP process. Embeddings use pure ONNX Runtime (no PyTorch). All access is serialized through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running.
+**Architecture (v0.4.7):** MCP servers are thin HTTP clients — no ChromaDB or heavy ML frameworks in the MCP process. Embeddings use pure ONNX Runtime (no PyTorch). All access is serialized through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running.
 
 `roampal start` is available for standalone use (e.g., OpenCode-only setups where no MCP auto-starts the server).
 

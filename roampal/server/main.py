@@ -521,6 +521,32 @@ async def lifespan(app: FastAPI):
         if cleaned > 0:
             logger.info(f"v0.2.9 migration: cleaned up {cleaned} archived memories")
 
+    # v0.4.7: Strip noun_tags from facts (tags are for summaries only).
+    # Facts were incorrectly given regex-extracted tags in v0.4.5-v0.4.6.1.
+    try:
+        stripped_count = 0
+        for coll_name in ["working", "history", "patterns"]:
+            if coll_name not in _memory.collections:
+                continue
+            adapter = _memory.collections[coll_name]
+            items = adapter.collection.get(limit=10000, where={"memory_type": "fact"})
+            if not items or not items.get("ids"):
+                continue
+            for i, doc_id in enumerate(items["ids"]):
+                metadata = items["metadatas"][i] if i < len(items["metadatas"]) else {}
+                noun_tags_raw = metadata.get("noun_tags")
+                if noun_tags_raw and noun_tags_raw != "[]":
+                    # Clear the noun_tags field
+                    adapter.collection.update(
+                        ids=[doc_id],
+                        metadatas=[{**metadata, "noun_tags": "[]"}]
+                    )
+                    stripped_count += 1
+        if stripped_count > 0:
+            logger.info(f"v0.4.7 migration: stripped noun_tags from {stripped_count} facts")
+    except Exception as e:
+        logger.warning(f"v0.4.7 fact tag migration error: {e}")
+
     # Initialize session manager (uses same data path)
     _session_manager = SessionManager(_memory.data_path)
     logger.info("Session manager initialized")
@@ -1360,23 +1386,20 @@ def create_app() -> FastAPI:
                     logger.error(f"Failed to store exchange summary: {e}")
 
             # v0.4.5: Store atomic facts as separate working memories
+            # v0.4.7: No noun_tags on facts — tags are for summaries only.
+            # Facts are retrieved via cosine similarity, not tag-routing.
             if request.facts and _memory:
                 for fact_text in request.facts:
                     if not fact_text or len(fact_text.strip()) < 10:
                         continue
                     try:
-                        # Extract noun_tags from fact via regex (no LLM call)
-                        from roampal.backend.modules.memory.tag_service import extract_tags_regex
-                        fact_noun_tags = extract_tags_regex(fact_text)
-
                         await _memory.store_working(
                             content=fact_text,
                             conversation_id=conversation_id,
                             metadata={
                                 "memory_type": "fact",
                                 "timestamp": datetime.now().isoformat(),
-                            },
-                            noun_tags=fact_noun_tags if fact_noun_tags else None
+                            }
                         )
                     except Exception as e:
                         logger.warning(f"Failed to store fact: {e}")
@@ -1494,7 +1517,7 @@ def create_app() -> FastAPI:
                 for r in results:
                     content = r.get("content", "")
                     metadata = r.get("metadata", {})
-                    if len(content) > 400 and not metadata.get("summarized_at"):
+                    if len(content) > 500 and not metadata.get("summarized_at"):
                         candidates.append((coll_name, r))
                         if len(candidates) >= 1:
                             break
@@ -1534,7 +1557,19 @@ def create_app() -> FastAPI:
         if len(summary) > 400:
             summary = summary[:380] + "... [truncated]"
 
-        # Update memory with summary
+        # v0.4.7: Extract tags from the summary (for TagCascade retrieval).
+        # No fact extraction — sidecar handles facts at exchange time.
+        # autoSummarize is just cleanup for oversized memories the sidecar missed.
+        extracted_tags = []
+        try:
+            from roampal.sidecar_service import extract_tags
+            tags_result = await asyncio.to_thread(extract_tags, summary)
+            if tags_result:
+                extracted_tags = tags_result
+        except Exception as e:
+            logger.debug(f"Auto-summarize tag extraction error (non-fatal): {e}")
+
+        # Update memory with summary + tags
         try:
             adapter = _memory.collections.get(coll_name)
             if not adapter:
@@ -1549,6 +1584,9 @@ def create_app() -> FastAPI:
             metadata["content"] = summary
             metadata["summarized_at"] = datetime.now().isoformat()
             metadata["original_length"] = len(content)
+            if extracted_tags:
+                import json as _json
+                metadata["noun_tags"] = _json.dumps(extracted_tags)
 
             embedding = await _memory._embedding_service.embed_text(summary)
             await adapter.upsert_vectors(
@@ -1557,10 +1595,11 @@ def create_app() -> FastAPI:
                 metadatas=[metadata]
             )
 
-            logger.info(f"Auto-summarized {doc_id}: {len(content)} -> {len(summary)} chars")
+            logger.info(f"Auto-summarized {doc_id}: {len(content)} -> {len(summary)} chars, {len(extracted_tags)} tags")
             return {
                 "summarized": True, "doc_id": doc_id,
-                "old_len": len(content), "new_len": len(summary)
+                "old_len": len(content), "new_len": len(summary),
+                "tags": len(extracted_tags)
             }
         except Exception as e:
             logger.error(f"Auto-summarize update error: {e}")
