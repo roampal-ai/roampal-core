@@ -2183,10 +2183,11 @@ def cmd_summarize(args):
         if len(summary) > max_chars:
             summary = summary[:max_chars - 20] + "... [truncated]"
 
-        # v0.4.5: Extract noun_tags from summary and facts from original content
-        from roampal.sidecar_service import extract_tags, extract_facts
-        noun_tags = extract_tags(summary) or []
-        facts = extract_facts(content) or []
+        # Extract noun_tags from summary (skip if memory already has tags)
+        from roampal.sidecar_service import extract_tags
+        existing_metadata = mem.get("metadata", {})
+        has_tags = bool(existing_metadata.get("noun_tags"))
+        noun_tags = [] if has_tags else (extract_tags(summary) or [])
 
         # Update the memory with the summary + noun_tags
         try:
@@ -2207,30 +2208,14 @@ def cmd_summarize(args):
             if update_resp.status_code == 200:
                 total_summarized += 1
                 batch_count += 1
-                tag_info = f", tags={noun_tags}" if noun_tags else ""
-                fact_info = f", {len(facts)} facts" if facts else ""
-                print(f"  [{i+1}/{len(all_candidates)}] {doc_id}: {len(content)} -> {len(summary)} chars{tag_info}{fact_info}")
+                tag_info = f", tags={noun_tags}" if noun_tags else (", tags=existing" if has_tags else "")
+                print(f"  [{i+1}/{len(all_candidates)}] {doc_id}: {len(content)} -> {len(summary)} chars{tag_info}")
             else:
                 total_skipped += 1
                 print(f"  {YELLOW}[{i+1}] Failed to update {doc_id}: {update_resp.status_code}{RESET}")
         except Exception as e:
             total_skipped += 1
             print(f"  {RED}[{i+1}] Error updating {doc_id}: {e}{RESET}")
-
-        # v0.4.5: Store extracted facts as separate working memories
-        for fact_text in facts:
-            try:
-                httpx.post(
-                    f"{base_url}/api/record-response",
-                    json={
-                        "key_takeaway": fact_text,
-                        "conversation_id": "summarize_cmd",
-                        "noun_tags": extract_tags(fact_text) or []
-                    },
-                    timeout=10.0
-                )
-            except Exception:
-                pass  # Best effort — summary is stored regardless
 
     print()
     if dry_run:
