@@ -15,7 +15,7 @@ How it works:
     4. You see your original message; the AI sees your message + context
 """
 
-__version__ = "0.4.6.1"
+__version__ = "0.4.7"
 
 
 # Lazy imports: chromadb/onnxruntime are heavy and crash in minimal
