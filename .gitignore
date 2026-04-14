@@ -119,7 +119,6 @@ pii_guard_config.py
 channels/
 
 # Internal release process doc (not for public repo)
-dev/docs/RELEASE_CHECKLIST.md
 
 # Local dev artifacts with mangled paths
 %TEMP%*
@@ -134,3 +133,7 @@ debug_*.txt
 *search_out.json
 *verify_fix.json
 
+dev/docs/CHANNELS.md
+dev/docs/ROAMPAL_CHANNELS_VISION.md
+dev/docs/ROAMPAL_CODE_DESIGN.md
+dev/docs/RELEASE_CHECKLIST.md
