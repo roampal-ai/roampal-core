@@ -69,6 +69,7 @@ def _is_interactive() -> bool:
     except Exception:
         return False
 
+
 # Port configuration - DEV and PROD use different ports to avoid collision
 PROD_PORT = 27182
 DEV_PORT = 27183
@@ -89,14 +90,14 @@ def is_dev_mode(args=None) -> bool:
     ALL commands MUST use this. Never check args.dev directly.
     See ARCHITECTURE.md 'Dev Mode Implementation' for details.
     """
-    if args is not None and getattr(args, 'dev', False):
+    if args is not None and getattr(args, "dev", False):
         return True
-    return os.environ.get('ROAMPAL_DEV', '').lower() in ('1', 'true', 'yes')
+    return os.environ.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")
 
 
 def get_port(args=None) -> int:
     """Get port based on DEV/PROD mode. Respects explicit --port override."""
-    if args and hasattr(args, 'port') and isinstance(getattr(args, 'port', None), int):
+    if args and hasattr(args, "port") and isinstance(getattr(args, "port", None), int):
         return args.port
     return DEV_PORT if is_dev_mode(args) else PROD_PORT
 
@@ -105,23 +106,29 @@ def get_data_dir(dev: bool = False) -> Path:
     """Get the data directory path. DEV uses separate directory to avoid collision with PROD."""
     if dev:
         # DEV mode uses separate directory
-        if os.name == 'nt':  # Windows
-            appdata = os.environ.get('APPDATA', str(Path.home()))
+        if os.name == "nt":  # Windows
+            appdata = os.environ.get("APPDATA", str(Path.home()))
             return Path(appdata) / "Roampal_DEV" / "data"
-        elif sys.platform == 'darwin':  # macOS
-            return Path.home() / "Library" / "Application Support" / "Roampal_DEV" / "data"
+        elif sys.platform == "darwin":  # macOS
+            return (
+                Path.home() / "Library" / "Application Support" / "Roampal_DEV" / "data"
+            )
         else:  # Linux — v0.4.1: respect XDG_DATA_HOME
-            xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+            xdg_data = os.environ.get(
+                "XDG_DATA_HOME", str(Path.home() / ".local" / "share")
+            )
             return Path(xdg_data) / "roampal_dev" / "data"
     else:
         # PROD mode
-        if os.name == 'nt':  # Windows
-            appdata = os.environ.get('APPDATA', str(Path.home()))
+        if os.name == "nt":  # Windows
+            appdata = os.environ.get("APPDATA", str(Path.home()))
             return Path(appdata) / "Roampal" / "data"
-        elif sys.platform == 'darwin':  # macOS
+        elif sys.platform == "darwin":  # macOS
             return Path.home() / "Library" / "Application Support" / "Roampal" / "data"
         else:  # Linux — v0.4.1: respect XDG_DATA_HOME
-            xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+            xdg_data = os.environ.get(
+                "XDG_DATA_HOME", str(Path.home() / ".local" / "share")
+            )
             return Path(xdg_data) / "roampal" / "data"
 
 
@@ -143,7 +150,7 @@ def _build_hook_command(module: str, is_dev: bool) -> str:
     # Forward slashes avoid bash escape mangling on Windows (Claude Code 2.1.x)
     # C:\roampal-core\.venv\Scripts\python.exe → C:/roampal-core/.venv/Scripts/python.exe
     python_exe = sys.executable.replace("\\", "/")
-    base = f'{python_exe} -m roampal.hooks.{module}'
+    base = f"{python_exe} -m roampal.hooks.{module}"
 
     if not is_dev:
         return base
@@ -153,7 +160,7 @@ def _build_hook_command(module: str, is_dev: bool) -> str:
     if sys.platform == "win32":
         return f'cmd /c "set ROAMPAL_DEV=1 && {base}"'
     else:
-        return f'ROAMPAL_DEV=1 {base}'
+        return f"ROAMPAL_DEV=1 {base}"
 
 
 def print_banner():
@@ -181,13 +188,18 @@ def check_for_updates() -> tuple:
 
     # Check cache first (stored in data dir)
     import time
+
     cache_file = get_data_dir() / ".update_cache"
     try:
         if cache_file.exists():
             cache_data = json.loads(cache_file.read_text())
             cache_age = time.time() - cache_data.get("timestamp", 0)
             if cache_age < 86400 and cache_data.get("current") == __version__:
-                return (cache_data["update_available"], __version__, cache_data["latest"])
+                return (
+                    cache_data["update_available"],
+                    __version__,
+                    cache_data["latest"],
+                )
     except Exception:
         pass  # Corrupted cache, re-check
 
@@ -209,12 +221,16 @@ def check_for_updates() -> tuple:
             # Cache result
             try:
                 cache_file.parent.mkdir(parents=True, exist_ok=True)
-                cache_file.write_text(json.dumps({
-                    "timestamp": time.time(),
-                    "current": __version__,
-                    "latest": latest,
-                    "update_available": update_available,
-                }))
+                cache_file.write_text(
+                    json.dumps(
+                        {
+                            "timestamp": time.time(),
+                            "current": __version__,
+                            "latest": latest,
+                            "update_available": update_available,
+                        }
+                    )
+                )
             except Exception:
                 pass
 
@@ -244,6 +260,7 @@ def collect_email(detected_tools: list):
         return  # Webhook not configured yet
 
     from roampal import __version__
+
     data_dir = get_data_dir()
     marker = data_dir / ".email_asked"
     if marker.exists():
@@ -290,11 +307,12 @@ def collect_email(detected_tools: list):
     # Uses httpx because Google Apps Script redirects break urllib
     try:
         import httpx
+
         payload = {
             "email": email,
             "platform": ", ".join(detected_tools),
             "version": __version__,
-            "os": platform.system()
+            "os": platform.system(),
         }
         httpx.post(SIGNUP_WEBHOOK_URL, json=payload, follow_redirects=True, timeout=5.0)
         print(f"  {GREEN}Thanks! We'll keep you posted.{RESET}\n")
@@ -336,9 +354,9 @@ def cmd_init(args):
         opencode_dir = Path(xdg_config) / "opencode"
 
     # Check for explicit flags (--claude-code, --cursor, --opencode)
-    explicit_claude = getattr(args, 'claude_code', False)
-    explicit_cursor = getattr(args, 'cursor', False)
-    explicit_opencode = getattr(args, 'opencode', False)
+    explicit_claude = getattr(args, "claude_code", False)
+    explicit_cursor = getattr(args, "cursor", False)
+    explicit_opencode = getattr(args, "opencode", False)
 
     if explicit_claude or explicit_cursor or explicit_opencode:
         # User specified explicit tools - use those
@@ -382,7 +400,10 @@ def cmd_init(args):
                 cursor_found = Path("/Applications/Cursor.app").exists()
             elif sys.platform == "win32":
                 localappdata = os.environ.get("LOCALAPPDATA", "")
-                if localappdata and (Path(localappdata) / "Programs" / "cursor").exists():
+                if (
+                    localappdata
+                    and (Path(localappdata) / "Programs" / "cursor").exists()
+                ):
                     cursor_found = True
         if cursor_found:
             detected.append("cursor")
@@ -409,14 +430,16 @@ def cmd_init(args):
         print("  - Claude Code (https://claude.com/claude-code)")
         print("  - Cursor (https://cursor.sh)")
         print("  - OpenCode (https://opencode.ai)")
-        print("\nInstall one of these tools first, or use --claude-code / --cursor / --opencode to force setup.")
+        print(
+            "\nInstall one of these tools first, or use --claude-code / --cursor / --opencode to force setup."
+        )
         return 1
 
     print(f"{GREEN}Configuring: {', '.join(detected)}{RESET}\n")
 
     # Configure each detected tool
     is_dev = is_dev_mode(args)
-    force = getattr(args, 'force', False)
+    force = getattr(args, "force", False)
     for tool in detected:
         if tool == "claude-code":
             configure_claude_code(claude_code_dir, is_dev=is_dev, force=force)
@@ -427,7 +450,7 @@ def cmd_init(args):
 
     # Sidecar setup for OpenCode users
     if "opencode" in detected:
-        _prompt_sidecar_setup(force=force)
+        _prompt_smart_onboarding(force=force)
 
     # Create data directory
     data_dir = get_data_dir()
@@ -441,7 +464,9 @@ def cmd_init(args):
     if "cursor" in detected:
         next_steps.append(f"  {BLUE}Restart Cursor{RESET} and start chatting!")
     if "opencode" in detected:
-        next_steps.append(f"  Run {BLUE}opencode{RESET} and start chatting! (server auto-starts on first message)")
+        next_steps.append(
+            f"  Run {BLUE}opencode{RESET} and start chatting! (server auto-starts on first message)"
+        )
 
     print(f"\n{GREEN}{BOLD}Roampal initialized successfully!{RESET}\n")
 
@@ -485,9 +510,7 @@ def validate_roampal_importable(python_exe: str) -> bool:
     """Validate that roampal can be imported from the given python executable."""
     try:
         result = subprocess.run(
-            [python_exe, "-c", "import roampal"],
-            capture_output=True,
-            timeout=10
+            [python_exe, "-c", "import roampal"], capture_output=True, timeout=10
         )
         return result.returncode == 0
     except Exception:
@@ -540,42 +563,18 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
 
     # v0.4.2.1: Merge hooks instead of replacing — preserve non-roampal hooks
     roampal_hooks = {
-        "UserPromptSubmit": [
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": submit_cmd
-                    }
-                ]
-            }
-        ],
-        "Stop": [
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": stop_cmd
-                    }
-                ]
-            }
-        ],
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": submit_cmd}]}],
+        "Stop": [{"hooks": [{"type": "command", "command": stop_cmd}]}],
         "SessionStart": [
             {
                 "matcher": "compact",
-                "hooks": [{
-                    "type": "command",
-                    "command": context_cmd
-                }]
+                "hooks": [{"type": "command", "command": context_cmd}],
             },
             {
                 "matcher": "startup",
-                "hooks": [{
-                    "type": "command",
-                    "command": context_cmd
-                }]
-            }
-        ]
+                "hooks": [{"type": "command", "command": context_cmd}],
+            },
+        ],
     }
     existing_hooks = settings.get("hooks", {})
     if not isinstance(existing_hooks, dict):
@@ -597,7 +596,7 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
         "mcp__roampal-core__update_memory",
         "mcp__roampal-core__delete_memory",
         "mcp__roampal-core__record_response",
-        "mcp__roampal-core__score_memories"
+        "mcp__roampal-core__score_memories",
     ]
 
     for perm in roampal_perms:
@@ -628,14 +627,14 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
         "type": "stdio",
         "command": sys.executable,
         "args": ["-m", "roampal.mcp.server"],
-        "env": {"ROAMPAL_DEV": "1"} if is_dev else {}
+        "env": {"ROAMPAL_DEV": "1"} if is_dev else {},
     }
 
     # Load existing ~/.claude.json or create minimal structure
     claude_json = {}
     if claude_json_path.exists():
         try:
-            claude_json = json.loads(claude_json_path.read_text(encoding='utf-8'))
+            claude_json = json.loads(claude_json_path.read_text(encoding="utf-8"))
         except Exception as e:
             print(f"  {YELLOW}Warning: Could not read {claude_json_path}: {e}{RESET}")
             print(f"  {YELLOW}Creating new config...{RESET}")
@@ -651,17 +650,23 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
             existing_env = existing_config.get("env", {})
             expected_env = {"ROAMPAL_DEV": "1"} if is_dev else {}
             if existing_env == expected_env:
-                print(f"  {GREEN}[OK] roampal-core already configured correctly in {claude_json_path}{RESET}")
+                print(
+                    f"  {GREEN}[OK] roampal-core already configured correctly in {claude_json_path}{RESET}"
+                )
                 # Skip to migration check, don't write
             else:
                 # v0.4.2.1: Always update roampal-owned MCP config when it differs
                 claude_json["mcpServers"]["roampal-core"] = roampal_server_config
-                claude_json_path.write_text(json.dumps(claude_json, indent=2), encoding='utf-8')
+                claude_json_path.write_text(
+                    json.dumps(claude_json, indent=2), encoding="utf-8"
+                )
                 print(f"  {GREEN}Updated MCP server in: {claude_json_path}{RESET}")
         else:
             # Different args — update to current version
             claude_json["mcpServers"]["roampal-core"] = roampal_server_config
-            claude_json_path.write_text(json.dumps(claude_json, indent=2), encoding='utf-8')
+            claude_json_path.write_text(
+                json.dumps(claude_json, indent=2), encoding="utf-8"
+            )
             print(f"  {GREEN}Updated MCP server in: {claude_json_path}{RESET}")
     else:
         # No existing config - validate and write
@@ -670,7 +675,9 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
         # =========================================================================
         if not validate_roampal_importable(sys.executable):
             print(f"  {RED}Error: roampal not importable from {sys.executable}{RESET}")
-            print(f"  {YELLOW}Make sure you're running from the correct virtual environment{RESET}")
+            print(
+                f"  {YELLOW}Make sure you're running from the correct virtual environment{RESET}"
+            )
             print(f"  {YELLOW}Try: pip install roampal{RESET}")
             return
 
@@ -682,12 +689,18 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
 
         # Write back
         try:
-            claude_json_path.write_text(json.dumps(claude_json, indent=2), encoding='utf-8')
+            claude_json_path.write_text(
+                json.dumps(claude_json, indent=2), encoding="utf-8"
+            )
             print(f"  {GREEN}Added MCP server to: {claude_json_path}{RESET}")
-            print(f"  {GREEN}  - User scope (works globally across all projects){RESET}")
+            print(
+                f"  {GREEN}  - User scope (works globally across all projects){RESET}"
+            )
         except Exception as e:
             print(f"  {RED}Error writing {claude_json_path}: {e}{RESET}")
-            print(f"  {YELLOW}You may need to run: claude mcp add roampal-core python -- -m roampal.mcp.server{RESET}")
+            print(
+                f"  {YELLOW}You may need to run: claude mcp add roampal-core python -- -m roampal.mcp.server{RESET}"
+            )
 
     # =========================================================================
     # Migration: Clean up old broken config at ~/.claude/.mcp.json
@@ -696,7 +709,9 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
     if old_mcp_config_path.exists():
         try:
             old_config = json.loads(old_mcp_config_path.read_text())
-            if "mcpServers" in old_config and "roampal-core" in old_config.get("mcpServers", {}):
+            if "mcpServers" in old_config and "roampal-core" in old_config.get(
+                "mcpServers", {}
+            ):
                 # Remove roampal-core from the old location
                 del old_config["mcpServers"]["roampal-core"]
                 if old_config["mcpServers"]:
@@ -705,7 +720,9 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
                 else:
                     # Only roampal was there, remove the file
                     old_mcp_config_path.unlink()
-                print(f"  {GREEN}Migrated from old config: {old_mcp_config_path}{RESET}")
+                print(
+                    f"  {GREEN}Migrated from old config: {old_mcp_config_path}{RESET}"
+                )
         except Exception:
             pass  # Old file might be malformed, ignore
 
@@ -719,7 +736,7 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
             "roampal-core": {
                 "command": sys.executable,
                 "args": ["-m", "roampal.mcp.server"],
-                "env": {"ROAMPAL_DEV": "1"} if is_dev else {}
+                "env": {"ROAMPAL_DEV": "1"} if is_dev else {},
             }
         }
     }
@@ -729,7 +746,9 @@ def configure_claude_code(claude_dir: Path, is_dev: bool = False, force: bool = 
         try:
             existing = json.loads(local_mcp_path.read_text())
             if "mcpServers" in existing:
-                existing["mcpServers"]["roampal-core"] = local_mcp_config["mcpServers"]["roampal-core"]
+                existing["mcpServers"]["roampal-core"] = local_mcp_config["mcpServers"][
+                    "roampal-core"
+                ]
             else:
                 existing["mcpServers"] = local_mcp_config["mcpServers"]
             local_mcp_config = existing
@@ -761,7 +780,7 @@ def configure_cursor(cursor_dir: Path, is_dev: bool = False, force: bool = False
     roampal_server_config = {
         "command": sys.executable,
         "args": ["-m", "roampal.mcp.server"],
-        "env": expected_env
+        "env": expected_env,
     }
 
     mcp_config = {"mcpServers": {"roampal-core": roampal_server_config}}
@@ -775,9 +794,13 @@ def configure_cursor(cursor_dir: Path, is_dev: bool = False, force: bool = False
 
             if existing_config:
                 # Check if config matches
-                if (existing_config.get("args") == ["-m", "roampal.mcp.server"] and
-                    existing_config.get("env", {}) == expected_env):
-                    print(f"  {GREEN}[OK] roampal-core already configured correctly in {mcp_config_path}{RESET}")
+                if (
+                    existing_config.get("args") == ["-m", "roampal.mcp.server"]
+                    and existing_config.get("env", {}) == expected_env
+                ):
+                    print(
+                        f"  {GREEN}[OK] roampal-core already configured correctly in {mcp_config_path}{RESET}"
+                    )
                     mcp_needs_write = False
                 else:
                     # v0.4.2.1: Always update roampal-owned MCP config when it differs
@@ -808,7 +831,7 @@ def configure_cursor(cursor_dir: Path, is_dev: bool = False, force: bool = False
 
     expected_hooks = {
         "beforeSubmitPrompt": [{"command": submit_cmd}],
-        "stop": [{"command": stop_cmd}]
+        "stop": [{"command": stop_cmd}],
     }
     hooks_config = {"version": 1, "hooks": expected_hooks}
     hooks_needs_write = True
@@ -823,15 +846,19 @@ def configure_cursor(cursor_dir: Path, is_dev: bool = False, force: bool = False
             existing_submit = existing_hooks.get("beforeSubmitPrompt", [])
             existing_stop = existing_hooks.get("stop", [])
 
-            submit_matches = (existing_submit == expected_hooks["beforeSubmitPrompt"])
-            stop_matches = (existing_stop == expected_hooks["stop"])
+            submit_matches = existing_submit == expected_hooks["beforeSubmitPrompt"]
+            stop_matches = existing_stop == expected_hooks["stop"]
 
             if submit_matches and stop_matches:
-                print(f"  {GREEN}[OK] Hooks already configured correctly in {hooks_config_path}{RESET}")
+                print(
+                    f"  {GREEN}[OK] Hooks already configured correctly in {hooks_config_path}{RESET}"
+                )
                 hooks_needs_write = False
             elif existing_submit or existing_stop:
                 # v0.4.2.1: Always update roampal hooks, preserve non-roampal hooks
-                existing["hooks"]["beforeSubmitPrompt"] = expected_hooks["beforeSubmitPrompt"]
+                existing["hooks"]["beforeSubmitPrompt"] = expected_hooks[
+                    "beforeSubmitPrompt"
+                ]
                 existing["hooks"]["stop"] = expected_hooks["stop"]
                 if "version" not in existing:
                     existing["version"] = 1
@@ -840,7 +867,9 @@ def configure_cursor(cursor_dir: Path, is_dev: bool = False, force: bool = False
             else:
                 # No existing roampal hooks - add them
                 if "hooks" in existing:
-                    existing["hooks"]["beforeSubmitPrompt"] = expected_hooks["beforeSubmitPrompt"]
+                    existing["hooks"]["beforeSubmitPrompt"] = expected_hooks[
+                        "beforeSubmitPrompt"
+                    ]
                     existing["hooks"]["stop"] = expected_hooks["stop"]
                 else:
                     existing["hooks"] = expected_hooks
@@ -853,7 +882,9 @@ def configure_cursor(cursor_dir: Path, is_dev: bool = False, force: bool = False
     if hooks_needs_write:
         hooks_config_path.write_text(json.dumps(hooks_config, indent=2))
         print(f"  {GREEN}Created hooks config: {hooks_config_path}{RESET}")
-        print(f"  {GREEN}  - beforeSubmitPrompt hook (injects scoring + memories){RESET}")
+        print(
+            f"  {GREEN}  - beforeSubmitPrompt hook (injects scoring + memories){RESET}"
+        )
         print(f"  {GREEN}  - stop hook (enforces record_response){RESET}")
 
     print(f"  {GREEN}Cursor configured!{RESET}\n")
@@ -920,8 +951,10 @@ def configure_opencode(is_dev: bool = False, force: bool = False):
                     existing_env.get(k) == v for k, v in expected_env.items()
                 )
 
-                if (existing_cmd == roampal_mcp_config["command"] and base_keys_match):
-                    print(f"  {GREEN}[OK] roampal-core MCP already configured correctly{RESET}")
+                if existing_cmd == roampal_mcp_config["command"] and base_keys_match:
+                    print(
+                        f"  {GREEN}[OK] roampal-core MCP already configured correctly{RESET}"
+                    )
                     mcp_needs_write = False
                 # else: mcp_needs_write stays True, update applied below
         except Exception as e:
@@ -931,7 +964,9 @@ def configure_opencode(is_dev: bool = False, force: bool = False):
         if "mcp" not in config:
             config["mcp"] = {}
         # v0.4.2.1: Merge environment — preserve sidecar vars (ROAMPAL_SIDECAR_*)
-        existing_mcp_env = config.get("mcp", {}).get("roampal-core", {}).get("environment", {})
+        existing_mcp_env = (
+            config.get("mcp", {}).get("roampal-core", {}).get("environment", {})
+        )
         merged_env = {**existing_mcp_env, **expected_env}
         roampal_mcp_config["environment"] = merged_env
         config["mcp"]["roampal-core"] = roampal_mcp_config
@@ -950,7 +985,11 @@ def configure_opencode(is_dev: bool = False, force: bool = False):
         # Check if plugin content matches
         try:
             existing_content = plugin_file.read_text(encoding="utf-8")
-            source_content = plugin_source.read_text(encoding="utf-8") if plugin_source.exists() else ""
+            source_content = (
+                plugin_source.read_text(encoding="utf-8")
+                if plugin_source.exists()
+                else ""
+            )
 
             if existing_content == source_content:
                 print(f"  {GREEN}[OK] roampal plugin already installed{RESET}")
@@ -973,7 +1012,9 @@ def configure_opencode(is_dev: bool = False, force: bool = False):
     shared_port = 27183 if is_dev else 27182
     print(f"  {GREEN}OpenCode configured!{RESET}")
     print(f"  {GREEN}  Server port: {shared_port}{RESET}")
-    print(f"  {YELLOW}Note: Server auto-starts on first message. To stop: roampal stop{RESET}")
+    print(
+        f"  {YELLOW}Note: Server auto-starts on first message. To stop: roampal stop{RESET}"
+    )
     print()
 
 
@@ -984,7 +1025,9 @@ def cmd_start(args):
     # User can override with --port
     is_dev = is_dev_mode(args)
     default_port = DEV_PORT if is_dev else PROD_PORT
-    port = args.port if args.port != PROD_PORT else default_port  # Use default unless explicitly overridden
+    port = (
+        args.port if args.port != PROD_PORT else default_port
+    )  # Use default unless explicitly overridden
 
     # Handle dev mode - uses Roampal_DEV folder
     if is_dev:
@@ -1010,6 +1053,7 @@ def cmd_start(args):
 
     # Import and start server
     from roampal.server.main import start_server
+
     start_server(host=host, port=port)
 
 
@@ -1026,16 +1070,16 @@ def cmd_stop(args):
     if sys.platform == "win32":
         try:
             result = subprocess.run(
-                ["netstat", "-ano"],
-                capture_output=True, text=True, timeout=5
+                ["netstat", "-ano"], capture_output=True, text=True, timeout=5
             )
             for line in result.stdout.split("\n"):
                 if f"127.0.0.1:{port}" in line and "LISTENING" in line:
                     pid = line.strip().split()[-1]
-                    if pid:
+                    if pid and pid.isdigit():
                         subprocess.run(
                             ["taskkill", "/pid", pid, "/f"],
-                            capture_output=True, timeout=5
+                            capture_output=True,
+                            timeout=5,
                         )
                         print(f"  {GREEN}Killed server process (PID {pid}){RESET}")
                         killed = True
@@ -1045,15 +1089,11 @@ def cmd_stop(args):
     else:
         try:
             result = subprocess.run(
-                ["lsof", "-ti", f":{port}"],
-                capture_output=True, text=True, timeout=5
+                ["lsof", "-ti", f":{port}"], capture_output=True, text=True, timeout=5
             )
             pid = result.stdout.strip().split("\n")[0] if result.stdout.strip() else ""
-            if pid:
-                subprocess.run(
-                    ["kill", "-9", pid],
-                    capture_output=True, timeout=5
-                )
+            if pid and pid.isdigit():
+                subprocess.run(["kill", "-9", pid], capture_output=True, timeout=5)
                 print(f"  {GREEN}Killed server process (PID {pid}){RESET}")
                 killed = True
         except Exception as e:
@@ -1071,7 +1111,7 @@ def cmd_status(args):
     """Check Roampal server status and MCP configuration."""
     import httpx
 
-    json_mode = getattr(args, 'json_output', False)
+    json_mode = getattr(args, "json_output", False)
 
     if not json_mode:
         print_update_notice()
@@ -1088,7 +1128,7 @@ def cmd_status(args):
     claude_json_path = Path.home() / ".claude.json"
     if claude_json_path.exists():
         try:
-            claude_json = json.loads(claude_json_path.read_text(encoding='utf-8'))
+            claude_json = json.loads(claude_json_path.read_text(encoding="utf-8"))
             roampal_config = claude_json.get("mcpServers", {}).get("roampal-core", {})
             if roampal_config:
                 mcp_status = "configured"
@@ -1143,7 +1183,9 @@ def cmd_status(args):
     print(f"{BOLD}MCP Configuration:{RESET}")
     if mcp_status == "configured":
         print(f"  Location: {GREEN}{mcp_detail['path']}{RESET} (user scope)")
-        print(f"  Command:  {mcp_detail['command']} {' '.join(mcp_detail.get('args', []))}")
+        print(
+            f"  Command:  {mcp_detail['command']} {' '.join(mcp_detail.get('args', []))}"
+        )
         if mcp_detail.get("env"):
             print(f"  Env:      {mcp_detail['env']}")
         print(f"  Status:   {GREEN}[OK] Configured{RESET}")
@@ -1173,7 +1215,9 @@ def cmd_status(args):
         print(f"\n  Start with: {start_cmd}")
         return 1
     else:
-        print(f"  {RED}Error: {server_detail.get('error', server_detail.get('status_code', 'unknown'))}{RESET}")
+        print(
+            f"  {RED}Error: {server_detail.get('error', server_detail.get('status_code', 'unknown'))}{RESET}"
+        )
         return 1
 
 
@@ -1181,7 +1225,7 @@ def cmd_stats(args):
     """Show memory statistics."""
     import httpx
 
-    json_mode = getattr(args, 'json_output', False)
+    json_mode = getattr(args, "json_output", False)
 
     if not json_mode:
         print_update_notice()
@@ -1252,14 +1296,15 @@ def cmd_ingest(args):
         content = None
         title = args.title or file_path.stem
 
-        if suffix == '.txt':
-            content = file_path.read_text(encoding='utf-8')
-        elif suffix == '.md':
-            content = file_path.read_text(encoding='utf-8')
-        elif suffix == '.pdf':
+        if suffix == ".txt":
+            content = file_path.read_text(encoding="utf-8")
+        elif suffix == ".md":
+            content = file_path.read_text(encoding="utf-8")
+        elif suffix == ".pdf":
             # Try to use pypdf if available
             try:
                 import pypdf
+
                 reader = pypdf.PdfReader(str(file_path))
                 content = ""
                 for page in reader.pages:
@@ -1271,9 +1316,11 @@ def cmd_ingest(args):
         else:
             # Try to read as text
             try:
-                content = file_path.read_text(encoding='utf-8')
+                content = file_path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
-                print(f"{RED}Cannot read file as text. Supported: .txt, .md, .pdf{RESET}")
+                print(
+                    f"{RED}Cannot read file as text. Supported: .txt, .md, .pdf{RESET}"
+                )
                 return
 
         if not content or len(content.strip()) == 0:
@@ -1302,21 +1349,25 @@ def cmd_ingest(args):
                     "title": title,
                     "source": str(file_path),
                     "chunk_size": args.chunk_size,
-                    "chunk_overlap": args.chunk_overlap
+                    "chunk_overlap": args.chunk_overlap,
                 },
-                timeout=300.0  # 5 min timeout for very large files
+                timeout=300.0,  # 5 min timeout for very large files
             )
 
             if response.status_code == 200:
                 data = response.json()
-                print(f"\n{GREEN}Success!{RESET} Stored '{title}' in {data['chunks']} chunks")
+                print(
+                    f"\n{GREEN}Success!{RESET} Stored '{title}' in {data['chunks']} chunks"
+                )
                 print(f"  (via running server - immediately searchable)")
                 print(f"\nThe document is now searchable via:")
                 print(f"  - search_memory(query, collections=['books'])")
                 print(f"  - Automatic context injection via hooks")
                 return
             else:
-                print(f"  {YELLOW}Server error, falling back to direct storage...{RESET}")
+                print(
+                    f"  {YELLOW}Server error, falling back to direct storage...{RESET}"
+                )
 
         except httpx.ConnectError:
             print(f"  {YELLOW}Server not running, using direct storage...{RESET}")
@@ -1334,7 +1385,7 @@ def cmd_ingest(args):
                 title=title,
                 source=str(file_path),
                 chunk_size=args.chunk_size,
-                chunk_overlap=args.chunk_overlap
+                chunk_overlap=args.chunk_overlap,
             )
 
             return doc_ids
@@ -1345,7 +1396,9 @@ def cmd_ingest(args):
         print(f"\nThe document is now searchable via:")
         print(f"  - search_memory(query, collections=['books'])")
         print(f"  - Automatic context injection via hooks")
-        print(f"\n{YELLOW}Note: Restart 'roampal start' for immediate searchability{RESET}")
+        print(
+            f"\n{YELLOW}Note: Restart 'roampal start' for immediate searchability{RESET}"
+        )
 
     except Exception as e:
         print(f"{RED}Error ingesting file: {e}{RESET}")
@@ -1361,7 +1414,7 @@ def cmd_remove(args):
     print(f"{BOLD}Removing book:{RESET} {title}\n")
 
     # v0.2.0: Handle --dev flag by setting env var
-    if getattr(args, 'dev', False):
+    if getattr(args, "dev", False):
         os.environ["ROAMPAL_DEV"] = "1"
         print(f"  {YELLOW}DEV mode{RESET}")
 
@@ -1371,16 +1424,14 @@ def cmd_remove(args):
     server_url = f"http://{host}:{port}/api/remove-book"
 
     try:
-        response = httpx.post(
-            server_url,
-            json={"title": title},
-            timeout=30.0
-        )
+        response = httpx.post(server_url, json={"title": title}, timeout=30.0)
 
         if response.status_code == 200:
             data = response.json()
             if data.get("removed", 0) > 0:
-                print(f"{GREEN}Success!{RESET} Removed '{title}' ({data['removed']} chunks)")
+                print(
+                    f"{GREEN}Success!{RESET} Removed '{title}' ({data['removed']} chunks)"
+                )
                 if data.get("cleaned_kg_refs", 0) > 0:
                     print(f"  Cleaned {data['cleaned_kg_refs']} Action KG references")
             else:
@@ -1403,7 +1454,9 @@ def cmd_remove(args):
     result = asyncio.run(do_remove())
 
     if result.get("removed", 0) > 0:
-        print(f"\n{GREEN}Success!{RESET} Removed '{title}' ({result['removed']} chunks)")
+        print(
+            f"\n{GREEN}Success!{RESET} Removed '{title}' ({result['removed']} chunks)"
+        )
         if result.get("cleaned_kg_refs", 0) > 0:
             print(f"  Cleaned {result['cleaned_kg_refs']} Action KG references")
     else:
@@ -1453,6 +1506,7 @@ def cmd_doctor(args):
     print(f"\n{BOLD}Roampal Version:{RESET}")
     try:
         from roampal import __version__
+
         check_pass(f"roampal v{__version__}")
     except ImportError as e:
         check_fail(f"Cannot import roampal: {e}")
@@ -1484,10 +1538,15 @@ def cmd_doctor(args):
         if claude_json_path.exists():
             try:
                 claude_json = json.loads(claude_json_path.read_text())
-                if "mcpServers" in claude_json and "roampal-core" in claude_json["mcpServers"]:
+                if (
+                    "mcpServers" in claude_json
+                    and "roampal-core" in claude_json["mcpServers"]
+                ):
                     check_pass("~/.claude.json has roampal-core server (user scope)")
                 else:
-                    check_warn("~/.claude.json missing roampal-core (run 'roampal init')")
+                    check_warn(
+                        "~/.claude.json missing roampal-core (run 'roampal init')"
+                    )
             except json.JSONDecodeError as e:
                 check_fail(f"~/.claude.json invalid JSON: {e}")
         else:
@@ -1499,7 +1558,9 @@ def cmd_doctor(args):
             try:
                 old_mcp = json.loads(old_mcp_path.read_text())
                 if "mcpServers" in old_mcp and "roampal-core" in old_mcp["mcpServers"]:
-                    check_warn("Old config at ~/.claude/.mcp.json (run 'roampal init' to migrate)")
+                    check_warn(
+                        "Old config at ~/.claude/.mcp.json (run 'roampal init' to migrate)"
+                    )
             except Exception as e:
                 logger.debug(f"Could not parse old .mcp.json: {e}")
     else:
@@ -1517,7 +1578,9 @@ def cmd_doctor(args):
                 if "mcpServers" in mcp and "roampal-core" in mcp["mcpServers"]:
                     check_pass("mcp.json has roampal-core server")
                 else:
-                    check_warn("mcp.json missing roampal-core (run 'roampal init --cursor')")
+                    check_warn(
+                        "mcp.json missing roampal-core (run 'roampal init --cursor')"
+                    )
             except json.JSONDecodeError as e:
                 check_fail(f"mcp.json invalid JSON: {e}")
         else:
@@ -1531,15 +1594,21 @@ def cmd_doctor(args):
                 if "hooks" in hooks and "beforeSubmitPrompt" in hooks["hooks"]:
                     check_pass("hooks.json has beforeSubmitPrompt configured")
                 else:
-                    check_warn("hooks.json missing beforeSubmitPrompt (run 'roampal init --cursor')")
+                    check_warn(
+                        "hooks.json missing beforeSubmitPrompt (run 'roampal init --cursor')"
+                    )
                 if "hooks" in hooks and "stop" in hooks["hooks"]:
                     check_pass("hooks.json has stop hook configured")
                 else:
-                    check_warn("hooks.json missing stop hook (run 'roampal init --cursor')")
+                    check_warn(
+                        "hooks.json missing stop hook (run 'roampal init --cursor')"
+                    )
             except json.JSONDecodeError as e:
                 check_fail(f"hooks.json invalid JSON: {e}")
         else:
-            check_warn("hooks.json not found (run 'roampal init --cursor' for Cursor 1.7+)")
+            check_warn(
+                "hooks.json not found (run 'roampal init --cursor' for Cursor 1.7+)"
+            )
 
     # 4. Check data directory
     print(f"\n{BOLD}Data Directory:{RESET}")
@@ -1559,11 +1628,12 @@ def cmd_doctor(args):
     try:
         # Import the server module - this validates the code compiles
         import roampal.mcp.server as mcp_module
+
         check_pass("MCP server module loads")
 
         # Check that tools are defined (this catches syntax errors like false/False)
         # The actual list_tools is a decorated async function, so we check the TOOLS dict
-        if hasattr(mcp_module, 'TOOLS'):
+        if hasattr(mcp_module, "TOOLS"):
             tool_count = len(mcp_module.TOOLS)
             check_pass(f"Tools defined: {tool_count}")
         else:
@@ -1580,6 +1650,7 @@ def cmd_doctor(args):
     # 6. Check memory system initialization
     print(f"\n{BOLD}Memory System:{RESET}")
     try:
+
         async def test_memory():
             from roampal.backend.modules.memory import UnifiedMemorySystem
 
@@ -1592,7 +1663,7 @@ def cmd_doctor(args):
         check_pass("Memory system initializes")
 
         # Check collections
-        if hasattr(mem, 'collections') and mem.collections:
+        if hasattr(mem, "collections") and mem.collections:
             collection_names = list(mem.collections.keys())
             check_pass(f"Collections: {', '.join(collection_names)}")
         else:
@@ -1623,6 +1694,7 @@ def cmd_doctor(args):
     # v0.4.5: Hint about legacy torch/sentence-transformers no longer needed
     try:
         import torch as _torch
+
         check_warn(
             f"torch v{_torch.__version__} installed but no longer required by roampal. "
             f"Reclaim ~420MB: pip uninstall torch sentence-transformers"
@@ -1631,6 +1703,7 @@ def cmd_doctor(args):
         pass  # Good — torch not installed
     try:
         import sentence_transformers as _st
+
         check_warn(
             f"sentence-transformers installed but no longer required by roampal. "
             f"Reclaim space: pip uninstall sentence-transformers"
@@ -1639,7 +1712,7 @@ def cmd_doctor(args):
         pass  # Good — sentence-transformers not installed
 
     # Summary
-    print(f"\n{BOLD}{'='*50}{RESET}")
+    print(f"\n{BOLD}{'=' * 50}{RESET}")
     total = checks_passed + checks_failed + checks_warned
     if checks_failed == 0:
         print(f"{GREEN}All checks passed!{RESET} ({checks_passed}/{total})")
@@ -1647,7 +1720,9 @@ def cmd_doctor(args):
             print(f"{YELLOW}{checks_warned} warnings{RESET}")
         return 0
     else:
-        print(f"{RED}{checks_failed} checks failed{RESET}, {checks_passed} passed, {checks_warned} warnings")
+        print(
+            f"{RED}{checks_failed} checks failed{RESET}, {checks_passed} passed, {checks_warned} warnings"
+        )
         print(f"\nRun {BLUE}roampal init{RESET} to fix configuration issues.")
         return 1
 
@@ -1675,6 +1750,7 @@ def cmd_books(args):
 
     # Fallback: List directly
     if books is None:
+
         async def do_list():
             from roampal.backend.modules.memory import UnifiedMemorySystem
 
@@ -1693,7 +1769,7 @@ def cmd_books(args):
         print(f"  {GREEN}{book['title']}{RESET}")
         print(f"    Source: {book.get('source', 'unknown')}")
         print(f"    Chunks: {book.get('chunk_count', 0)}")
-        if book.get('created_at'):
+        if book.get("created_at"):
             print(f"    Added: {book['created_at'][:10]}")
         print()
 
@@ -1719,12 +1795,15 @@ def cmd_score(args):
                 lock_pid = lock_data.get("pid", 0)
                 lock_time = lock_data.get("time", 0)
                 import time as _time
+
                 # If lock is older than 3 minutes, it's stale — ignore it
                 if _time.time() - lock_time < 180:
                     # Check if the PID is still alive
                     try:
                         os.kill(lock_pid, 0)
-                        logger.debug(f"Sidecar already running (pid={lock_pid}), skipping")
+                        logger.debug(
+                            f"Sidecar already running (pid={lock_pid}), skipping"
+                        )
                         return
                     except (OSError, ProcessLookupError):
                         pass  # Process dead, lock is stale
@@ -1733,6 +1812,7 @@ def cmd_score(args):
 
         # Acquire lock
         import time as _time
+
         lock_file.write_text(json.dumps({"pid": os.getpid(), "time": _time.time()}))
     except Exception:
         pass  # If locking fails, continue anyway — dedup check is the safety net
@@ -1752,9 +1832,13 @@ def _cmd_score_inner(args, base_url, port):
     import hashlib
     import httpx
 
+    if not _check_sidecar_configured():
+        return
+
     if args.from_hook:
         # Read Claude Code Stop hook event data from stdin
         import sys
+
         try:
             hook_data = json.loads(sys.stdin.read())
         except (json.JSONDecodeError, Exception) as e:
@@ -1775,18 +1859,22 @@ def _cmd_score_inner(args, base_url, port):
             return
     else:
         # Background sidecar or manual mode
-        transcript_arg = getattr(args, 'transcript', None)
-        session_id = getattr(args, 'session_id', None) or "default"
+        transcript_arg = getattr(args, "transcript", None)
+        session_id = getattr(args, "session_id", None) or "default"
         try:
             if transcript_arg and Path(transcript_arg).exists():
                 transcript_path = transcript_arg
             else:
-                transcript_path = _find_latest_transcript(session_id if session_id != "default" else None)
+                transcript_path = _find_latest_transcript(
+                    session_id if session_id != "default" else None
+                )
             if not transcript_path:
                 logger.debug("No Claude Code transcript found")
                 return
-            if not getattr(args, 'from_hook', False) and session_id == "default":
-                print(f"{YELLOW}Scoring from transcript: {Path(transcript_path).name}{RESET}")
+            if not getattr(args, "from_hook", False) and session_id == "default":
+                print(
+                    f"{YELLOW}Scoring from transcript: {Path(transcript_path).name}{RESET}"
+                )
             user_msg, assistant_msg, followup = _parse_last_exchange(transcript_path)
             if not user_msg or not assistant_msg:
                 logger.debug("No complete exchange found in transcript")
@@ -1796,7 +1884,9 @@ def _cmd_score_inner(args, base_url, port):
             return
 
     # Fingerprint check — skip if this exchange was already summarized
-    fingerprint = hashlib.md5(f"{user_msg[:200]}:{assistant_msg[:200]}".encode()).hexdigest()[:12]
+    fingerprint = hashlib.md5(
+        f"{user_msg[:200]}:{assistant_msg[:200]}".encode()
+    ).hexdigest()[:12]
 
     try:
         check_resp = httpx.post(
@@ -1806,12 +1896,14 @@ def _cmd_score_inner(args, base_url, port):
                 "collections": ["working"],
                 "limit": 1,
                 "sort_by": "recency",
-                "metadata_filters": {"exchange_fingerprint": fingerprint}
+                "metadata_filters": {"exchange_fingerprint": fingerprint},
             },
-            timeout=5.0
+            timeout=5.0,
         )
         if check_resp.status_code == 200 and check_resp.json().get("count", 0) > 0:
-            logger.debug(f"Exchange already summarized (fingerprint={fingerprint}), skipping")
+            logger.debug(
+                f"Exchange already summarized (fingerprint={fingerprint}), skipping"
+            )
             return
     except Exception:
         pass  # If check fails, proceed with scoring
@@ -1840,10 +1932,10 @@ def _cmd_score_inner(args, base_url, port):
                     "sidecar_outcome": outcome,
                     "exchange_fingerprint": fingerprint,
                     "original_user_msg_length": len(user_msg),
-                    "original_assistant_msg_length": len(assistant_msg)
-                }
+                    "original_assistant_msg_length": len(assistant_msg),
+                },
             },
-            timeout=10.0
+            timeout=10.0,
         )
 
         if store_resp.status_code == 200:
@@ -1857,9 +1949,9 @@ def _cmd_score_inner(args, base_url, port):
                     json={
                         "conversation_id": session_id,
                         "outcome": outcome,
-                        "memory_scores": {doc_id: outcome}
+                        "memory_scores": {doc_id: outcome},
                     },
-                    timeout=10.0
+                    timeout=10.0,
                 )
 
             if not args.from_hook:
@@ -1896,7 +1988,7 @@ def _parse_last_exchange(transcript_path: str) -> tuple:
     import re
 
     try:
-        with open(transcript_path, 'r', encoding='utf-8') as f:
+        with open(transcript_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
 
         # Build turns: each turn = (user_text, assistant_text)
@@ -1922,9 +2014,21 @@ def _parse_last_exchange(transcript_path: str) -> tuple:
                     if not text:
                         continue
                     # Strip hook injection tags
-                    text = re.sub(r'<system-reminder>.*?</system-reminder>', '', text, flags=re.DOTALL).strip()
-                    text = re.sub(r'<task-notification>.*?</task-notification>', '', text, flags=re.DOTALL).strip()
-                    text = re.sub(r'<roampal-[^>]*>.*?</roampal-[^>]*>', '', text, flags=re.DOTALL).strip()
+                    text = re.sub(
+                        r"<system-reminder>.*?</system-reminder>",
+                        "",
+                        text,
+                        flags=re.DOTALL,
+                    ).strip()
+                    text = re.sub(
+                        r"<task-notification>.*?</task-notification>",
+                        "",
+                        text,
+                        flags=re.DOTALL,
+                    ).strip()
+                    text = re.sub(
+                        r"<roampal-[^>]*>.*?</roampal-[^>]*>", "", text, flags=re.DOTALL
+                    ).strip()
                     if not text or len(text) < 2:
                         continue
 
@@ -1933,7 +2037,11 @@ def _parse_last_exchange(transcript_path: str) -> tuple:
                         turns.append(current_turn)
                     current_turn = {"user": text, "assistant": ""}
 
-                elif msg_type == "assistant" and isinstance(content, list) and current_turn is not None:
+                elif (
+                    msg_type == "assistant"
+                    and isinstance(content, list)
+                    and current_turn is not None
+                ):
                     # Accumulate all substantive text for this turn
                     for p in content:
                         if isinstance(p, dict) and p.get("type") == "text":
@@ -1998,7 +2106,9 @@ def _find_latest_transcript(session_id: str = None) -> str:
         logger.warning(f"No transcript found for session {session_id}")
 
     # Fallback: most recent, but skip tiny files (likely sidecar/haiku transcripts)
-    transcripts = sorted(claude_dir.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    transcripts = sorted(
+        claude_dir.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
     for t in transcripts:
         # Skip files under ~5KB — real sessions are much larger, haiku transcripts are tiny
         if t.stat().st_size > 5000:
@@ -2010,10 +2120,15 @@ def cmd_summarize(args):
     """Summarize existing long memories using the sidecar."""
     import httpx
 
+    if not _check_sidecar_configured():
+        return
+
     port = get_port(args)
     base_url = f"http://127.0.0.1:{port}"
     max_chars = args.max_chars
-    collections_to_scan = [args.collection] if args.collection else ["working", "history"]
+    collections_to_scan = (
+        [args.collection] if args.collection else ["working", "history"]
+    )
     dry_run = args.dry_run
 
     print(f"{BOLD}Summarizing memories over {max_chars} characters{RESET}")
@@ -2021,6 +2136,7 @@ def cmd_summarize(args):
         print(f"{YELLOW}DRY RUN -- no changes will be made{RESET}")
 
     from roampal.sidecar_service import get_backend_info
+
     backend = get_backend_info()
     print(f"Backend: {GREEN}{backend}{RESET}")
 
@@ -2028,38 +2144,62 @@ def cmd_summarize(args):
         print(f"\n{RED}No summarization backend available.{RESET}")
         print()
         print(f"  {BOLD}What was checked:{RESET}")
-        print(f"    ROAMPAL_SUMMARIZE_MODEL  {RED}not set{RESET}  (opt-in to main model)")
-        print(f"    ROAMPAL_SIDECAR_URL      {RED}not set{RESET}  (custom OpenAI-compatible API)")
+        print(
+            f"    ROAMPAL_SUMMARIZE_MODEL  {RED}not set{RESET}  (opt-in to main model)"
+        )
+        print(
+            f"    ROAMPAL_SIDECAR_URL      {RED}not set{RESET}  (custom OpenAI-compatible API)"
+        )
         print(f"    ANTHROPIC_API_KEY         {RED}not set{RESET}  (Haiku direct)")
-        print(f"    Zen free models           {RED}unavailable{RESET} (CLI only works inside OpenCode)")
-        print(f"    Ollama                    {RED}not running{RESET} (http://localhost:11434)")
-        print(f"    LM Studio                 {RED}not running{RESET} (http://localhost:1234)")
+        print(
+            f"    Zen free models           {RED}unavailable{RESET} (CLI only works inside OpenCode)"
+        )
+        print(
+            f"    Ollama                    {RED}not running{RESET} (http://localhost:11434)"
+        )
+        print(
+            f"    LM Studio                 {RED}not running{RESET} (http://localhost:1234)"
+        )
         print(f"    claude CLI                {RED}not found{RESET}")
         print()
         print(f"  {BOLD}Options (pick one):{RESET}")
-        print(f"    1. {GREEN}Install Ollama{RESET} (recommended, free, local, ~14s/memory)")
+        print(
+            f"    1. {GREEN}Install Ollama{RESET} (recommended, free, local, ~14s/memory)"
+        )
         print(f"       ollama.com -> install -> ollama pull llama3.2:3b")
         print(f"    2. {GREEN}Set ANTHROPIC_API_KEY{RESET} (~$0.001/memory via Haiku)")
         print(f"       export ANTHROPIC_API_KEY=sk-ant-...")
         print(f"    3. {GREEN}Set ROAMPAL_SUMMARIZE_MODEL{RESET} (use your main model)")
         print(f"       export ROAMPAL_SUMMARIZE_MODEL=claude-sonnet-4-5-20250929")
         print(f"       export ANTHROPIC_API_KEY=sk-ant-...")
-        print(f"    4. {GREEN}Set ROAMPAL_SIDECAR_URL{RESET} (any OpenAI-compatible endpoint)")
+        print(
+            f"    4. {GREEN}Set ROAMPAL_SIDECAR_URL{RESET} (any OpenAI-compatible endpoint)"
+        )
         print(f"       export ROAMPAL_SIDECAR_URL=https://api.groq.com/openai/v1")
         print(f"       export ROAMPAL_SIDECAR_KEY=your-key")
         print(f"       export ROAMPAL_SIDECAR_MODEL=llama-3.3-70b-versatile")
         print()
-        print(f"  {YELLOW}Note:{RESET} OpenCode users don't need this -- memories auto-summarize")
+        print(
+            f"  {YELLOW}Note:{RESET} OpenCode users don't need this -- memories auto-summarize"
+        )
         print(f"  during normal use via the plugin (1 per exchange, zero config).")
         return
     elif "claude -p" in backend:
-        print(f"{YELLOW}Warning: claude -p is slow (~30-60s/memory) and unreliable (~40% success rate).{RESET}")
-        print(f"For better results, install Ollama (ollama.com) or set ROAMPAL_SIDECAR_URL.{RESET}")
+        print(
+            f"{YELLOW}Warning: claude -p is slow (~30-60s/memory) and unreliable (~40% success rate).{RESET}"
+        )
+        print(
+            f"For better results, install Ollama (ollama.com) or set ROAMPAL_SIDECAR_URL.{RESET}"
+        )
 
     # Small model disclaimer
     if "Ollama" in backend or "LM Studio" in backend:
-        print(f"{YELLOW}Note: Local models may struggle with very long memories (>5000 chars).{RESET}")
-        print(f"Those will be skipped if summarization fails. Use a larger model or API for best results.{RESET}")
+        print(
+            f"{YELLOW}Note: Local models may struggle with very long memories (>5000 chars).{RESET}"
+        )
+        print(
+            f"Those will be skipped if summarization fails. Use a larger model or API for best results.{RESET}"
+        )
 
     print()
 
@@ -2082,9 +2222,9 @@ def cmd_summarize(args):
                     "query": "",
                     "collections": [coll_name],
                     "limit": 500,
-                    "sort_by": "recency"
+                    "sort_by": "recency",
                 },
-                timeout=30.0
+                timeout=30.0,
             )
 
             if resp.status_code != 200:
@@ -2128,7 +2268,9 @@ def cmd_summarize(args):
             # Interactive: ask user how many
             print()
             try:
-                user_input = input(f"How many to summarize? (Enter for all {len(all_candidates)}, or a number): ").strip()
+                user_input = input(
+                    f"How many to summarize? (Enter for all {len(all_candidates)}, or a number): "
+                ).strip()
                 if user_input:
                     batch_limit = int(user_input)
                     if batch_limit <= 0:
@@ -2152,14 +2294,18 @@ def cmd_summarize(args):
     for i, (coll_name, mem) in enumerate(all_candidates):
         if batch_limit is not None and batch_count >= batch_limit:
             remaining = len(all_candidates) - i
-            print(f"  {YELLOW}Batch limit reached ({batch_limit}). {remaining} remaining -- run again to continue.{RESET}")
+            print(
+                f"  {YELLOW}Batch limit reached ({batch_limit}). {remaining} remaining -- run again to continue.{RESET}"
+            )
             break
 
         content = mem.get("content", "")
         doc_id = mem.get("id", mem.get("doc_id", ""))
 
         if dry_run:
-            print(f"  [{i+1}/{len(all_candidates)}] {doc_id}: {len(content)} chars -> would summarize")
+            print(
+                f"  [{i + 1}/{len(all_candidates)}] {doc_id}: {len(content)} chars -> would summarize"
+            )
             if i < 3:  # Show sample previews for first 3
                 print(f"    {YELLOW}(generating preview...){RESET}")
                 try:
@@ -2175,16 +2321,19 @@ def cmd_summarize(args):
         # Summarize
         summary = summarize_only(content)
         if not summary:
-            print(f"  {YELLOW}[{i+1}] Failed to summarize {doc_id} ({len(content)} chars), skipping{RESET}")
+            print(
+                f"  {YELLOW}[{i + 1}] Failed to summarize {doc_id} ({len(content)} chars), skipping{RESET}"
+            )
             total_skipped += 1
             continue
 
         # Enforce summary length — if LLM returned >max_chars, truncate to prevent re-summarization loop
         if len(summary) > max_chars:
-            summary = summary[:max_chars - 20] + "... [truncated]"
+            summary = summary[: max_chars - 20] + "... [truncated]"
 
         # Extract noun_tags from summary (skip if memory already has tags)
         from roampal.sidecar_service import extract_tags
+
         existing_metadata = mem.get("metadata", {})
         has_tags = bool(existing_metadata.get("noun_tags"))
         noun_tags = [] if has_tags else (extract_tags(summary) or [])
@@ -2194,7 +2343,7 @@ def cmd_summarize(args):
             update_payload = {
                 "doc_id": doc_id,
                 "collection": coll_name,
-                "new_content": summary
+                "new_content": summary,
             }
             if noun_tags:
                 update_payload["noun_tags"] = noun_tags
@@ -2202,20 +2351,28 @@ def cmd_summarize(args):
             update_resp = httpx.post(
                 f"{base_url}/api/memory/update-content",
                 json=update_payload,
-                timeout=10.0
+                timeout=10.0,
             )
 
             if update_resp.status_code == 200:
                 total_summarized += 1
                 batch_count += 1
-                tag_info = f", tags={noun_tags}" if noun_tags else (", tags=existing" if has_tags else "")
-                print(f"  [{i+1}/{len(all_candidates)}] {doc_id}: {len(content)} -> {len(summary)} chars{tag_info}")
+                tag_info = (
+                    f", tags={noun_tags}"
+                    if noun_tags
+                    else (", tags=existing" if has_tags else "")
+                )
+                print(
+                    f"  [{i + 1}/{len(all_candidates)}] {doc_id}: {len(content)} -> {len(summary)} chars{tag_info}"
+                )
             else:
                 total_skipped += 1
-                print(f"  {YELLOW}[{i+1}] Failed to update {doc_id}: {update_resp.status_code}{RESET}")
+                print(
+                    f"  {YELLOW}[{i + 1}] Failed to update {doc_id}: {update_resp.status_code}{RESET}"
+                )
         except Exception as e:
             total_skipped += 1
-            print(f"  {RED}[{i+1}] Error updating {doc_id}: {e}{RESET}")
+            print(f"  {RED}[{i + 1}] Error updating {doc_id}: {e}{RESET}")
 
     print()
     if dry_run:
@@ -2223,7 +2380,134 @@ def cmd_summarize(args):
     else:
         print(f"{GREEN}Summarized {total_summarized} memories{RESET}")
         if total_skipped > 0:
-            print(f"{YELLOW}Skipped {total_skipped} (failed or too long for model){RESET}")
+            print(
+                f"{YELLOW}Skipped {total_skipped} (failed or too long for model){RESET}"
+            )
+
+
+def cmd_context(args):
+    """Output recent exchange context for platform hooks."""
+    import httpx
+
+    port = get_port(args)
+    base_url = f"http://127.0.0.1:{port}"
+
+
+def cmd_retag(args):
+    """Upgrade memory tags using LLM (improves retrieval quality)."""
+    import httpx
+
+    if not _check_sidecar_configured():
+        return
+
+    print(f"{BOLD}Memory Cleanup — Retag{RESET}")
+    print(f"""
+  Uses your scoring model to re-extract tags on existing memories.
+  Existing tags are replaced with fresh ones. Memories without tags get them added.
+
+  Use --limit to test on a few first, --dry-run to preview without changing anything.
+  """)
+
+    # Get user confirmation
+    try:
+        confirm = input(f"\n{YELLOW}Continue? [y/N]: {RESET}").strip().lower()
+        if confirm != "y":
+            print(f"{YELLOW}Cancelled.{RESET}")
+            return
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n{YELLOW}Cancelled.{RESET}")
+        return
+
+    port = get_port(args)
+    base_url = f"http://127.0.0.1:{port}"
+
+    # Prepare request
+    request_data = {
+        "collection": args.collection,
+        "limit": args.limit,
+        "dry_run": args.dry_run,
+        "model": args.model,
+    }
+
+    mode_str = f"{YELLOW}DRY RUN — preview only, nothing will change{RESET}" if args.dry_run else "Live — tags will be replaced"
+    print(f"\n  Collection: {args.collection}")
+    if args.limit:
+        print(f"  Limit:      {args.limit} memories")
+    print(f"  Mode:       {mode_str}")
+    if args.model:
+        print(f"  Model:      {args.model}")
+    print(f"\n  Sending each memory to your scoring model for fresh tags...")
+
+    try:
+        import sys
+        import threading
+
+        # Spinner in background thread
+        stop_spinner = threading.Event()
+
+        def _spinner():
+            chars = "|/-\\"
+            i = 0
+            while not stop_spinner.is_set():
+                sys.stdout.write(f"\r  Extracting tags {chars[i % len(chars)]}")
+                sys.stdout.flush()
+                stop_spinner.wait(0.3)
+                i += 1
+            sys.stdout.write("\r  Done!      \n")
+            sys.stdout.flush()
+
+        spinner_thread = threading.Thread(target=_spinner, daemon=True)
+        spinner_thread.start()
+
+        resp = httpx.post(
+            f"{base_url}/api/retag",
+            json=request_data,
+            timeout=300.0,  # 5 minute timeout for large collections
+        )
+
+        stop_spinner.set()
+        spinner_thread.join(timeout=1)
+
+        if resp.status_code == 200:
+            result = resp.json()
+            processed = result.get("processed", 0)
+            tags_added = result.get("tags_added", 0)
+            errs = result.get("errors", 0)
+
+            print(f"\n{GREEN}Done.{RESET}")
+            print(f"  Memories processed: {processed}")
+            print(f"  New tags extracted: {tags_added}")
+            if errs:
+                print(f"  Errors: {errs}")
+
+            # Show sample changes
+            samples = result.get("sample_updates", [])
+            if samples:
+                print(f"\n  Examples:")
+                for s in samples[:3]:
+                    old = ", ".join(s.get("old_tags", [])) or "(none)"
+                    new = ", ".join(s.get("new_tags", []))
+                    print(f"    {old}  ->  {new}")
+
+            if args.dry_run:
+                print(f"\n  {YELLOW}This was a dry run — nothing was changed.{RESET}")
+                print(f"  Run without --dry-run to apply.")
+            elif processed > 0:
+                print(f"\n  {GREEN}Tags updated. Retrieval should improve.{RESET}")
+
+        else:
+            print(f"{RED}Tag upgrade failed: {resp.status_code}{RESET}")
+            try:
+                error_data = resp.json()
+                print(f"  Error: {error_data.get('error', 'Unknown error')}")
+            except:
+                print(f"  Response: {resp.text[:200]}")
+
+    except httpx.RequestError as e:
+        print(f"{RED}Failed to connect to server: {e}{RESET}")
+        print(f"  Make sure the server is running: {BLUE}roampal status{RESET}")
+    except Exception as e:
+        print(f"{RED}Unexpected error: {e}{RESET}")
 
 
 def cmd_context(args):
@@ -2246,9 +2530,9 @@ def cmd_context(args):
                     "collections": ["working", "history", "patterns"],
                     "limit": 4,
                     "sort_by": "recency",
-                    "metadata_filters": {"memory_type": "exchange_summary"}
+                    "metadata_filters": {"memory_type": "exchange_summary"},
                 },
-                timeout=10.0
+                timeout=10.0,
             )
 
             if resp.status_code != 200:
@@ -2261,7 +2545,11 @@ def cmd_context(args):
             # Format output matching _format_mem() from unified_memory_system.py
             print("RECENT EXCHANGES (last 4):")
             for r in results:
-                content = r.get("text", "") or r.get("content", "") or r.get("metadata", {}).get("text", "")
+                content = (
+                    r.get("text", "")
+                    or r.get("content", "")
+                    or r.get("metadata", {}).get("text", "")
+                )
                 metadata = r.get("metadata", {})
                 doc_id = r.get("id", "")
                 collection = r.get("collection", metadata.get("collection", "working"))
@@ -2296,6 +2584,55 @@ def _get_opencode_config_path() -> Path:
         xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
         config_dir = Path(xdg_config) / "opencode"
     return config_dir / "opencode.json"
+
+
+def _check_sidecar_configured() -> bool:
+    """Load sidecar config from opencode.json into env vars and verify it's set.
+
+    CLI commands don't inherit the MCP process env vars, so we read them
+    from the config file and inject them into the current process.
+    No cascade — if the user configured a specific model, use ONLY that.
+    """
+    import roampal.sidecar_service as svc
+
+    # Already configured in env (e.g. user set manually)
+    if svc.CUSTOM_URL and svc.CUSTOM_MODEL:
+        return True
+
+    # Try reading from opencode.json
+    config_path = _get_opencode_config_path()
+    if config_path and config_path.exists():
+        try:
+            config = json.loads(config_path.read_text())
+            env = (
+                config.get("mcp", {})
+                .get("roampal-core", {})
+                .get("environment", {})
+            )
+            url = env.get("ROAMPAL_SIDECAR_URL", "")
+            model = env.get("ROAMPAL_SIDECAR_MODEL", "")
+            key = env.get("ROAMPAL_SIDECAR_KEY", "")
+
+            if url and model:
+                # Inject into current process + reload sidecar module vars
+                os.environ["ROAMPAL_SIDECAR_URL"] = url
+                os.environ["ROAMPAL_SIDECAR_MODEL"] = model
+                if key:
+                    os.environ["ROAMPAL_SIDECAR_KEY"] = key
+
+                # Update the module-level vars so _call_custom uses them
+                svc.CUSTOM_URL = svc._validate_sidecar_url(url)
+                svc.CUSTOM_MODEL = model
+                svc.CUSTOM_KEY = key
+                return True
+        except Exception:
+            pass
+
+    # Nothing configured
+    print(f"{RED}No scoring model configured.{RESET}")
+    print(f"  This command needs a model to process your memories.\n")
+    print(f"  Run {BLUE}roampal sidecar setup{RESET} to configure one.")
+    return False
 
 
 def _detect_ollama_models() -> list:
@@ -2354,12 +2691,14 @@ def _detect_local_servers() -> list:
                 for m in data.get("data", []):
                     model_id = m.get("id", "")
                     if model_id:
-                        results.append({
-                            "name": model_id,
-                            "port": port,
-                            "server_label": label,
-                            "source": "local",
-                        })
+                        results.append(
+                            {
+                                "name": model_id,
+                                "port": port,
+                                "server_label": label,
+                                "source": "local",
+                            }
+                        )
                 return results
         except Exception:
             return []
@@ -2369,7 +2708,9 @@ def _detect_local_servers() -> list:
     extra_probes = []
     if ollama_host:
         # Parse host:port from OLLAMA_HOST (e.g. "http://192.168.1.5:11434" or "localhost:9999")
-        host_str = ollama_host.replace("http://", "").replace("https://", "").rstrip("/")
+        host_str = (
+            ollama_host.replace("http://", "").replace("https://", "").rstrip("/")
+        )
         if ":" in host_str:
             try:
                 port = int(host_str.split(":")[-1])
@@ -2381,7 +2722,9 @@ def _detect_local_servers() -> list:
     all_servers = LOCAL_SERVERS + extra_probes
     results = []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(all_servers)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(all_servers)
+    ) as executor:
         futures = {
             executor.submit(_probe_port, port, label): (port, label)
             for port, label in all_servers
@@ -2394,6 +2737,33 @@ def _detect_local_servers() -> list:
                 pass
 
     return results
+
+
+def _recommend_model(existing_models: list) -> dict:
+    """Pick the best sidecar model from detected models.
+
+    Priority: smallest local Ollama > other local > API.
+    Sidecar only needs basic JSON output, so smaller is better.
+    """
+    # Prefer smallest Ollama model (free, fast, private)
+    ollama_models = [m for m in existing_models if m.get("source") == "ollama"]
+    if ollama_models:
+        sorted_models = sorted(ollama_models, key=lambda m: m.get("size_gb", 999))
+        return {"model": sorted_models[0]}
+
+    # Other local servers
+    local_models = [m for m in existing_models if m.get("source") == "local"]
+    if local_models:
+        return {"model": local_models[0]}
+
+    # API models (costs money)
+    api_models = [
+        m for m in existing_models if m.get("source") == "api" and m.get("has_key")
+    ]
+    if api_models:
+        return {"model": api_models[0]}
+
+    return {}
 
 
 def _detect_api_models(config: dict) -> list:
@@ -2414,15 +2784,21 @@ def _detect_api_models(config: dict) -> list:
             continue
         provider_name = provider_cfg.get("name", provider_id)
         for model_id, model_cfg in (provider_cfg.get("models") or {}).items():
-            model_name = model_cfg.get("name", model_id) if isinstance(model_cfg, dict) else model_id
-            models.append({
-                "name": model_id,
-                "display": f"{model_name} ({provider_name})",
-                "source": "api",
-                "has_key": bool(api_key),
-                "base_url": base_url,
-                "api_key": api_key,
-            })
+            model_name = (
+                model_cfg.get("name", model_id)
+                if isinstance(model_cfg, dict)
+                else model_id
+            )
+            models.append(
+                {
+                    "name": model_id,
+                    "display": f"{model_name} ({provider_name})",
+                    "source": "api",
+                    "has_key": bool(api_key),
+                    "base_url": base_url,
+                    "api_key": api_key,
+                }
+            )
     return models
 
 
@@ -2443,7 +2819,10 @@ def _prompt_custom_endpoint(config: dict, config_path: Path):
             return False
 
         import getpass
-        api_key = getpass.getpass("  API Key (optional for local, Enter to skip): ").strip()
+
+        api_key = getpass.getpass(
+            "  API Key (optional for local, Enter to skip): "
+        ).strip()
 
         model = input(f"  Model name (e.g. llama-3.3-70b-versatile): ").strip()
         if not model:
@@ -2457,7 +2836,9 @@ def _prompt_custom_endpoint(config: dict, config_path: Path):
     if "mcp" not in config:
         config["mcp"] = {}
     if "roampal-core" not in config["mcp"]:
-        print(f"  {RED}roampal-core MCP not configured. Run {BLUE}roampal init --opencode{RESET} first.{RESET}")
+        print(
+            f"  {RED}roampal-core MCP not configured. Run {BLUE}roampal init --opencode{RESET} first.{RESET}"
+        )
         return False
     if "environment" not in config["mcp"]["roampal-core"]:
         config["mcp"]["roampal-core"]["environment"] = {}
@@ -2475,6 +2856,135 @@ def _prompt_custom_endpoint(config: dict, config_path: Path):
     if api_key:
         print(f"    Key:   {'*' * min(len(api_key), 8)}...")
     return True
+
+
+def _sidecar_model_picker(config: dict, config_path: Path) -> bool:
+    """Unified sidecar model selection — used by both init and sidecar setup.
+
+    v0.4.9: One step. Auto-detect everything, show numbered list, user picks.
+    No preamble menu, no "smart scan" option. Hardware scan only if nothing found.
+    """
+    print(f"\n{BOLD}Scanning for available models...{RESET}")
+
+    # Detect everything
+    ollama_models = _detect_ollama_models()
+    local_models = _detect_local_servers()
+    api_models = _detect_api_models(config)
+
+    # Build numbered option list
+    options = []  # list of (label, model_dict)
+
+    # 1) Ollama models — smallest first, skip embeddings
+    sorted_ollama = sorted(ollama_models, key=lambda m: m.get("size_gb", 999))
+    for m in sorted_ollama:
+        name = m.get("name", "")
+        if "embed" in name.lower():
+            continue
+        size = m.get("size_gb", 0)
+        size_str = f", {size}GB" if size else ""
+        options.append((f"{name} (Ollama{size_str}, free)", m))
+
+    # 2) Other local servers (LM Studio etc.) — skip embeddings
+    for m in local_models:
+        name = m.get("name", "")
+        if "embed" in name.lower():
+            continue
+        label = m.get("server_label", "local")
+        options.append((f"{name} ({label}, free)", m))
+
+    # 3) API models (paid)
+    for m in api_models:
+        if m.get("has_key"):
+            options.append((f"{m.get('display', '?')} (API, costs money)", m))
+
+    # Get recommendation (smallest local model)
+    all_models = ollama_models + local_models + api_models
+    rec_model = _recommend_model(all_models).get("model", {})
+    rec_name = rec_model.get("name", "") if isinstance(rec_model, dict) else ""
+
+    if not options:
+        # Nothing detected — show install guidance
+        print(f"\n  {YELLOW}No local models or API keys detected.{RESET}")
+        print(f"\n  You can use local models from Ollama, LM Studio, or similar.")
+        print(f"  Any small model works — the sidecar just produces JSON summaries.\n")
+        print(f"    Ollama:     https://ollama.com → ollama pull qwen3:8b")
+        print(f"    LM Studio:  https://lmstudio.ai")
+        print(f"    Then run:   roampal sidecar setup\n")
+
+        print(f"  {BOLD}[1]{RESET} Configure custom API (Groq, DeepSeek, etc.)")
+        print(f"  {BOLD}[2]{RESET} Use free community models (may be rate-limited)")
+        print(f"  {BOLD}[3]{RESET} Cancel")
+
+        try:
+            choice = input(f"\nChoose [1-3]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{YELLOW}Cancelled.{RESET}")
+            return False
+
+        if choice == "1":
+            return _prompt_custom_endpoint(config, config_path)
+        elif choice == "2":
+            print(f"\n{YELLOW}Using free community models.{RESET}")
+            return False
+        else:
+            print(f"\n{YELLOW}Cancelled. Run 'roampal sidecar setup' when ready.{RESET}")
+            return False
+
+    # --- Models found: show numbered list ---
+    print(f"\n{BOLD}Available scoring models:{RESET}")
+    print(f"  (Sidecar only needs a small model for JSON summaries)\n")
+
+    for i, (label, _model) in enumerate(options, 1):
+        model_name = _model.get("name", "") if _model else ""
+        is_rec = model_name == rec_name
+        marker = f" {GREEN}<-- recommended{RESET}" if is_rec else ""
+        print(f"  {BOLD}[{i}]{RESET} {label}{marker}")
+
+    custom_idx = len(options) + 1
+    free_idx = len(options) + 2
+    cancel_idx = len(options) + 3
+
+    print(f"")
+    print(f"  {BOLD}[{custom_idx}]{RESET} Configure custom API endpoint")
+    print(f"  {BOLD}[{free_idx}]{RESET} Use free community models (may be rate-limited)")
+    print(f"  {BOLD}[{cancel_idx}]{RESET} Cancel")
+
+    try:
+        choice = input(f"\nChoose [1-{cancel_idx}]: ").strip()
+        choice_num = int(choice)
+    except (ValueError, EOFError, KeyboardInterrupt):
+        print(f"\n{YELLOW}Using free community models as fallback.{RESET}")
+        return False
+
+    if 1 <= choice_num <= len(options):
+        label, chosen = options[choice_num - 1]
+        print(f"\n{GREEN}Configuring: {label}{RESET}")
+        result = _write_sidecar_model(config, config_path, chosen)
+        if result:
+            print(f"{YELLOW}Restart OpenCode to activate.{RESET}")
+        return result
+
+    elif choice_num == custom_idx:
+        result = _prompt_custom_endpoint(config, config_path)
+        if result:
+            print(f"\n{YELLOW}Restart OpenCode to activate.{RESET}")
+        return result
+
+    elif choice_num == free_idx:
+        print(f"\n{YELLOW}Using free community models.{RESET}")
+        mcp_env = config.get("mcp", {}).get("roampal-core", {}).get("environment", {})
+        for key in ["ROAMPAL_SIDECAR_URL", "ROAMPAL_SIDECAR_KEY", "ROAMPAL_SIDECAR_MODEL"]:
+            mcp_env.pop(key, None)
+        config_path.write_text(json.dumps(config, indent=2))
+        return False
+
+    elif choice_num == cancel_idx:
+        print(f"\n{YELLOW}Cancelled. Run 'roampal sidecar setup' when ready.{RESET}")
+        return False
+
+    else:
+        print(f"\n{YELLOW}Invalid choice.{RESET}")
+        return False
 
 
 def _write_sidecar_model(config: dict, config_path: Path, chosen: dict) -> bool:
@@ -2525,134 +3035,20 @@ def _write_sidecar_model(config: dict, config_path: Path, chosen: dict) -> bool:
     return True
 
 
-def _prompt_sidecar_setup(force: bool = False):
-    """Interactive sidecar model selection during init.
-
-    Shows available scoring models (Zen, local, API, custom) and lets
-    the user choose. Called during init when OpenCode is detected.
-
-    Args:
-        force: If True, always show prompt even if already configured.
-    """
+def _prompt_smart_onboarding(force: bool = False):
+    """Sidecar model selection during init. Delegates to unified picker."""
     config_path = _get_opencode_config_path()
     if not config_path.exists():
-        return  # OpenCode not configured yet
+        print(f"{RED}No opencode.json found{RESET}")
+        return
 
     config = json.loads(config_path.read_text())
-    mcp_env = config.get("mcp", {}).get("roampal-core", {}).get("environment", {})
 
-    # Idempotency: skip if already configured (unless force)
-    has_model = bool(mcp_env.get("ROAMPAL_SIDECAR_URL"))
-    if not force and has_model:
-        model = mcp_env.get("ROAMPAL_SIDECAR_MODEL", "unknown")
-        url = mcp_env.get("ROAMPAL_SIDECAR_URL", "")
-        print(f"  {GREEN}[OK] Sidecar scorer: {model} ({url}){RESET}")
-        return
+    print(f"\n{BOLD}Memory scoring setup:{RESET}")
+    print(f"  Roampal learns what works by scoring exchanges in the background.")
+    print(f"  This requires a small AI model — it doesn't need to be smart.")
 
-    # Non-interactive: skip prompts, use Zen default
-    if not _is_interactive():
-        print(f"  {GREEN}[OK] Sidecar scorer: free community models (default){RESET}")
-        return
-
-    # Detect available models
-    ollama_models = _detect_ollama_models()
-    local_models = _detect_local_servers()
-    api_models = _detect_api_models(config)
-
-    # Display the sidecar explanation box (ASCII-safe for Windows cp1252)
-    print(f"""
-{BLUE}+-----------------------------------------------------------+
-|  Memory Scoring                                           |
-|                                                           |
-|  Roampal learns what works by scoring your exchanges      |
-|  in the background. This uses a small AI model -- it      |
-|  doesn't need to be smart or expensive. A cheap local     |
-|  model works great for this.                              |
-+-----------------------------------------------------------+{RESET}
-
-{BOLD}Available scoring models:{RESET}
-""")
-
-    # Build numbered menu
-    all_options = []  # Each entry: {display, ...model_data}
-
-    # Option 1: Zen (always)
-    print(f"  {BOLD}[1]{RESET} Free community models (default, no setup needed)")
-    print(f"      Best-effort, may be unreliable")
-    all_options.append({"choice": "zen"})
-
-    # Local models: Ollama
-    if ollama_models or local_models:
-        print(f"\n  {GREEN}Local models detected:{RESET}")
-
-    if ollama_models:
-        for m in ollama_models:
-            idx = len(all_options) + 1
-            size_str = f", {m['size_gb']} GB" if m.get('size_gb') else ""
-            print(f"  {BOLD}[{idx}]{RESET} {m['name']} (Ollama{size_str})")
-            all_options.append({**m, "choice": "local"})
-
-    # Local models: other servers
-    if local_models:
-        for m in local_models:
-            idx = len(all_options) + 1
-            print(f"  {BOLD}[{idx}]{RESET} {m['name']} ({m['server_label']}, port {m['port']})")
-            all_options.append({**m, "choice": "local"})
-
-    # API models from config
-    if api_models:
-        print(f"\n  {GREEN}From your config:{RESET}")
-        for m in api_models:
-            idx = len(all_options) + 1
-            key_str = ", API key ok" if m.get('has_key') else ""
-            print(f"  {BOLD}[{idx}]{RESET} {m['display']}{key_str}")
-            all_options.append({**m, "choice": "api"})
-
-    # Custom option
-    print(f"\n  {BOLD}[C]{RESET} Use a custom API endpoint (bring your own key)")
-
-    # Prompt
-    try:
-        raw = input(f"\nChoose [1-{len(all_options)}/C] or press Enter for default: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print(f"\n  Using free community models (default).")
-        return
-
-    if not raw or raw == "1":
-        # Zen default — nothing to configure
-        print(f"\n  {GREEN}Using free community models.{RESET} No configuration needed.")
-        return
-
-    if raw == "c":
-        _prompt_custom_endpoint(config, config_path)
-        return
-
-    # Numeric choice
-    try:
-        idx = int(raw) - 1
-        if idx < 0 or idx >= len(all_options):
-            print(f"  {RED}Invalid choice. Using default (free community models).{RESET}")
-            return
-    except ValueError:
-        print(f"  {RED}Invalid choice. Using default (free community models).{RESET}")
-        return
-
-    chosen = all_options[idx]
-
-    if chosen["choice"] == "zen":
-        print(f"\n  {GREEN}Using free community models.{RESET} No configuration needed.")
-        return
-
-    # Write the chosen model's URL/KEY/MODEL to opencode.json
-    if not _write_sidecar_model(config, config_path, chosen):
-        print(f"  {RED}Failed to write sidecar config. Run {BLUE}roampal init --opencode{RESET} first.{RESET}")
-        return
-
-    display_name = chosen.get("display", chosen.get("name", "unknown"))
-    url = config.get("mcp", {}).get("roampal-core", {}).get("environment", {}).get("ROAMPAL_SIDECAR_URL", "")
-    print(f"\n  {GREEN}Sidecar configured!{RESET}")
-    print(f"    Model: {display_name}")
-    print(f"    URL:   {url}")
+    _sidecar_model_picker(config, config_path)
 
 
 def cmd_sidecar(args):
@@ -2691,134 +3087,34 @@ def _cmd_sidecar_status(args):
         if mcp_env.get("ROAMPAL_SIDECAR_KEY"):
             print(f"  Key: {'*' * 8}...")
     else:
-        print(f"  {YELLOW}No sidecar configured - using Zen (free, best-effort) only{RESET}")
-        print(f"  Run {BLUE}roampal sidecar setup{RESET} to configure a reliable scorer")
+        print(
+            f"  {YELLOW}No sidecar configured - using Zen (free, best-effort) only{RESET}"
+        )
+        print(
+            f"  Run {BLUE}roampal sidecar setup{RESET} to configure a reliable scorer"
+        )
 
 
 def _cmd_sidecar_setup(args):
-    """Auto-detect and configure a sidecar scorer.
+    """Configure sidecar scorer. Delegates to unified model picker.
 
-    Expanded in v0.3.7 to match init-time setup: detects Ollama, local
-    inference servers (LM Studio, LocalAI, etc.), API models from config,
-    and offers a custom endpoint option.
+    v0.4.9: Single code path shared with init onboarding.
     """
     config_path = _get_opencode_config_path()
-    if not config_path.exists():
-        print(f"{RED}No opencode.json found at {config_path}{RESET}")
-        print(f"Run {BLUE}roampal init --opencode{RESET} first")
+    if not config_path or not config_path.exists():
+        print(f"{RED}No sidecar config found.{RESET}")
+        print(f"  Run {BLUE}roampal init --opencode{RESET} to create the config,")
+        print(f"  then run {BLUE}roampal sidecar setup{RESET} again.")
         return
 
     config = json.loads(config_path.read_text())
 
-    # Detect available models
-    print(f"{BOLD}Detecting available models...{RESET}")
-    ollama_models = _detect_ollama_models()
-    local_models = _detect_local_servers()
-    api_models = _detect_api_models(config)
-
-    # Build numbered menu: Zen → local → API → custom
-    all_options = []
-
-    print(f"\n{BOLD}Available scoring models:{RESET}\n")
-
-    # Option 1: Zen (always)
-    print(f"  {BOLD}[1]{RESET} Free community models (default, no setup needed)")
-    print(f"      Best-effort, may be unreliable")
-    all_options.append({"choice": "zen"})
-
-    # Local models: Ollama
-    if ollama_models or local_models:
-        print(f"\n  {GREEN}Local models detected:{RESET}")
-
-    if ollama_models:
-        for m in ollama_models:
-            idx = len(all_options) + 1
-            size_str = f", {m['size_gb']} GB" if m.get('size_gb') else ""
-            print(f"  {BOLD}[{idx}]{RESET} {m['name']} (Ollama{size_str})")
-            all_options.append({**m, "choice": "local"})
-
-    # Local models: other servers
-    if local_models:
-        for m in local_models:
-            idx = len(all_options) + 1
-            print(f"  {BOLD}[{idx}]{RESET} {m['name']} ({m['server_label']}, port {m['port']})")
-            all_options.append({**m, "choice": "local"})
-
-    # API models from config
-    if api_models:
-        print(f"\n  {GREEN}From your config:{RESET}")
-        for m in api_models:
-            idx = len(all_options) + 1
-            key_str = ", API key ok" if m.get('has_key') else ""
-            print(f"  {BOLD}[{idx}]{RESET} {m['display']}{key_str}")
-            all_options.append({**m, "choice": "api"})
-
-    # Custom option
-    print(f"\n  {BOLD}[C]{RESET} Use a custom API endpoint (bring your own key)")
-
-    # Auto mode or non-interactive — pick first non-Zen model
-    if getattr(args, 'auto', False) or not _is_interactive():
-        non_zen = [o for o in all_options if o.get("choice") != "zen"]
-        if non_zen:
-            choice = non_zen[0]
-            display_name = choice.get("display", choice.get("name", "unknown"))
-            print(f"\n{GREEN}Auto-selected: {display_name}{RESET}")
-        else:
-            print(f"\n{YELLOW}No models found. Using free community models.{RESET}")
-            return
-    else:
-        # Interactive — ask user
-        try:
-            raw = input(f"\nChoose [1-{len(all_options)}/C] or press Enter for default: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n{YELLOW}Cancelled. Using free community models.{RESET}")
-            return
-
-        if not raw or raw == "1":
-            # Clear existing sidecar config if resetting to Zen
-            mcp_env = config.get("mcp", {}).get("roampal-core", {}).get("environment", {})
-            changed = False
-            for key in ["ROAMPAL_SIDECAR_FALLBACK", "ROAMPAL_SIDECAR_URL", "ROAMPAL_SIDECAR_KEY", "ROAMPAL_SIDECAR_MODEL"]:
-                if key in mcp_env:
-                    del mcp_env[key]
-                    changed = True
-            if changed:
-                config_path.write_text(json.dumps(config, indent=2))
-            print(f"\n{GREEN}Using free community models.{RESET} No configuration needed.")
-            print(f"\n{YELLOW}Restart OpenCode to activate.{RESET}")
-            return
-
-        if raw == "c":
-            if _prompt_custom_endpoint(config, config_path):
-                print(f"\n{YELLOW}Restart OpenCode to activate.{RESET}")
-            return
-
-        try:
-            idx = int(raw) - 1
-            if idx < 0 or idx >= len(all_options):
-                print(f"{RED}Invalid choice.{RESET}")
-                return
-            choice = all_options[idx]
-        except ValueError:
-            print(f"{RED}Invalid choice.{RESET}")
-            return
-
-        if choice["choice"] == "zen":
-            print(f"\n{GREEN}Using free community models.{RESET} No configuration needed.")
-            return
-
-    # Write the chosen model's URL/KEY/MODEL to opencode.json
-    if not _write_sidecar_model(config, config_path, choice):
-        print(f"{RED}roampal-core MCP not configured. Run {BLUE}roampal init --opencode{RESET} first.{RESET}")
+    if "roampal-core" not in config.get("mcp", {}):
+        print(f"{RED}roampal-core not configured yet.{RESET}")
+        print(f"  Run {BLUE}roampal init --opencode{RESET} first.")
         return
 
-    display_name = choice.get("display", choice.get("name", "unknown"))
-    url = config.get("mcp", {}).get("roampal-core", {}).get("environment", {}).get("ROAMPAL_SIDECAR_URL", "")
-    print(f"\n{GREEN}Sidecar configured!{RESET}")
-    print(f"  Model: {display_name}")
-    print(f"  URL:   {url}")
-    print(f"  Config: {config_path}")
-    print(f"\n{YELLOW}Restart OpenCode to activate.{RESET}")
+    _sidecar_model_picker(config, config_path)
 
 
 def _cmd_sidecar_disable(args):
@@ -2831,7 +3127,12 @@ def _cmd_sidecar_disable(args):
     config = json.loads(config_path.read_text())
     mcp_env = config.get("mcp", {}).get("roampal-core", {}).get("environment", {})
 
-    sidecar_keys = ["ROAMPAL_SIDECAR_FALLBACK", "ROAMPAL_SIDECAR_URL", "ROAMPAL_SIDECAR_KEY", "ROAMPAL_SIDECAR_MODEL"]
+    sidecar_keys = [
+        "ROAMPAL_SIDECAR_FALLBACK",
+        "ROAMPAL_SIDECAR_URL",
+        "ROAMPAL_SIDECAR_KEY",
+        "ROAMPAL_SIDECAR_MODEL",
+    ]
     found = any(k in mcp_env for k in sidecar_keys)
     if not found:
         print(f"{YELLOW}No sidecar configuration found.{RESET}")
@@ -2840,7 +3141,9 @@ def _cmd_sidecar_disable(args):
     for key in sidecar_keys:
         mcp_env.pop(key, None)
     config_path.write_text(json.dumps(config, indent=2))
-    print(f"{GREEN}Sidecar configuration removed. Reverted to free community models.{RESET}")
+    print(
+        f"{GREEN}Sidecar configuration removed. Reverted to free community models.{RESET}"
+    )
     print(f"{YELLOW}Restart OpenCode to take effect.{RESET}")
 
 
@@ -2859,9 +3162,9 @@ def _cmd_sidecar_test(args):
 
     print()
     print(f"Sending test exchange:")
-    print(f"  User: \"I'm working on a Python project called Roampal\"")
-    print(f"  Assistant: \"I'll help with your Roampal project\"")
-    print(f"  Follow-up: \"Thanks, that's exactly right\"")
+    print(f'  User: "I\'m working on a Python project called Roampal"')
+    print(f'  Assistant: "I\'ll help with your Roampal project"')
+    print(f'  Follow-up: "Thanks, that\'s exactly right"')
     print()
 
     result = test_sidecar_scoring()
@@ -2931,56 +3234,125 @@ examples:
   roampal init --no-input       Non-interactive setup (CI/scripts)
   roampal status --json         Machine-readable status
   roampal stats --json          Machine-readable statistics""",
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"roampal {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
     # init command
-    init_parser = subparsers.add_parser("init", help="Initialize Roampal for Claude Code / OpenCode")
-    init_parser.add_argument("--dev", action="store_true", help="Initialize for DEV mode (separate data directory)")
-    init_parser.add_argument("--claude-code", action="store_true", help="Configure Claude Code only (skip auto-detect)")
-    init_parser.add_argument("--cursor", action="store_true", help="Configure Cursor only (skip auto-detect)")
-    init_parser.add_argument("--opencode", action="store_true", help="Configure OpenCode only (skip auto-detect)")
-    init_parser.add_argument("--force", "-f", action="store_true", help="Force overwrite existing config")
-    init_parser.add_argument("--no-input", action="store_true", help="Non-interactive mode (skip all prompts, use defaults)")
+    init_parser = subparsers.add_parser(
+        "init", help="Initialize Roampal for Claude Code / OpenCode"
+    )
+    init_parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="Initialize for DEV mode (separate data directory)",
+    )
+    init_parser.add_argument(
+        "--claude-code",
+        action="store_true",
+        help="Configure Claude Code only (skip auto-detect)",
+    )
+    init_parser.add_argument(
+        "--cursor", action="store_true", help="Configure Cursor only (skip auto-detect)"
+    )
+    init_parser.add_argument(
+        "--opencode",
+        action="store_true",
+        help="Configure OpenCode only (skip auto-detect)",
+    )
+    init_parser.add_argument(
+        "--force", "-f", action="store_true", help="Force overwrite existing config"
+    )
+    init_parser.add_argument(
+        "--no-input",
+        action="store_true",
+        help="Non-interactive mode (skip all prompts, use defaults)",
+    )
 
     # start command
     start_parser = subparsers.add_parser("start", help="Start the memory server")
     start_parser.add_argument("--host", default="127.0.0.1", help="Server host")
     start_parser.add_argument("--port", type=int, default=27182, help="Server port")
-    start_parser.add_argument("--dev", action="store_true", help="Dev mode - use separate data directory")
+    start_parser.add_argument(
+        "--dev", action="store_true", help="Dev mode - use separate data directory"
+    )
 
     # stop command
     stop_parser = subparsers.add_parser("stop", help="Stop the memory server")
-    stop_parser.add_argument("--port", type=int, default=None, help="Server port (default: 27182 prod, 27183 dev)")
+    stop_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Server port (default: 27182 prod, 27183 dev)",
+    )
     stop_parser.add_argument("--dev", action="store_true", help="Stop dev server")
 
     # status command
     status_parser = subparsers.add_parser("status", help="Check server status")
     status_parser.add_argument("--host", default="127.0.0.1", help="Server host")
-    status_parser.add_argument("--port", type=int, default=None, help="Server port (default: 27182 prod, 27183 dev)")
-    status_parser.add_argument("--dev", action="store_true", help="Check dev server status")
-    status_parser.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON (for scripting)")
+    status_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Server port (default: 27182 prod, 27183 dev)",
+    )
+    status_parser.add_argument(
+        "--dev", action="store_true", help="Check dev server status"
+    )
+    status_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output as JSON (for scripting)",
+    )
 
     # stats command
     stats_parser = subparsers.add_parser("stats", help="Show memory statistics")
     stats_parser.add_argument("--host", default="127.0.0.1", help="Server host")
-    stats_parser.add_argument("--port", type=int, default=None, help="Server port (default: 27182 prod, 27183 dev)")
-    stats_parser.add_argument("--dev", action="store_true", help="Show dev server stats")
-    stats_parser.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON (for scripting)")
+    stats_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Server port (default: 27182 prod, 27183 dev)",
+    )
+    stats_parser.add_argument(
+        "--dev", action="store_true", help="Show dev server stats"
+    )
+    stats_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output as JSON (for scripting)",
+    )
 
     # ingest command
-    ingest_parser = subparsers.add_parser("ingest", help="Ingest a document into the books collection")
+    ingest_parser = subparsers.add_parser(
+        "ingest", help="Ingest a document into the books collection"
+    )
     ingest_parser.add_argument("file", help="File to ingest (.txt, .md, .pdf)")
     ingest_parser.add_argument("--title", help="Document title (defaults to filename)")
-    ingest_parser.add_argument("--chunk-size", type=int, default=1000, help="Characters per chunk (default: 1000)")
-    ingest_parser.add_argument("--chunk-overlap", type=int, default=200, help="Overlap between chunks (default: 200)")
-    ingest_parser.add_argument("--dev", action="store_true", help="Dev mode - use separate data directory")
+    ingest_parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=1000,
+        help="Characters per chunk (default: 1000)",
+    )
+    ingest_parser.add_argument(
+        "--chunk-overlap",
+        type=int,
+        default=200,
+        help="Overlap between chunks (default: 200)",
+    )
+    ingest_parser.add_argument(
+        "--dev", action="store_true", help="Dev mode - use separate data directory"
+    )
 
     # remove command
-    remove_parser = subparsers.add_parser("remove", help="Remove a book from the books collection")
+    remove_parser = subparsers.add_parser(
+        "remove", help="Remove a book from the books collection"
+    )
     remove_parser.add_argument("title", help="Title of the book to remove")
     remove_parser.add_argument("--dev", action="store_true", help="Use dev server")
 
@@ -2988,41 +3360,117 @@ examples:
     books_parser = subparsers.add_parser("books", help="List all books in memory")
 
     # score command (v0.3.6)
-    score_parser = subparsers.add_parser("score", help="Score the last exchange using sidecar")
-    score_parser.add_argument("--from-hook", action="store_true", help="Read Stop hook event data from stdin")
-    score_parser.add_argument("--session-id", type=str, default=None, help="Claude Code session ID (transcript filename)")
-    score_parser.add_argument("--transcript", type=str, default=None, help="Direct path to transcript file")
-    score_parser.add_argument("--last", action="store_true", help="Score the most recent exchange manually")
+    score_parser = subparsers.add_parser(
+        "score", help="Score the last exchange using sidecar"
+    )
+    score_parser.add_argument(
+        "--from-hook", action="store_true", help="Read Stop hook event data from stdin"
+    )
+    score_parser.add_argument(
+        "--session-id",
+        type=str,
+        default=None,
+        help="Claude Code session ID (transcript filename)",
+    )
+    score_parser.add_argument(
+        "--transcript", type=str, default=None, help="Direct path to transcript file"
+    )
+    score_parser.add_argument(
+        "--last", action="store_true", help="Score the most recent exchange manually"
+    )
     score_parser.add_argument("--dev", action="store_true", help="Use dev server")
     score_parser.add_argument("--port", type=int, default=None, help="Server port")
 
     # summarize command (v0.3.6)
-    summarize_parser = subparsers.add_parser("summarize", help="Summarize existing long memories")
-    summarize_parser.add_argument("--dry-run", action="store_true", help="Preview without making changes")
-    summarize_parser.add_argument("--max-chars", type=int, default=400, help="Summarize memories over this length (default: 400)")
-    summarize_parser.add_argument("--collection", choices=["working", "history"], help="Target specific collection")
-    summarize_parser.add_argument("--limit", type=int, default=None, help="Max memories to summarize (for batching)")
+    summarize_parser = subparsers.add_parser(
+        "summarize", help="Summarize existing long memories"
+    )
+    summarize_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview without making changes"
+    )
+    summarize_parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=400,
+        help="Summarize memories over this length (default: 400)",
+    )
+    summarize_parser.add_argument(
+        "--collection",
+        choices=["working", "history"],
+        help="Target specific collection",
+    )
+    summarize_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Max memories to summarize (for batching)",
+    )
     summarize_parser.add_argument("--dev", action="store_true", help="Use dev server")
     summarize_parser.add_argument("--port", type=int, default=None, help="Server port")
 
     # context command (v0.3.6)
-    context_parser = subparsers.add_parser("context", help="Output recent exchange context")
-    context_parser.add_argument("--recent-exchanges", action="store_true", help="Output last 4 exchange summaries")
+    context_parser = subparsers.add_parser(
+        "context", help="Output recent exchange context"
+    )
+    context_parser.add_argument(
+        "--recent-exchanges",
+        action="store_true",
+        help="Output last 4 exchange summaries",
+    )
     context_parser.add_argument("--dev", action="store_true", help="Use dev server")
     context_parser.add_argument("--port", type=int, default=None, help="Server port")
 
     # sidecar command (v0.3.7)
-    sidecar_parser = subparsers.add_parser("sidecar", help="Configure sidecar scoring model")
+    sidecar_parser = subparsers.add_parser(
+        "sidecar", help="Configure sidecar scoring model"
+    )
     sidecar_sub = sidecar_parser.add_subparsers(dest="sidecar_command")
-    sidecar_setup = sidecar_sub.add_parser("setup", help="Auto-detect and configure a scorer")
-    sidecar_setup.add_argument("--auto", action="store_true", help="Auto-select best model (no prompts)")
+    sidecar_setup = sidecar_sub.add_parser(
+        "setup", help="Auto-detect and configure a scorer"
+    )
+    sidecar_setup.add_argument(
+        "--auto", action="store_true", help="Smart hardware-aware recommendations"
+    )
     sidecar_sub.add_parser("status", help="Show current sidecar configuration")
     sidecar_sub.add_parser("test", help="Test sidecar with sample exchange")
     sidecar_sub.add_parser("disable", help="Remove sidecar fallback")
 
+    # retag command (v0.4.9)
+    retag_parser = subparsers.add_parser(
+        "retag", help="Re-extract tags on memories using sidecar LLM"
+    )
+    retag_parser.add_argument(
+        "--collection",
+        choices=["working", "history", "patterns", "memory_bank", "all"],
+        default="all",
+        help="Which collection to retag (default: all)",
+    )
+    retag_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum number of memories to retag (for testing)",
+    )
+    retag_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying memories",
+    )
+    retag_parser.add_argument(
+        "--model",
+        type=str,
+        help="Specific model to use (default: uses configured sidecar)",
+    )
+    retag_parser.add_argument("--dev", action="store_true", help="Use dev server")
+    retag_parser.add_argument("--port", type=int, default=None, help="Server port")
+
     # doctor command
-    doctor_parser = subparsers.add_parser("doctor", help="Diagnose installation and configuration")
-    doctor_parser.add_argument("--dev", action="store_true", help="Check dev mode configuration")
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="Diagnose installation and configuration"
+    )
+    doctor_parser.add_argument(
+        "--dev", action="store_true", help="Check dev mode configuration"
+    )
 
     # help command (alias for --help)
     subparsers.add_parser("help", help="Show this help message")
@@ -3031,7 +3479,7 @@ examples:
 
     # Set global non-interactive flag from --no-input
     global _NO_INPUT
-    if getattr(args, 'no_input', False):
+    if getattr(args, "no_input", False):
         _NO_INPUT = True
 
     # Dispatch commands — functions return exit codes (0=success, 1=failure)
@@ -3059,6 +3507,8 @@ examples:
         cmd_summarize(args)
     elif args.command == "context":
         cmd_context(args)
+    elif args.command == "retag":
+        cmd_retag(args)
     elif args.command == "sidecar":
         cmd_sidecar(args)
     elif args.command == "doctor":

@@ -1,8 +1,8 @@
 """
 Tag Migration — Backfill noun_tags on existing memories for v0.4.5.
 
-Uses REGEX ONLY for extraction — fast, no sidecar dependency, works for all users.
-Resumable: progress saved after every batch. Interruption-safe.
+v0.4.9: Uses LLM extraction if sidecar available, skips if not (no regex fallback).
+Matches benchmark architecture (LLM-only tags). Resumable: progress saved after every batch.
 
 Two trigger points:
 - `roampal init --force` -> runs synchronously with progress bar
@@ -11,11 +11,24 @@ Two trigger points:
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .tag_service import extract_tags_regex
+# v0.4.9: Sidecar LLM extraction — only for OpenCode (Claude Code has no sidecar)
+_platform = os.environ.get("ROAMPAL_PLATFORM", "")
+if _platform == "opencode":
+    try:
+        from roampal.sidecar_service import extract_tags
+
+        SIDECAR_AVAILABLE = True
+    except ImportError:
+        SIDECAR_AVAILABLE = False
+        extract_tags = None
+else:
+    SIDECAR_AVAILABLE = False
+    extract_tags = None
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +84,7 @@ class TagMigration:
                     continue
 
                 items = collection_obj.get(
-                    limit=10000,
-                    include=["metadatas", "documents"]
+                    limit=10000, include=["metadatas", "documents"]
                 )
             except Exception as e:
                 logger.warning(f"Failed to read {coll_name} for migration: {e}")
@@ -99,12 +111,27 @@ class TagMigration:
 
             # Process in batches
             for batch_start in range(0, len(needs_tags), self.BATCH_SIZE):
-                batch = needs_tags[batch_start:batch_start + self.BATCH_SIZE]
+                batch = needs_tags[batch_start : batch_start + self.BATCH_SIZE]
 
                 for doc_id, content, meta in batch:
                     try:
-                        text = content or (meta or {}).get("text", "") or (meta or {}).get("content", "")
-                        tags = extract_tags_regex(text)
+                        text = (
+                            content
+                            or (meta or {}).get("text", "")
+                            or (meta or {}).get("content", "")
+                        )
+
+                        # v0.4.9: Use LLM extraction if available, skip if not (no regex)
+                        tags = []
+                        if extract_tags:
+                            try:
+                                tags = extract_tags(text) or []
+                            except Exception as llm_err:
+                                logger.debug(
+                                    f"LLM tag extraction failed for {doc_id}: {llm_err}"
+                                )
+                                # Skip this memory, don't use regex
+                                tags = []
 
                         if tags:
                             adapter.update_fragment_metadata(
@@ -137,7 +164,9 @@ class TagMigration:
                 pass
 
         if show_progress:
-            print(f"  Tagged {stats['total_tagged']} memories ({stats['errors']} errors)")
+            print(
+                f"  Tagged {stats['total_tagged']} memories ({stats['errors']} errors)"
+            )
 
         logger.info(
             f"Tag migration complete: {stats['total_tagged']} tagged, "

@@ -8,86 +8,17 @@ import json
 import pytest
 from unittest.mock import MagicMock
 
-from roampal.backend.modules.memory.tag_service import (
-    TagService,
-    extract_tags_regex,
-)
-
-
-class TestExtractTagsRegex:
-    """Test regex-based tag extraction."""
-
-    def test_proper_nouns(self):
-        """Capitalized words (not sentence starters) are extracted."""
-        tags = extract_tags_regex("I met Calvin in Boston yesterday.")
-        assert "calvin" in tags
-        assert "boston" in tags
-
-    def test_sentence_starters_filtered(self):
-        """Common sentence starters are not extracted as tags."""
-        tags = extract_tags_regex("The quick brown fox. After that, nothing happened.")
-        assert "the" not in tags
-        assert "after" not in tags
-
-    def test_multi_word_proper_nouns(self):
-        """Consecutive capitalized words form multi-word tags."""
-        tags = extract_tags_regex("She works at New York University.")
-        assert "new york university" in tags
-
-    def test_quoted_strings(self):
-        """Quoted strings are extracted as tags."""
-        tags = extract_tags_regex('He mentioned "muscle car" in the conversation.')
-        assert "muscle car" in tags
-
-    def test_noise_words_filtered(self):
-        """Meta-words and generic terms are filtered out."""
-        tags = extract_tags_regex("The Source of the Answer is in the System.")
-        assert "source" not in tags
-        assert "answer" not in tags
-        assert "system" not in tags
-
-    def test_max_8_tags(self):
-        """Output capped at 8 tags."""
-        text = "Alice Bob Charlie David Eve Frank Grace Heidi Ivan Judy Karl."
-        tags = extract_tags_regex(text)
-        assert len(tags) <= 8
-
-    def test_sorted_by_length(self):
-        """Tags sorted by length descending (more specific first)."""
-        tags = extract_tags_regex('He likes "Ford Mustang" and Calvin.')
-        if len(tags) >= 2:
-            assert len(tags[0]) >= len(tags[1])
-
-    def test_empty_input(self):
-        tags = extract_tags_regex("")
-        assert tags == []
-
-    def test_short_input(self):
-        tags = extract_tags_regex("Hi")
-        assert tags == []
-
-    def test_dedup_substrings(self):
-        """If 'Ford Mustang' is a tag, 'Ford' alone is removed."""
-        tags = extract_tags_regex("Ford Mustang is a Ford car.")
-        multi_word = [t for t in tags if " " in t]
-        if "ford mustang" in tags:
-            assert "ford" not in tags or "ford" in [t for t in tags if " " in t]
-
-    def test_nationality_adjectives_filtered(self):
-        """Nationality adjectives (ending in -ian, -ish, etc.) are filtered."""
-        tags = extract_tags_regex("The American team played well.")
-        assert "american" not in tags
+from roampal.backend.modules.memory.tag_service import TagService
 
 
 class TestTagServiceExtract:
     """Test TagService.extract_tags() with LLM fallback."""
 
     def test_regex_fallback_when_no_llm(self):
-        """Without LLM fn, falls back to regex."""
+        """Without LLM fn, returns [] (no regex fallback in v0.4.9)."""
         service = TagService()
         tags = service.extract_tags("Calvin drove to Boston.")
-        assert "calvin" in tags
-        assert "boston" in tags
+        assert tags == []  # No LLM, no tags
 
     def test_llm_extraction_used_when_available(self):
         """LLM fn is called first when provided."""
@@ -98,19 +29,19 @@ class TestTagServiceExtract:
         assert "calvin" in tags
         assert "boston" in tags
 
-    def test_llm_failure_falls_back_to_regex(self):
-        """If LLM raises, falls back to regex."""
+    def test_llm_failure_returns_empty(self):
+        """If LLM raises, returns [] (no regex fallback in v0.4.9)."""
         llm_fn = MagicMock(side_effect=Exception("LLM unavailable"))
         service = TagService(llm_extract_fn=llm_fn)
         tags = service.extract_tags("Calvin drove to Boston.")
-        assert "calvin" in tags  # regex caught it
+        assert tags == []  # No regex fallback
 
-    def test_llm_returns_none_falls_back(self):
-        """If LLM returns None, falls back to regex."""
+    def test_llm_returns_none_returns_empty(self):
+        """If LLM returns None, returns [] (no regex fallback in v0.4.9)."""
         llm_fn = MagicMock(return_value=None)
         service = TagService(llm_extract_fn=llm_fn)
         tags = service.extract_tags("Calvin drove to Boston.")
-        assert "calvin" in tags
+        assert tags == []  # No regex fallback
 
     def test_llm_tags_normalized(self):
         """LLM tags are lowercased, deduped, noise filtered."""
@@ -124,7 +55,8 @@ class TestTagServiceExtract:
 
     def test_extracted_tags_registered_in_known_tags(self):
         """Tags are added to known_tags index after extraction."""
-        service = TagService()
+        llm_fn = MagicMock(return_value=["calvin", "joanna", "paris"])
+        service = TagService(llm_extract_fn=llm_fn)
         service.extract_tags("Calvin met Joanna in Paris.")
         assert "calvin" in service.known_tags or "joanna" in service.known_tags
 

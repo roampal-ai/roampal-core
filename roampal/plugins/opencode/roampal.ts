@@ -570,16 +570,16 @@ ${memoryInstructions}`
       })
     }
 
-    // 2. Zen free models (best-effort free tier)
-    //    Skipped when user configured a scoring model — they chose for a reason.
-    //    Zen routes through OpenCode's proxy which may log data.
-    if (!CUSTOM_SIDECAR_URL) {
-      const zenModels = ZEN_SCORING_MODELS.filter(m => m !== mainModel)
-      if (zenModels.length === 0) zenModels.push(...ZEN_SCORING_MODELS)
-      for (const m of zenModels) {
-        targets.push({ url: zenBaseURL, key: zenApiKey, model: m, label: `zen(${m})` })
+      // 2. Zen free models (best-effort free tier)
+      //    Skipped when user configured a scoring model — they chose for a reason.
+      //    Zen routes through OpenCode's proxy which may log data.
+      if (!CUSTOM_SIDECAR_URL) {
+        const zenModels = ZEN_SCORING_MODELS.filter(m => m !== mainModel)
+        if (zenModels.length === 0) zenModels.push(...ZEN_SCORING_MODELS)
+        for (const m of zenModels) {
+          targets.push({ url: zenBaseURL, key: zenApiKey, model: m, label: `zen(${m})` })
+        }
       }
-    }
 
     // Try each target in order. Skip to next on 404/500 (model removed or broken).
     // Retry same target on 429 (rate limit, temporary).
@@ -1180,12 +1180,29 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
 
       // Inject scoring status tag.
       const cached = cachedContext.get(sessionId)
-      const scoringStatusTag = scoringBroken
-        ? `[IMPORTANT — roampal scoring: BROKEN. The background scorer is down. Ask the user if they'd like you to run "roampal sidecar setup" to configure a local scorer. Do NOT run it without their permission. Their memories still work but scoring is paused until a scorer is configured.]`
-        : lastScorerLabel
-          ? `[roampal scoring: ok via ${lastScorerLabel}]`
-          : `[roampal scoring: initializing]`
-      output.system.push(scoringStatusTag)
+      
+      // v0.4.9: Better error messaging — show helpful info but minimize annoyance
+      let scoringStatusTag = ""
+      
+      if (scoringBroken) {
+        // Only show broken message once per session to avoid annoying popups
+        if (!sessionOnboarded.has(sessionId)) {
+          scoringStatusTag = `[Note: Memory scoring unavailable. Free models may be rate-limited. Run "roampal sidecar setup" for local model. Memories work without scoring.]`
+          sessionOnboarded.add(sessionId)
+          debugLog(`Showing sidecar setup hint for session ${sessionId} (once only)`)
+        } else {
+          // After first notification, show minimal status
+          scoringStatusTag = `[roampal scoring: unavailable]`
+        }
+      } else if (lastScorerLabel) {
+        scoringStatusTag = `[roampal scoring: ok via ${lastScorerLabel}]`
+      } else {
+        scoringStatusTag = `[roampal scoring: initializing]`
+      }
+      
+      if (scoringStatusTag) {
+        output.system.push(scoringStatusTag)
+      }
 
       // First-run onboarding — inject once per session to inform model about scoring setup.
       if (!sessionOnboarded.has(sessionId)) {

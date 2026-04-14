@@ -16,18 +16,43 @@ import json
 import logging
 import os
 import re
+import ssl
+import time
 import urllib.request
 import urllib.error
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
 # User-configurable sidecar (env vars override defaults)
 # Set ROAMPAL_SIDECAR_URL + ROAMPAL_SIDECAR_KEY + ROAMPAL_SIDECAR_MODEL
 # to use any OpenAI-compatible endpoint (Groq, Together, OpenRouter, etc.)
-CUSTOM_URL = os.environ.get("ROAMPAL_SIDECAR_URL", "")
+_raw_custom_url = os.environ.get("ROAMPAL_SIDECAR_URL", "")
 CUSTOM_KEY = os.environ.get("ROAMPAL_SIDECAR_KEY", "")
 CUSTOM_MODEL = os.environ.get("ROAMPAL_SIDECAR_MODEL", "")
+
+# v0.4.9: Validate custom URL scheme to prevent SSRF (file://, internal IPs)
+def _validate_sidecar_url(url: str) -> str:
+    """Validate ROAMPAL_SIDECAR_URL is a safe HTTP(S) URL."""
+    if not url:
+        return ""
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            logger.warning(
+                f"ROAMPAL_SIDECAR_URL has unsupported scheme '{parsed.scheme}' — ignoring"
+            )
+            return ""
+        return url
+    except Exception:
+        logger.warning("ROAMPAL_SIDECAR_URL is malformed — ignoring")
+        return ""
+
+CUSTOM_URL = _validate_sidecar_url(_raw_custom_url)
 
 # Zen free models — OpenAI-compatible API, no auth required
 ZEN_URL = "https://opencode.ai/zen/v1"
@@ -45,6 +70,85 @@ SUMMARIZE_MODEL = os.environ.get("ROAMPAL_SUMMARIZE_MODEL", "")
 # Ollama default (override with ROAMPAL_OLLAMA_URL)
 OLLAMA_URL = os.environ.get("ROAMPAL_OLLAMA_URL", "http://localhost:11434")
 
+# v0.4.9: SSL context for external HTTPS calls (Anthropic, Zen, custom endpoints)
+# Verifies certificates to prevent MITM attacks on API key-bearing requests.
+_ssl_context = ssl.create_default_context()
+
+
+def _is_localhost(url: str) -> bool:
+    """Check if URL points to localhost (no SSL needed)."""
+    from urllib.parse import urlparse
+
+    try:
+        host = urlparse(url).hostname or ""
+        return host in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+    except Exception:
+        return False
+
+
+# v0.4.9: Backend health tracking for robust sidecar
+@dataclass
+class BackendHealth:
+    """Tracks health status of a backend."""
+
+    last_success: Optional[datetime] = None
+    last_failure: Optional[datetime] = None
+    failure_count: int = 0
+    consecutive_failures: int = 0
+    total_calls: int = 0
+    avg_response_time: float = 0.0
+
+    def record_success(self, response_time: float):
+        self.last_success = datetime.now()
+        self.consecutive_failures = 0
+        self.total_calls += 1
+        # Simple moving average
+        self.avg_response_time = (
+            self.avg_response_time * (self.total_calls - 1) + response_time
+        ) / self.total_calls
+
+    def record_failure(self):
+        self.last_failure = datetime.now()
+        self.failure_count += 1
+        self.consecutive_failures += 1
+        self.total_calls += 1
+
+    def is_healthy(
+        self, max_consecutive_failures: int = 3, cooldown_minutes: int = 5
+    ) -> bool:
+        """Check if backend should be used."""
+        if self.consecutive_failures >= max_consecutive_failures:
+            if self.last_failure and datetime.now() - self.last_failure < timedelta(
+                minutes=cooldown_minutes
+            ):
+                return False
+        return True
+
+    def get_score(self) -> float:
+        """Calculate health score (0.0-1.0). Higher is better."""
+        if self.total_calls == 0:
+            return 0.5  # Neutral score for untested backends
+
+        success_rate = 1.0 - (self.failure_count / self.total_calls)
+        recency_bonus = 0.0
+        if self.last_success:
+            hours_since_success = (
+                datetime.now() - self.last_success
+            ).total_seconds() / 3600
+            recency_bonus = max(0, 0.3 * (1.0 - min(hours_since_success, 24) / 24))
+
+        return (success_rate * 0.7) + (recency_bonus * 0.3)
+
+
+# Global health tracking
+_backend_health: Dict[str, BackendHealth] = {
+    "custom": BackendHealth(),
+    "zen": BackendHealth(),
+    "ollama": BackendHealth(),
+    "lmstudio": BackendHealth(),
+    "haiku": BackendHealth(),
+}
+
 
 def _extract_json(text: str) -> Optional[Dict[str, Any]]:
     """Extract JSON from text that may contain markdown fences or other wrapping."""
@@ -55,7 +159,7 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
         pass
 
     # Strip markdown code fences (```json ... ```)
-    match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+    match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
     if match:
         try:
             return json.loads(match.group(1).strip())
@@ -63,7 +167,7 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
             pass
 
     # Try to find any JSON object in the text
-    match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+    match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
     if match:
         try:
             return json.loads(match.group(0))
@@ -77,39 +181,40 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
 # Backend 0: Custom OpenAI-compatible endpoint (user-configured)
 # ---------------------------------------------------------------------------
 
+
 def _call_custom(prompt: str, timeout: int = 15) -> Optional[Dict[str, Any]]:
     """Call user-configured OpenAI-compatible endpoint."""
     if not CUSTOM_URL or not CUSTOM_MODEL:
         return None
 
-    data = json.dumps({
-        "model": CUSTOM_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are part of a memory system. Return ONLY valid JSON."},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 800
-    }).encode("utf-8")
+    data = json.dumps(
+        {
+            "model": CUSTOM_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are part of a memory system. Return ONLY valid JSON.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 800,
+        }
+    ).encode("utf-8")
 
     headers = {"Content-Type": "application/json"}
     if CUSTOM_KEY:
         headers["Authorization"] = f"Bearer {CUSTOM_KEY}"
 
     req = urllib.request.Request(
-        f"{CUSTOM_URL}/chat/completions",
-        data=data,
-        headers=headers,
-        method="POST"
+        f"{CUSTOM_URL}/chat/completions", data=data, headers=headers, method="POST"
     )
 
+    # Use SSL verification for external endpoints; skip for localhost
+    _ctx = _ssl_context if not _is_localhost(CUSTOM_URL) else None
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ctx) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-            text = (
-                result.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-            )
+            text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
             if not text:
                 text = (
                     result.get("choices", [{}])[0]
@@ -131,19 +236,20 @@ def _call_custom(prompt: str, timeout: int = 15) -> Optional[Dict[str, Any]]:
 # Backend 1: Direct Anthropic API (requires ANTHROPIC_API_KEY)
 # ---------------------------------------------------------------------------
 
+
 def _call_haiku(prompt: str, timeout: int = 15) -> Optional[Dict[str, Any]]:
     """Direct Haiku API call. Fast (~3s), requires ANTHROPIC_API_KEY."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         return None
 
-    data = json.dumps({
-        "model": HAIKU_MODEL,
-        "max_tokens": 800,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
-    }).encode("utf-8")
+    data = json.dumps(
+        {
+            "model": HAIKU_MODEL,
+            "max_tokens": 800,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    ).encode("utf-8")
 
     req = urllib.request.Request(
         ANTHROPIC_API_URL,
@@ -151,13 +257,13 @@ def _call_haiku(prompt: str, timeout: int = 15) -> Optional[Dict[str, Any]]:
         headers={
             "Content-Type": "application/json",
             "x-api-key": api_key,
-            "anthropic-version": "2023-06-01"
+            "anthropic-version": "2023-06-01",
         },
-        method="POST"
+        method="POST",
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context) as resp:
             result = json.loads(resp.read().decode("utf-8"))
             text = ""
             for block in result.get("content", []):
@@ -179,35 +285,39 @@ def _call_haiku(prompt: str, timeout: int = 15) -> Optional[Dict[str, Any]]:
 # Backend 2: Zen free models (no auth, OpenAI-compatible)
 # ---------------------------------------------------------------------------
 
+
 def _call_zen(prompt: str, timeout: int = 10) -> Optional[Dict[str, Any]]:
     """Call Zen free models. Free, ~5s, no auth required."""
     for model_id in ZEN_MODELS:
         try:
-            data = json.dumps({
-                "model": model_id,
-                "messages": [
-                    {"role": "system", "content": "You are part of a memory system. Return ONLY valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                "max_tokens": 800
-            }).encode("utf-8")
+            data = json.dumps(
+                {
+                    "model": model_id,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are part of a memory system. Return ONLY valid JSON.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "max_tokens": 800,
+                }
+            ).encode("utf-8")
 
             req = urllib.request.Request(
                 f"{ZEN_URL}/chat/completions",
                 data=data,
                 headers={
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {ZEN_KEY}"
+                    "Authorization": f"Bearer {ZEN_KEY}",
                 },
-                method="POST"
+                method="POST",
             )
 
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
                 text = (
-                    result.get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
+                    result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 )
                 # Some reasoning models put content in reasoning_content
                 if not text:
@@ -244,6 +354,7 @@ def _call_zen(prompt: str, timeout: int = 10) -> Optional[Dict[str, Any]]:
 
 # LM Studio default port
 LMSTUDIO_URL = os.environ.get("ROAMPAL_LMSTUDIO_URL", "http://localhost:1234")
+
 
 def _call_local(prompt: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
     """
@@ -289,18 +400,25 @@ def _call_ollama_native(prompt: str, timeout: int = 30) -> Optional[Dict[str, An
         model = models[0]
 
     try:
-        data = json.dumps({
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"num_predict": 500}
-        }).encode("utf-8")
+        # v0.4.9: Add system prompt for JSON response (matches Zen/custom endpoints)
+        full_prompt = f"""You are part of a memory system. Return ONLY valid JSON.
+
+{prompt}"""
+
+        data = json.dumps(
+            {
+                "model": model,
+                "prompt": full_prompt,
+                "stream": False,
+                "options": {"num_predict": 500},
+            }
+        ).encode("utf-8")
 
         req = urllib.request.Request(
             f"{OLLAMA_URL}/api/generate",
             data=data,
             headers={"Content-Type": "application/json"},
-            method="POST"
+            method="POST",
         )
 
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -331,29 +449,30 @@ def _call_lmstudio(prompt: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        data = json.dumps({
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You are part of a memory system. Return ONLY valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 800
-        }).encode("utf-8")
+        data = json.dumps(
+            {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are part of a memory system. Return ONLY valid JSON.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "max_tokens": 800,
+            }
+        ).encode("utf-8")
 
         req = urllib.request.Request(
             f"{LMSTUDIO_URL}/v1/chat/completions",
             data=data,
             headers={"Content-Type": "application/json"},
-            method="POST"
+            method="POST",
         )
 
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-            text = (
-                result.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-            )
+            text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
             if text:
                 parsed = _extract_json(text)
                 if parsed:
@@ -364,43 +483,228 @@ def _call_lmstudio(prompt: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
         return None
 
 
-
 # ---------------------------------------------------------------------------
 # Unified call — tries backends in order
 # ---------------------------------------------------------------------------
 
-def _call_llm(prompt: str) -> Optional[Dict[str, Any]]:
+
+def _call_llm(prompt: str, timeout: int = 15) -> Optional[Dict[str, Any]]:
     """
-    Call the best available LLM backend.
+    Call the best available LLM backend with intelligent selection.
 
-    Fallback chain:
-    0. ROAMPAL_SIDECAR_URL configured → custom endpoint (user's choice)
-    1. ANTHROPIC_API_KEY → direct Haiku API (~3s, ~$0.001)
-    2. Zen free models (~5s, $0)
-    3. Ollama / LM Studio local (~5-14s, $0)
+    v0.4.9: Robust backend selection with health tracking.
+
+    IMPORTANT: If user has configured custom endpoint (ROAMPAL_SIDECAR_URL),
+    we use ONLY that endpoint. No silent fallbacks to Zen/Ollama/LM Studio.
+
+    For users without custom configuration, we use smart cascade:
+    zen → ollama → lmstudio (haiku excluded unless configured)
+
+    Returns JSON dict or None on failure.
     """
-    # 0. Custom endpoint (user-configured via roampal sidecar setup — takes priority)
-    result = _call_custom(prompt)
-    if result:
-        return result
+    start_time = time.time()
 
-    # 1. Zen free models (free, no auth)
-    result = _call_zen(prompt)
-    if result:
-        return result
+    # v0.4.9: RESPECT USER CONFIGURATION
+    # If user explicitly configured custom endpoint, use ONLY that
+    if CUSTOM_URL and CUSTOM_MODEL:
+        logger.debug("Using user-configured custom endpoint (no fallbacks)")
+        custom_timeout = timeout if _is_localhost(CUSTOM_URL) else min(15, timeout)
+        # Retry up to 3 times — local models occasionally return empty responses
+        for attempt in range(3):
+            try:
+                result = _call_custom(prompt, timeout=custom_timeout)
+                if result:
+                    _backend_health["custom"].record_success(time.time() - start_time)
+                    return result
+                if attempt < 2:
+                    logger.debug(f"Custom endpoint returned empty (attempt {attempt + 1}/3), retrying")
+            except Exception as e:
+                if attempt < 2:
+                    logger.debug(f"Custom endpoint error (attempt {attempt + 1}/3): {e}")
+                else:
+                    logger.error(f"Custom endpoint failed after 3 attempts: {e}")
+        _backend_health["custom"].record_failure()
+        logger.error("Custom endpoint failed after 3 attempts.")
+        return None
 
-    # 2. Ollama / LM Studio local (free, no network)
-    result = _call_local(prompt)
-    if result:
-        return result
+    # No custom configured - use smart cascade for users who haven't set up anything
+    # Get user-configured priority or use default
+    priority_env = os.environ.get("ROAMPAL_SIDECAR_PRIORITY", "")
+    if priority_env:
+        # Parse comma-separated list: "zen,ollama,lmstudio"
+        priority_order = [p.strip() for p in priority_env.split(",")]
+    else:
+        # v0.4.9: Default for users without custom config
+        # zen → ollama → lmstudio (haiku excluded - requires explicit config)
+        priority_order = ["zen", "ollama", "lmstudio"]
 
-    # v0.4.5: Haiku removed from auto-fallback chain.
-    # Never silently use ANTHROPIC_API_KEY — users must explicitly configure
-    # a sidecar via `roampal sidecar setup` (sets ROAMPAL_SIDECAR_URL).
-    # _call_haiku() still exists for explicit use (e.g. ROAMPAL_SUMMARIZE_MODEL).
+    # Filter to healthy backends first
+    healthy_backends = []
+    unhealthy_backends = []
 
-    logger.error("All sidecar backends failed")
+    for backend in priority_order:
+        # Special case: Haiku requires ANTHROPIC_API_KEY
+        if backend == "haiku" and not os.environ.get("ANTHROPIC_API_KEY"):
+            logger.debug("Skipping haiku - no ANTHROPIC_API_KEY")
+            continue
+
+        health = _backend_health.get(backend)
+        if health and health.is_healthy():
+            healthy_backends.append(backend)
+        else:
+            unhealthy_backends.append(backend)
+
+    # Try healthy backends in priority order
+    for backend in healthy_backends:
+        try:
+            result = None
+            backend_start = time.time()
+
+            if backend == "custom":
+                result = _call_custom(prompt, timeout=min(10, timeout))
+            elif backend == "haiku":
+                result = _call_haiku(prompt, timeout=min(8, timeout))
+            elif backend == "zen":
+                result = _call_zen(prompt, timeout=min(5, timeout))
+            elif backend == "ollama":
+                result = _call_ollama_native(prompt, timeout=min(12, timeout))
+            elif backend == "lmstudio":
+                result = _call_lmstudio(prompt, timeout=min(10, timeout))
+
+            if result:
+                response_time = time.time() - backend_start
+                _backend_health[backend].record_success(response_time)
+                total_time = time.time() - start_time
+                logger.debug(
+                    f"Sidecar succeeded with {backend} in {total_time:.1f}s (backend: {response_time:.1f}s)"
+                )
+                return result
+
+        except Exception as e:
+            _backend_health[backend].record_failure()
+            logger.debug(f"Backend {backend} failed: {e}")
+            continue
+
+    # If no healthy backends worked, try unhealthy ones as last resort
+    logger.warning(
+        "No healthy backends succeeded, trying unhealthy backends as last resort"
+    )
+    for backend in unhealthy_backends:
+        try:
+            result = None
+            if backend == "custom":
+                # Custom = user-configured. Give full timeout, not a penalty.
+                custom_t = timeout if _is_localhost(CUSTOM_URL) else min(15, timeout)
+                result = _call_custom(prompt, timeout=custom_t)
+            elif backend == "haiku":
+                result = _call_haiku(prompt, timeout=min(10, timeout))
+            elif backend == "zen":
+                result = _call_zen(prompt, timeout=min(5, timeout))
+            elif backend == "ollama":
+                result = _call_ollama_native(prompt, timeout=min(15, timeout))
+            elif backend == "lmstudio":
+                result = _call_lmstudio(prompt, timeout=min(10, timeout))
+
+            if result:
+                response_time = time.time() - start_time
+                _backend_health[backend].record_success(response_time)
+                logger.warning(
+                    f"Sidecar succeeded with previously unhealthy backend {backend} in {response_time:.1f}s"
+                )
+                return result
+
+        except Exception:
+            continue
+
+    total_time = time.time() - start_time
+    logger.error(f"All sidecar backends failed in {total_time:.1f}s")
+
+    # Log health status for debugging
+    health_status = []
+    for backend, health in _backend_health.items():
+        if health.total_calls > 0:
+            health_status.append(
+                f"{backend}: {health.get_score():.2f} ({health.consecutive_failures} fails)"
+            )
+    if health_status:
+        logger.debug(f"Backend health: {', '.join(health_status)}")
+
     return None
+
+
+def get_sidecar_status() -> Dict[str, Any]:
+    """
+    Get detailed sidecar status including backend health.
+
+    v0.4.9: Returns health scores, availability, and configuration.
+    """
+    status = {
+        "configured": {
+            "custom_url": bool(CUSTOM_URL),
+            "custom_model": bool(CUSTOM_MODEL),
+            "anthropic_key": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "summarize_model": bool(SUMMARIZE_MODEL),
+            "priority_set": bool(os.environ.get("ROAMPAL_SIDECAR_PRIORITY")),
+        },
+        "health": {},
+        "available_backends": [],
+    }
+
+    # Check each backend's health
+    for backend, health in _backend_health.items():
+        status["health"][backend] = {
+            "score": health.get_score(),
+            "total_calls": health.total_calls,
+            "failure_count": health.failure_count,
+            "consecutive_failures": health.consecutive_failures,
+            "last_success": health.last_success.isoformat()
+            if health.last_success
+            else None,
+            "last_failure": health.last_failure.isoformat()
+            if health.last_failure
+            else None,
+            "avg_response_time": health.avg_response_time,
+            "is_healthy": health.is_healthy(),
+        }
+
+        # Quick availability check for critical backends
+        if backend == "custom" and CUSTOM_URL and CUSTOM_MODEL:
+            status["available_backends"].append("custom")
+        elif backend == "haiku" and os.environ.get("ANTHROPIC_API_KEY"):
+            status["available_backends"].append("haiku")
+        elif backend == "ollama":
+            # Quick Ollama check
+            try:
+                import urllib.request
+
+                req = urllib.request.Request(f"{OLLAMA_URL}/api/tags", method="GET")
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    models_data = json.loads(resp.read().decode("utf-8"))
+                    if models_data.get("models"):
+                        status["available_backends"].append("ollama")
+            except Exception:
+                pass
+
+    return status
+
+
+def reset_sidecar_health(backend: Optional[str] = None):
+    """
+    Reset health tracking for one or all backends.
+
+    Useful when changing configuration or debugging.
+    """
+    global _backend_health
+
+    if backend:
+        if backend in _backend_health:
+            _backend_health[backend] = BackendHealth()
+            logger.info(f"Reset health for backend: {backend}")
+        else:
+            logger.warning(f"Unknown backend: {backend}")
+    else:
+        _backend_health = {k: BackendHealth() for k in _backend_health}
+        logger.info("Reset health for all backends")
 
 
 def get_backend_info() -> str:
@@ -412,18 +716,23 @@ def get_backend_info() -> str:
     # v0.4.5: Haiku removed from auto-detect — must be configured explicitly
     # Quick Zen check (chat endpoint — /models returns 403 outside OpenCode)
     try:
-        test_data = json.dumps({
-            "model": ZEN_MODELS[0],
-            "messages": [{"role": "user", "content": "test"}],
-            "max_tokens": 1
-        }).encode("utf-8")
+        test_data = json.dumps(
+            {
+                "model": ZEN_MODELS[0],
+                "messages": [{"role": "user", "content": "test"}],
+                "max_tokens": 1,
+            }
+        ).encode("utf-8")
         req = urllib.request.Request(
             f"{ZEN_URL}/chat/completions",
             data=test_data,
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {ZEN_KEY}"},
-            method="POST"
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {ZEN_KEY}",
+            },
+            method="POST",
         )
-        with urllib.request.urlopen(req, timeout=5):
+        with urllib.request.urlopen(req, timeout=5, context=_ssl_context):
             return "Zen free models"
     except Exception:
         pass
@@ -451,11 +760,9 @@ def get_backend_info() -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def summarize_and_score(
-    user_msg: str,
-    assistant_msg: str,
-    followup: str = "",
-    timeout: int = 30
+    user_msg: str, assistant_msg: str, followup: str = "", timeout: int = 30
 ) -> Optional[Dict[str, str]]:
     """
     Summarize an exchange and score its outcome.
@@ -486,22 +793,24 @@ Outcome: Based on the user's follow-up:
 - partial: helped but incomplete or needed adjustment
 - unknown: no clear signal"""
 
-    return _call_llm(prompt)
+    return _call_llm(prompt, timeout=timeout)
 
 
-def _call_anthropic_model(prompt: str, model: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
+def _call_anthropic_model(
+    prompt: str, model: str, timeout: int = 30
+) -> Optional[Dict[str, Any]]:
     """Call Anthropic API with a specific model. Requires ANTHROPIC_API_KEY."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         return None
 
-    data = json.dumps({
-        "model": model,
-        "max_tokens": 800,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
-    }).encode("utf-8")
+    data = json.dumps(
+        {
+            "model": model,
+            "max_tokens": 800,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    ).encode("utf-8")
 
     req = urllib.request.Request(
         ANTHROPIC_API_URL,
@@ -509,13 +818,13 @@ def _call_anthropic_model(prompt: str, model: str, timeout: int = 30) -> Optiona
         headers={
             "Content-Type": "application/json",
             "x-api-key": api_key,
-            "anthropic-version": "2023-06-01"
+            "anthropic-version": "2023-06-01",
         },
-        method="POST"
+        method="POST",
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context) as resp:
             result = json.loads(resp.read().decode("utf-8"))
             text = ""
             for block in result.get("content", []):
@@ -553,17 +862,21 @@ Respond with ONLY a JSON object:
 
     # v0.3.6: Main-model override — user explicitly opted in to expensive model
     if SUMMARIZE_MODEL and os.environ.get("ANTHROPIC_API_KEY"):
-        logger.info(f"Using ROAMPAL_SUMMARIZE_MODEL={SUMMARIZE_MODEL} for summarization")
+        logger.info(
+            f"Using ROAMPAL_SUMMARIZE_MODEL={SUMMARIZE_MODEL} for summarization"
+        )
         result = _call_anthropic_model(prompt, SUMMARIZE_MODEL)
         if result:
             return result.get("summary")
-        logger.warning(f"ROAMPAL_SUMMARIZE_MODEL ({SUMMARIZE_MODEL}) failed, falling back to sidecar chain")
+        logger.warning(
+            f"ROAMPAL_SUMMARIZE_MODEL ({SUMMARIZE_MODEL}) failed, falling back to sidecar chain"
+        )
 
-    result = _call_llm(prompt)
+    result = _call_llm(prompt, timeout=30)
     return result.get("summary") if result else None
 
 
-def extract_tags(text: str, timeout: int = 10) -> Optional[List[str]]:
+def extract_tags(text: str, timeout: int = 20) -> Optional[List[str]]:
     """
     Extract key noun tags from text using sidecar LLM.
 
@@ -585,7 +898,7 @@ def extract_tags(text: str, timeout: int = 10) -> Optional[List[str]]:
         "response, question, topic, context, information, correction, update, memory\n"
         "- Skip generic verbs/actions: said, told, mentioned, discussed, talked, asked\n"
         "- Focus on WHO and WHAT the text is about, not how it was communicated\n"
-        f"- Maximum 8 tags\n\nText: \"{text[:500]}\""
+        f'- Maximum 8 tags\n\nText: "{text[:500]}"'
     )
 
     result = _call_llm(prompt)
@@ -596,16 +909,31 @@ def extract_tags(text: str, timeout: int = 10) -> Optional[List[str]]:
     if not isinstance(tags, list):
         return None
 
-    skip = {"he", "she", "they", "it", "user", "assistant", "the user",
-            "the assistant", "i", "you", "we", "them", "his", "her"}
+    skip = {
+        "he",
+        "she",
+        "they",
+        "it",
+        "user",
+        "assistant",
+        "the user",
+        "the assistant",
+        "i",
+        "you",
+        "we",
+        "them",
+        "his",
+        "her",
+    }
     cleaned = [
-        t.lower().strip() for t in tags
+        t.lower().strip()
+        for t in tags
         if isinstance(t, str) and t.lower().strip() not in skip and len(t.strip()) >= 2
     ]
     return cleaned[:8] if cleaned else None
 
 
-def extract_facts(text: str, timeout: int = 15) -> Optional[List[str]]:
+def extract_facts(text: str, timeout: int = 30) -> Optional[List[str]]:
     """
     Extract atomic facts from text using sidecar LLM.
 
@@ -629,11 +957,11 @@ def extract_facts(text: str, timeout: int = 15) -> Optional[List[str]]:
         'BAD: "It was helpful" (no content)\n'
         "\n"
         'Return ONLY a JSON object: {"facts": ["fact 1", "fact 2"]}\n'
-        "If no useful facts, return: {\"facts\": []}\n"
-        f"\nText: \"{text[:800]}\""
+        'If no useful facts, return: {"facts": []}\n'
+        f'\nText: "{text[:800]}"'
     )
 
-    result = _call_llm(prompt)
+    result = _call_llm(prompt, timeout=timeout)
     if not result:
         return None
 
@@ -684,19 +1012,31 @@ FACTS: Key facts worth remembering — WHO/WHAT, specifics, max 150 chars each."
 
     # Validate summary
     summary = result.get("summary", "")
-    fields["summary"] = {"ok": isinstance(summary, str) and len(summary) > 0, "value": summary[:100] if summary else "(missing)"}
+    fields["summary"] = {
+        "ok": isinstance(summary, str) and len(summary) > 0,
+        "value": summary[:100] if summary else "(missing)",
+    }
 
     # Validate outcome
     outcome = result.get("outcome", "")
-    fields["outcome"] = {"ok": outcome in ("worked", "failed", "partial", "unknown"), "value": outcome or "(missing)"}
+    fields["outcome"] = {
+        "ok": outcome in ("worked", "failed", "partial", "unknown"),
+        "value": outcome or "(missing)",
+    }
 
     # Validate noun_tags
     noun_tags = result.get("noun_tags", [])
-    fields["noun_tags"] = {"ok": isinstance(noun_tags, list) and len(noun_tags) > 0, "value": noun_tags if isinstance(noun_tags, list) else "(missing)"}
+    fields["noun_tags"] = {
+        "ok": isinstance(noun_tags, list) and len(noun_tags) > 0,
+        "value": noun_tags if isinstance(noun_tags, list) else "(missing)",
+    }
 
     # Validate facts
     facts = result.get("facts", [])
-    fields["facts"] = {"ok": isinstance(facts, list) and len(facts) > 0, "value": facts if isinstance(facts, list) else "(missing)"}
+    fields["facts"] = {
+        "ok": isinstance(facts, list) and len(facts) > 0,
+        "value": facts if isinstance(facts, list) else "(missing)",
+    }
 
     passed = all(f["ok"] for f in fields.values())
     return {"passed": passed, "fields": fields}

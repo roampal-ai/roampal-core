@@ -28,15 +28,15 @@ from pathlib import Path
 # Handle pythonw.exe (GUI subsystem) where stdout/stderr are None.
 # This happens when the plugin spawns the server via pythonw to avoid console windows.
 if sys.stdout is None:
-    sys.stdout = open(os.devnull, 'w')
+    sys.stdout = open(os.devnull, "w")
 if sys.stderr is None:
-    sys.stderr = open(os.devnull, 'w')
+    sys.stderr = open(os.devnull, "w")
 
 # Fix Windows encoding issues with unicode characters (emojis, box drawing, etc.)
 if sys.platform == "win32":
     try:
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
     except (AttributeError, OSError):
         pass  # Ignore if already reconfigured or in test environment
 from datetime import datetime
@@ -50,10 +50,12 @@ import uvicorn
 
 # Import memory system and session manager
 from importlib.metadata import version as _pkg_version
+
 __version__ = _pkg_version("roampal")
 from roampal.backend.modules.memory import UnifiedMemorySystem
 from roampal.backend.modules.memory.scoring_service import wilson_score_lower
 from roampal.backend.modules.memory.unified_memory_system import ActionOutcome
+
 # v0.4.5: ContentGraph removed (KG deleted)
 from roampal.hooks import SessionManager
 
@@ -115,10 +117,20 @@ def _evict_stale_entries():
 
     evicted = len(stale_search_keys) + len(stale_injection_keys)
     if evicted:
-        logger.info(f"Cache eviction: {len(stale_search_keys)} search + {len(stale_injection_keys)} injection entries")
+        logger.info(
+            f"Cache eviction: {len(stale_search_keys)} search + {len(stale_injection_keys)} injection entries"
+        )
+
 
 # Cold start tag priorities - one fact per category (v0.2.7)
-TAG_PRIORITIES = ["identity", "preference", "goal", "project", "system_mastery", "agent_growth"]
+TAG_PRIORITIES = [
+    "identity",
+    "preference",
+    "goal",
+    "project",
+    "system_mastery",
+    "agent_growth",
+]
 
 
 def _first_sentence(text: str, max_chars: int = 300) -> str:
@@ -132,17 +144,17 @@ def _first_sentence(text: str, max_chars: int = 300) -> str:
     if not text:
         return ""
     # Find first sentence ending
-    for end_char in ['. ', '.\n', '!', '?']:
+    for end_char in [". ", ".\n", "!", "?"]:
         idx = text.find(end_char)
         if idx > 0:
-            first = text[:idx + 1].strip()
+            first = text[: idx + 1].strip()
             if len(first) <= max_chars:
                 return first
             break
     # No sentence ending found or sentence too long - truncate
     if len(text) <= max_chars:
         return text
-    return text[:max_chars - 3].rsplit(' ', 1)[0] + "..."
+    return text[: max_chars - 3].rsplit(" ", 1)[0] + "..."
 
 
 def _get_installed_version() -> str:
@@ -154,12 +166,15 @@ def _get_installed_version() -> str:
     """
     try:
         from importlib.metadata import version as _pkg_ver
+
         return _pkg_ver("roampal")
     except Exception:
         pass
     # Fallback: read __init__.py from disk (handles mid-session pip upgrades)
     try:
-        init_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "__init__.py")
+        init_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "__init__.py"
+        )
         with open(init_path, "r") as f:
             for line in f:
                 if line.startswith("__version__"):
@@ -181,7 +196,10 @@ def _check_for_updates() -> tuple:
     global _update_check_cache, _update_check_time
 
     # Return cached result if still fresh
-    if _update_check_cache is not None and (time.time() - _update_check_time) < _CACHE_TTL_SECONDS:
+    if (
+        _update_check_cache is not None
+        and (time.time() - _update_check_time) < _CACHE_TTL_SECONDS
+    ):
         return _update_check_cache
 
     current = _get_installed_version()
@@ -252,7 +270,9 @@ async def _build_cold_start_profile() -> Optional[str]:
             if uses >= 3:
                 success_count = float(meta.get("success_count", 0.0))
                 return 2.0 + wilson_score_lower(success_count, uses)
-            return float(meta.get("importance", 0.5)) * float(meta.get("confidence", 0.5))
+            return float(meta.get("importance", 0.5)) * float(
+                meta.get("confidence", 0.5)
+            )
 
         sorted_facts = sorted(all_memory_bank, key=_cold_start_sort_key, reverse=True)
 
@@ -283,7 +303,11 @@ async def _build_cold_start_profile() -> Optional[str]:
         # Check if user has NO identity at all
         identity_content = []
         for fact in all_facts:
-            content = fact.get("text") or fact.get("content") or fact.get("metadata", {}).get("content", "")
+            content = (
+                fact.get("text")
+                or fact.get("content")
+                or fact.get("metadata", {}).get("content", "")
+            )
             tags_raw = fact.get("metadata", {}).get("tags", [])
             if isinstance(tags_raw, str):
                 try:
@@ -298,9 +322,7 @@ async def _build_cold_start_profile() -> Optional[str]:
         if not identity_content:
             # Check if they have history (existing user) or not (truly new)
             has_history = await _memory.search(
-                query="",
-                collections=["history", "patterns"],
-                limit=1
+                query="", collections=["history", "patterns"], limit=1
             )
 
             if has_history:
@@ -330,13 +352,17 @@ Keep it conversational - don't interrogate. A simple "I don't think we've met - 
             "goal": "Goal",
             "project": "Project",
             "system_mastery": "System Mastery",
-            "agent_growth": "Agent Growth"
+            "agent_growth": "Agent Growth",
         }
 
         # Group facts by their primary tag, keeping only FIRST fact per category
         category_facts = {}
         for fact in all_facts:
-            content = fact.get("text") or fact.get("content") or fact.get("metadata", {}).get("content", "")
+            content = (
+                fact.get("text")
+                or fact.get("content")
+                or fact.get("metadata", {}).get("content", "")
+            )
             tags_raw = fact.get("metadata", {}).get("tags", [])
             if isinstance(tags_raw, str):
                 try:
@@ -355,10 +381,14 @@ Keep it conversational - don't interrogate. A simple "I don't think we've met - 
         profile_parts = ["<roampal-user-profile>"]
         for tag in TAG_PRIORITIES:
             if tag in category_facts:
-                profile_parts.append(f"{tag_labels[tag]}: {_first_sentence(category_facts[tag])}")
+                profile_parts.append(
+                    f"{tag_labels[tag]}: {_first_sentence(category_facts[tag])}"
+                )
         profile_parts.append("</roampal-user-profile>")
 
-        logger.info(f"Cold start: {len(all_facts)} facts, {len(category_facts)} categories")
+        logger.info(
+            f"Cold start: {len(all_facts)} facts, {len(category_facts)} categories"
+        )
         return "\n".join(profile_parts)
 
     except Exception as e:
@@ -366,12 +396,12 @@ Keep it conversational - don't interrogate. A simple "I don't think we've met - 
         return None
 
 
-
-
 # ==================== Request/Response Models ====================
+
 
 class GetContextRequest(BaseModel):
     """Request for hook context injection."""
+
     query: str
     conversation_id: Optional[str] = None
     recent_messages: Optional[List[Dict[str, Any]]] = None
@@ -379,6 +409,7 @@ class GetContextRequest(BaseModel):
 
 class GetContextResponse(BaseModel):
     """Response with context to inject."""
+
     formatted_injection: str
     user_facts: List[Dict[str, Any]]
     relevant_memories: List[Dict[str, Any]]
@@ -387,25 +418,43 @@ class GetContextResponse(BaseModel):
     # v0.3.2: Split fields for OpenCode plugin — scoring in user message, context in system prompt
     scoring_prompt: str = ""  # Just the scoring block (for prepending to user message)
     scoring_prompt_simple: str = ""  # Simplified scoring prompt for non-Claude models (no XML tags, plain language)
-    context_only: str = ""  # Just the memory context without scoring (for system prompt)
+    context_only: str = (
+        ""  # Just the memory context without scoring (for system prompt)
+    )
     # v0.3.2: Raw scoring data for independent LLM scoring call (OpenCode plugin)
-    scoring_exchange: Optional[Dict[str, str]] = None  # {"user": "...", "assistant": "..."} previous exchange
-    scoring_memories: Optional[List[Dict[str, str]]] = None  # [{"id": "doc_id", "content": "full memory content"}, ...]
+    scoring_exchange: Optional[Dict[str, str]] = (
+        None  # {"user": "...", "assistant": "..."} previous exchange
+    )
+    scoring_memories: Optional[List[Dict[str, str]]] = (
+        None  # [{"id": "doc_id", "content": "full memory content"}, ...]
+    )
 
 
 class StopHookRequest(BaseModel):
     """Request from Stop hook after LLM responds."""
+
     conversation_id: str
     user_message: str = ""  # v0.3.6: Optional — Claude Code sends empty (state-only)
-    assistant_response: str = ""  # v0.3.6: Optional — Claude Code sends empty (state-only)
-    transcript: Optional[str] = None  # Full transcript to check for record_response call
-    metadata: Optional[Dict[str, Any]] = None  # v0.3.6: Extra metadata (e.g., memory_type: "exchange_summary")
-    noun_tags: Optional[List[str]] = None  # v0.4.5: content nouns for TagCascade retrieval
-    lifecycle_only: bool = False  # v0.3.6: Track in session JSONL but skip ChromaDB storage
+    assistant_response: str = (
+        ""  # v0.3.6: Optional — Claude Code sends empty (state-only)
+    )
+    transcript: Optional[str] = (
+        None  # Full transcript to check for record_response call
+    )
+    metadata: Optional[Dict[str, Any]] = (
+        None  # v0.3.6: Extra metadata (e.g., memory_type: "exchange_summary")
+    )
+    noun_tags: Optional[List[str]] = (
+        None  # v0.4.5: content nouns for TagCascade retrieval
+    )
+    lifecycle_only: bool = (
+        False  # v0.3.6: Track in session JSONL but skip ChromaDB storage
+    )
 
 
 class StopHookResponse(BaseModel):
     """Response to Stop hook."""
+
     stored: bool
     doc_id: str
     scoring_complete: bool  # Did the LLM call record_response?
@@ -415,6 +464,7 @@ class StopHookResponse(BaseModel):
 
 class SearchRequest(BaseModel):
     """Request for searching memory."""
+
     query: Optional[str] = Field("", max_length=2000)
     days_back: Optional[int] = Field(None, ge=1, le=365)
     id: Optional[str] = Field(None, max_length=200)
@@ -427,9 +477,12 @@ class SearchRequest(BaseModel):
 
 class MemoryBankAddRequest(BaseModel):
     """Request to add to memory bank."""
+
     content: str
     tags: Optional[List[str]] = None
-    noun_tags: Optional[List[str]] = None  # v0.4.5: content nouns for TagCascade retrieval
+    noun_tags: Optional[List[str]] = (
+        None  # v0.4.5: content nouns for TagCascade retrieval
+    )
     importance: float = 0.7
     confidence: float = 0.7
     always_inject: bool = False
@@ -437,31 +490,41 @@ class MemoryBankAddRequest(BaseModel):
 
 class MemoryBankUpdateRequest(BaseModel):
     """Request to update memory bank."""
+
     old_content: str
     new_content: str
 
 
 class RecordOutcomeRequest(BaseModel):
     """Request to record outcome for scoring."""
+
     conversation_id: str
     outcome: str  # worked, failed, partial, unknown
     related: Optional[List[str]] = None  # DEPRECATED: use memory_scores instead
-    memory_scores: Optional[Dict[str, str]] = None  # v0.2.8: Per-memory scoring (doc_id -> outcome)
+    memory_scores: Optional[Dict[str, str]] = (
+        None  # v0.2.8: Per-memory scoring (doc_id -> outcome)
+    )
     exchange_summary: Optional[str] = None  # v0.3.6: ~300 char summary from main LLM
     exchange_outcome: Optional[str] = None  # v0.3.6: backward compat alias for outcome
-    noun_tags: Optional[List[str]] = None  # v0.4.5: content nouns for TagCascade retrieval
+    noun_tags: Optional[List[str]] = (
+        None  # v0.4.5: content nouns for TagCascade retrieval
+    )
     facts: Optional[List[str]] = None  # v0.4.5: atomic facts from exchange
 
 
 class RecordResponseRequest(BaseModel):
     """Request to record a key takeaway (MCP tool proxy)."""
+
     key_takeaway: str
     conversation_id: str
-    noun_tags: Optional[List[str]] = None  # v0.4.5: content nouns for TagCascade retrieval
+    noun_tags: Optional[List[str]] = (
+        None  # v0.4.5: content nouns for TagCascade retrieval
+    )
 
 
 class UpdateContentRequest(BaseModel):
     """Request to update a memory's content (v0.3.6 summarization)."""
+
     doc_id: str
     collection: str
     new_content: str
@@ -470,6 +533,7 @@ class UpdateContentRequest(BaseModel):
 
 # ==================== Lifecycle ====================
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage memory system lifecycle."""
@@ -477,18 +541,22 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Roampal server...")
 
     # Check for dev mode or custom data path
-    dev_mode = os.environ.get('ROAMPAL_DEV', '').lower() in ('1', 'true', 'yes')
+    dev_mode = os.environ.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")
     data_path = os.environ.get("ROAMPAL_DATA_PATH")
 
     # If dev mode and no custom path, use DEV data directory
     if dev_mode and not data_path:
-        if os.name == 'nt':  # Windows
-            appdata = os.environ.get('APPDATA', str(Path.home()))
+        if os.name == "nt":  # Windows
+            appdata = os.environ.get("APPDATA", str(Path.home()))
             data_path = str(Path(appdata) / "Roampal_DEV" / "data")
-        elif sys.platform == 'darwin':  # macOS
-            data_path = str(Path.home() / "Library" / "Application Support" / "Roampal_DEV" / "data")
+        elif sys.platform == "darwin":  # macOS
+            data_path = str(
+                Path.home() / "Library" / "Application Support" / "Roampal_DEV" / "data"
+            )
         else:  # Linux — v0.4.1: respect XDG_DATA_HOME
-            xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+            xdg_data = os.environ.get(
+                "XDG_DATA_HOME", str(Path.home() / ".local" / "share")
+            )
             data_path = str(Path(xdg_data) / "roampal_dev" / "data")
         logger.info(f"DEV MODE enabled - using: {data_path}")
     elif data_path:
@@ -539,12 +607,12 @@ async def lifespan(app: FastAPI):
                 content = items["documents"][i] if i < len(items["documents"]) else ""
                 if (not noun_tags_raw or noun_tags_raw == "[]") and content:
                     # Re-extract tags via regex
-                    if hasattr(_memory, '_tag_service') and _memory._tag_service:
+                    if hasattr(_memory, "_tag_service") and _memory._tag_service:
                         tags = _memory._tag_service.extract_tags(content)
                         if tags:
                             adapter.collection.update(
                                 ids=[doc_id],
-                                metadatas=[{**metadata, "noun_tags": json.dumps(tags)}]
+                                metadatas=[{**metadata, "noun_tags": json.dumps(tags)}],
                             )
                             retagged_count += 1
         if retagged_count > 0:
@@ -566,8 +634,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Roampal server...")
     if _memory:
         try:
-            for name, adapter in getattr(_memory, 'collections', {}).items():
-                if hasattr(adapter, 'cleanup'):
+            for name, adapter in getattr(_memory, "collections", {}).items():
+                if hasattr(adapter, "cleanup"):
                     await adapter.cleanup()
                     logger.debug(f"Cleaned up {name} adapter")
         except Exception as e:
@@ -580,7 +648,7 @@ def create_app() -> FastAPI:
         title="Roampal",
         description="Persistent memory for AI coding tools",
         version=__version__,
-        lifespan=lifespan
+        lifespan=lifespan,
     )
 
     # CORS — localhost only (v0.3.5: tightened from allow_origins=["*"])
@@ -614,10 +682,18 @@ def create_app() -> FastAPI:
 
             formatted_parts = []
             scoring_required = False
-            scoring_prompt_text = ""  # v0.3.2: track separately for OpenCode split delivery
-            scoring_exchange_data = None  # v0.3.2: raw exchange data for independent LLM scoring
-            scoring_memories_data = None  # v0.3.2: raw surfaced memory data for independent LLM scoring
-            scoring_prompt_simple_text = ""  # v0.3.2: simplified scoring for non-Claude models
+            scoring_prompt_text = (
+                ""  # v0.3.2: track separately for OpenCode split delivery
+            )
+            scoring_exchange_data = (
+                None  # v0.3.2: raw exchange data for independent LLM scoring
+            )
+            scoring_memories_data = (
+                None  # v0.3.2: raw surfaced memory data for independent LLM scoring
+            )
+            scoring_prompt_simple_text = (
+                ""  # v0.3.2: simplified scoring for non-Claude models
+            )
             context_parts = []  # v0.3.2: non-scoring context parts for split delivery
             conversation_id = request.conversation_id or "default"
 
@@ -636,7 +712,9 @@ def create_app() -> FastAPI:
                 if cold_start_profile:
                     formatted_parts.append(cold_start_profile)
                     context_parts.append(cold_start_profile)
-                    logger.info(f"Cold start: injected user profile for {conversation_id}")
+                    logger.info(
+                        f"Cold start: injected user profile for {conversation_id}"
+                    )
 
                 # Mark first message as seen
                 _session_manager.mark_first_message_seen(conversation_id)
@@ -646,7 +724,7 @@ def create_app() -> FastAPI:
             context = await _memory.get_context_for_injection(
                 query=request.query,
                 conversation_id=conversation_id,
-                recent_conversation=request.recent_messages
+                recent_conversation=request.recent_messages,
             )
 
             # v0.2.7: On cold start, append KNOWN CONTEXT after profile (recent work context)
@@ -656,7 +734,9 @@ def create_app() -> FastAPI:
                 logger.info(f"Cold start: added KNOWN CONTEXT for {conversation_id}")
 
             # 2. Check if assistant completed a response (vs user interrupting mid-work)
-            assistant_completed = _session_manager.check_and_clear_completed(conversation_id)
+            assistant_completed = _session_manager.check_and_clear_completed(
+                conversation_id
+            )
 
             # Only inject scoring prompt if:
             # - Assistant completed their previous response (not mid-work interruption)
@@ -673,35 +753,51 @@ def create_app() -> FastAPI:
                     scoring_prompt = _session_manager.build_scoring_prompt(
                         previous_exchange=previous,
                         current_user_message=request.query,
-                        surfaced_memories=surfaced_memories if surfaced_memories else None
+                        surfaced_memories=surfaced_memories
+                        if surfaced_memories
+                        else None,
                     )
-                    scoring_prompt_simple = _session_manager.build_scoring_prompt_simple(
-                        previous_exchange=previous,
-                        current_user_message=request.query,
-                        surfaced_memories=surfaced_memories if surfaced_memories else None
+                    scoring_prompt_simple = (
+                        _session_manager.build_scoring_prompt_simple(
+                            previous_exchange=previous,
+                            current_user_message=request.query,
+                            surfaced_memories=surfaced_memories
+                            if surfaced_memories
+                            else None,
+                        )
                     )
                     formatted_parts.append(scoring_prompt)
-                    scoring_prompt_text = scoring_prompt  # v0.3.2: track for split delivery
-                    scoring_prompt_simple_text = scoring_prompt_simple  # v0.3.2: simplified for non-Claude
+                    scoring_prompt_text = (
+                        scoring_prompt  # v0.3.2: track for split delivery
+                    )
+                    scoring_prompt_simple_text = (
+                        scoring_prompt_simple  # v0.3.2: simplified for non-Claude
+                    )
                     scoring_required = True
                     # v0.3.2: Raw data for independent LLM scoring (OpenCode plugin)
                     scoring_exchange_data = {
                         "user": previous.get("user", ""),
-                        "assistant": previous.get("assistant", "")
+                        "assistant": previous.get("assistant", ""),
                     }
                     scoring_memories_data = []
                     if surfaced_memories:
                         for mem in surfaced_memories:
                             mem_id = mem.get("id", mem.get("doc_id", "unknown"))
                             content = mem.get("content", mem.get("text", ""))
-                            scoring_memories_data.append({
-                                "id": mem_id,
-                                "content": content,
-                                "content_hint": content[:60] if content else ""  # v0.3.5: brief hint for SCORING REFERENCE
-                            })
+                            scoring_memories_data.append(
+                                {
+                                    "id": mem_id,
+                                    "content": content,
+                                    "content_hint": content[:60]
+                                    if content
+                                    else "",  # v0.3.5: brief hint for SCORING REFERENCE
+                                }
+                            )
                     # Track that we injected scoring prompt (for Stop hook to check)
                     _session_manager.set_scoring_required(conversation_id, True)
-                    logger.info(f"Injecting scoring prompt for conversation {conversation_id} with {len(surfaced_memories)} memories")
+                    logger.info(
+                        f"Injecting scoring prompt for conversation {conversation_id} with {len(surfaced_memories)} memories"
+                    )
                 else:
                     # No unscored exchange, but assistant did complete
                     _session_manager.set_scoring_required(conversation_id, False)
@@ -712,7 +808,9 @@ def create_app() -> FastAPI:
                 # User interrupted mid-work OR cold start - no scoring needed
                 _session_manager.set_scoring_required(conversation_id, False)
                 if not is_cold_start:
-                    logger.info(f"Skipping scoring - user interrupted mid-work for {conversation_id}")
+                    logger.info(
+                        f"Skipping scoring - user interrupted mid-work for {conversation_id}"
+                    )
 
             # 3. Add memory context after scoring prompt (only if not cold start)
             # v0.2.7: Cold start already added KNOWN CONTEXT above, don't duplicate
@@ -729,9 +827,11 @@ def create_app() -> FastAPI:
                     "doc_ids": injected_doc_ids,
                     "query": request.query,
                     "source": "hook_injection",
-                    "timestamp": timestamp
+                    "timestamp": timestamp,
                 }
-                logger.info(f"Cached {len(injected_doc_ids)} doc_ids from hook injection for {conversation_id}")
+                logger.info(
+                    f"Cached {len(injected_doc_ids)} doc_ids from hook injection for {conversation_id}"
+                )
 
                 # v0.3.2: Populate injection map for robust multi-session scoring
                 # Each doc_id maps back to the conversation that received it
@@ -740,9 +840,11 @@ def create_app() -> FastAPI:
                     _injection_map[doc_id] = {
                         "conversation_id": conversation_id,
                         "injected_at": timestamp,
-                        "query": request.query
+                        "query": request.query,
                     }
-                logger.info(f"Added {len(injected_doc_ids)} doc_ids to injection map for {conversation_id}")
+                logger.info(
+                    f"Added {len(injected_doc_ids)} doc_ids to injection map for {conversation_id}"
+                )
 
             return GetContextResponse(
                 formatted_injection="\n".join(formatted_parts),
@@ -755,11 +857,12 @@ def create_app() -> FastAPI:
                 scoring_prompt_simple=scoring_prompt_simple_text,
                 context_only="\n".join(context_parts) if context_parts else "",
                 scoring_exchange=scoring_exchange_data,
-                scoring_memories=scoring_memories_data
+                scoring_memories=scoring_memories_data,
             )
 
         except Exception as e:
             import traceback
+
             logger.error(f"Error getting context: {e}\n{traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -809,15 +912,17 @@ def create_app() -> FastAPI:
                         conversation_id=conversation_id,
                         user_message=request.user_message,
                         assistant_response=request.assistant_response,
-                        doc_id=""  # No ChromaDB doc — main LLM handles storage
+                        doc_id="",  # No ChromaDB doc — main LLM handles storage
                     )
-                    logger.info(f"Lifecycle-only exchange stored in JSONL for {conversation_id}")
+                    logger.info(
+                        f"Lifecycle-only exchange stored in JSONL for {conversation_id}"
+                    )
                 else:
                     # OpenCode path: Full storage in both ChromaDB and JSONL
                     content = f"User: {user_msg}\n\nAssistant: {assistant_msg}"
                     store_metadata = {
                         "turn_type": "exchange",
-                        "timestamp": datetime.now().isoformat()
+                        "timestamp": datetime.now().isoformat(),
                     }
                     if request.metadata:
                         store_metadata.update(request.metadata)
@@ -826,23 +931,27 @@ def create_app() -> FastAPI:
                         content=content,
                         conversation_id=conversation_id,
                         metadata=store_metadata,
-                        noun_tags=request.noun_tags
+                        noun_tags=request.noun_tags,
                     )
 
                     await _session_manager.store_exchange(
                         conversation_id=conversation_id,
                         user_message=request.user_message,
                         assistant_response=request.assistant_response,
-                        doc_id=doc_id
+                        doc_id=doc_id,
                     )
                     logger.info(f"Full exchange {doc_id} stored for {conversation_id}")
             else:
-                logger.info(f"State-only stop hook for {conversation_id} (no exchange data)")
+                logger.info(
+                    f"State-only stop hook for {conversation_id} (no exchange data)"
+                )
 
             # === State management (always runs) ===
 
             # IMPORTANT: Check scoring flags BEFORE set_completed() resets them
-            scoring_was_required = _session_manager.was_scoring_required(conversation_id)
+            scoring_was_required = _session_manager.was_scoring_required(
+                conversation_id
+            )
 
             # Race condition fix: If scoring was required, wait briefly for record_response
             # MCP tool call to complete. The tool might be in-flight when Stop hook fires.
@@ -852,9 +961,13 @@ def create_app() -> FastAPI:
                 # Wait up to 500ms with 50ms intervals for the MCP tool to complete
                 for _ in range(10):
                     await asyncio.sleep(0.05)  # 50ms
-                    scored_this_turn = _session_manager.was_scored_this_turn(conversation_id)
+                    scored_this_turn = _session_manager.was_scored_this_turn(
+                        conversation_id
+                    )
                     if scored_this_turn:
-                        logger.info(f"Race condition resolved: record_response completed after {(_ + 1) * 50}ms")
+                        logger.info(
+                            f"Race condition resolved: record_response completed after {(_ + 1) * 50}ms"
+                        )
                         break
 
             # v0.3.2: Session ID mismatch fallback - OpenCode plugin hooks use ses_xxx
@@ -865,7 +978,9 @@ def create_app() -> FastAPI:
                     if sid.startswith("mcp_") and sdata.get("scored_this_turn"):
                         scored_this_turn = True
                         _session_manager.set_scored_this_turn(sid, False)
-                        logger.info(f"Session ID mismatch resolved: MCP {sid} scored for plugin {conversation_id}")
+                        logger.info(
+                            f"Session ID mismatch resolved: MCP {sid} scored for plugin {conversation_id}"
+                        )
                         break
 
             # Mark assistant as completed - this signals UserPromptSubmit that
@@ -880,14 +995,20 @@ def create_app() -> FastAPI:
 
             if scored_this_turn:
                 scoring_complete = True
-                logger.info(f"score_memories was called this turn for {conversation_id}")
+                logger.info(
+                    f"score_memories was called this turn for {conversation_id}"
+                )
             elif scoring_was_required:
                 # SOFT ENFORCE: Log warning but don't block
                 should_block = False
                 block_message = None
-                logger.warning(f"Soft enforce: score_memories not called for {conversation_id}")
+                logger.warning(
+                    f"Soft enforce: score_memories not called for {conversation_id}"
+                )
             else:
-                logger.info(f"No scoring required this turn for {conversation_id} - not blocking")
+                logger.info(
+                    f"No scoring required this turn for {conversation_id} - not blocking"
+                )
 
             # v0.4.8: autoSummarize removed — caused Ollama contention with sidecar scoring.
 
@@ -896,7 +1017,7 @@ def create_app() -> FastAPI:
                 doc_id=doc_id,
                 scoring_complete=scoring_complete,
                 should_block=should_block,
-                block_message=block_message
+                block_message=block_message,
             )
 
         except Exception as e:
@@ -916,17 +1037,16 @@ def create_app() -> FastAPI:
             if request.id:
                 doc = _memory.get_by_id(request.id)
                 results = [doc] if doc else []
-                return {
-                    "query": request.id,
-                    "count": len(results),
-                    "results": results
-                }
+                return {"query": request.id, "count": len(results), "results": results}
 
             # Convert days_back to date filter
             metadata_filters = request.metadata_filters or {}
             if request.days_back:
                 from datetime import timedelta
-                cutoff = (datetime.now() - timedelta(days=request.days_back)).isoformat()
+
+                cutoff = (
+                    datetime.now() - timedelta(days=request.days_back)
+                ).isoformat()
                 metadata_filters["created_at"] = {"$gte": cutoff}
 
             results = await _memory.search(
@@ -934,7 +1054,7 @@ def create_app() -> FastAPI:
                 collections=request.collections,
                 limit=request.limit,
                 metadata_filters=metadata_filters if metadata_filters else None,
-                sort_by=request.sort_by
+                sort_by=request.sort_by,
             )
 
             # Cache doc_ids for outcome scoring
@@ -943,14 +1063,10 @@ def create_app() -> FastAPI:
                 _search_cache[request.conversation_id] = {
                     "doc_ids": doc_ids,
                     "query": request.query,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now().isoformat(),
                 }
 
-            return {
-                "query": request.query,
-                "count": len(results),
-                "results": results
-            }
+            return {"query": request.query, "count": len(results), "results": results}
 
         except Exception as e:
             logger.error(f"Error searching: {e}")
@@ -966,7 +1082,9 @@ def create_app() -> FastAPI:
         content = request.content
         if content and len(content) > MAX_MEMORY_CHARS:
             content = content[:MAX_MEMORY_CHARS]
-            logger.warning(f"Memory content truncated from {len(request.content)} to {MAX_MEMORY_CHARS} chars (safety cap)")
+            logger.warning(
+                f"Memory content truncated from {len(request.content)} to {MAX_MEMORY_CHARS} chars (safety cap)"
+            )
 
         try:
             doc_id = await _memory.store_memory_bank(
@@ -975,7 +1093,7 @@ def create_app() -> FastAPI:
                 noun_tags=request.noun_tags,
                 importance=request.importance,
                 confidence=request.confidence,
-                always_inject=request.always_inject
+                always_inject=request.always_inject,
             )
 
             return {"success": True, "doc_id": doc_id}
@@ -994,18 +1112,16 @@ def create_app() -> FastAPI:
         new_content = request.new_content
         if new_content and len(new_content) > MAX_MEMORY_CHARS:
             new_content = new_content[:MAX_MEMORY_CHARS]
-            logger.warning(f"Updated memory content truncated from {len(request.new_content)} to {MAX_MEMORY_CHARS} chars (safety cap)")
+            logger.warning(
+                f"Updated memory content truncated from {len(request.new_content)} to {MAX_MEMORY_CHARS} chars (safety cap)"
+            )
 
         try:
             doc_id = await _memory.update_memory_bank(
-                old_content=request.old_content,
-                new_content=new_content
+                old_content=request.old_content, new_content=new_content
             )
 
-            return {
-                "success": doc_id is not None,
-                "doc_id": doc_id
-            }
+            return {"success": doc_id is not None, "doc_id": doc_id}
 
         except Exception as e:
             logger.error(f"Error updating memory bank: {e}")
@@ -1058,7 +1174,10 @@ def create_app() -> FastAPI:
         # v0.3.5: Enforce size limit at API layer (store_book also checks, but fail fast)
         max_size = 10 * 1024 * 1024  # 10MB
         if len(content) > max_size:
-            raise HTTPException(status_code=413, detail=f"Content too large ({len(content)} bytes, max {max_size})")
+            raise HTTPException(
+                status_code=413,
+                detail=f"Content too large ({len(content)} bytes, max {max_size})",
+            )
 
         try:
             doc_ids = await _memory.store_book(
@@ -1066,7 +1185,7 @@ def create_app() -> FastAPI:
                 title=title,
                 source=source,
                 chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap
+                chunk_overlap=chunk_overlap,
             )
 
             logger.info(f"Ingested '{title}' in {len(doc_ids)} chunks")
@@ -1075,13 +1194,12 @@ def create_app() -> FastAPI:
                 "success": True,
                 "title": title,
                 "chunks": len(doc_ids),
-                "doc_ids": doc_ids
+                "doc_ids": doc_ids,
             }
 
         except Exception as e:
             logger.error(f"Error ingesting document: {e}")
             raise HTTPException(status_code=500, detail=str(e))
-
 
     @app.get("/api/books")
     async def list_books():
@@ -1112,7 +1230,7 @@ def create_app() -> FastAPI:
                 "success": result.get("removed", 0) > 0,
                 "removed": result.get("removed", 0),
                 "title": title,
-                "message": result.get("message", "")
+                "message": result.get("message", ""),
             }
         except Exception as e:
             logger.error(f"Error removing book: {e}")
@@ -1130,7 +1248,9 @@ def create_app() -> FastAPI:
         takeaway = request.key_takeaway
         if takeaway and len(takeaway) > MAX_MEMORY_CHARS:
             takeaway = takeaway[:MAX_MEMORY_CHARS]
-            logger.warning(f"Key takeaway truncated from {len(request.key_takeaway)} to {MAX_MEMORY_CHARS} chars (safety cap)")
+            logger.warning(
+                f"Key takeaway truncated from {len(request.key_takeaway)} to {MAX_MEMORY_CHARS} chars (safety cap)"
+            )
 
         try:
             doc_id = await _memory.store_working(
@@ -1138,12 +1258,14 @@ def create_app() -> FastAPI:
                 conversation_id=request.conversation_id,
                 metadata={
                     "type": "key_takeaway",
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now().isoformat(),
                 },
                 initial_score=0.7,
-                noun_tags=request.noun_tags
+                noun_tags=request.noun_tags,
             )
-            logger.info(f"Recorded takeaway (score=0.7): {request.key_takeaway[:50]}...")
+            logger.info(
+                f"Recorded takeaway (score=0.7): {request.key_takeaway[:50]}..."
+            )
             return {"success": True, "doc_id": doc_id}
 
         except Exception as e:
@@ -1152,9 +1274,7 @@ def create_app() -> FastAPI:
 
     # v0.2.3: Deferred background task for Action KG updates
     async def _deferred_action_kg_updates(
-        doc_ids: List[str],
-        outcome: str,
-        cached_query: str
+        doc_ids: List[str], outcome: str, cached_query: str
     ):
         """
         Background task for heavy Action KG and routing updates.
@@ -1171,7 +1291,13 @@ def create_app() -> FastAPI:
             for doc_id in doc_ids:
                 # Extract collection from doc_id prefix
                 collection = None
-                for coll_name in ["memory_bank", "books", "working", "history", "patterns"]:
+                for coll_name in [
+                    "memory_bank",
+                    "books",
+                    "working",
+                    "history",
+                    "patterns",
+                ]:
                     if doc_id.startswith(coll_name + "_"):
                         collection = coll_name
                         break
@@ -1181,7 +1307,7 @@ def create_app() -> FastAPI:
                     context_type=context_type,
                     outcome=outcome,
                     doc_id=doc_id,
-                    collection=collection
+                    collection=collection,
                 )
                 action_tasks.append(_memory.record_action_outcome(action))
 
@@ -1193,12 +1319,16 @@ def create_app() -> FastAPI:
 
             # Update Routing KG concurrently
             if cached_query and collections_updated:
-                await asyncio.gather(*(
-                    _memory._update_kg_routing(cached_query, collection, outcome)
-                    for collection in collections_updated
-                ))
+                await asyncio.gather(
+                    *(
+                        _memory._update_kg_routing(cached_query, collection, outcome)
+                        for collection in collections_updated
+                    )
+                )
 
-            logger.info(f"[Background] Action KG updates completed for {len(doc_ids)} docs")
+            logger.info(
+                f"[Background] Action KG updates completed for {len(doc_ids)} docs"
+            )
 
         except Exception as e:
             logger.error(f"[Background] Action KG update error: {e}")
@@ -1235,7 +1365,9 @@ def create_app() -> FastAPI:
                         exchange_conv_id = injection["conversation_id"]
                         _session_manager.set_scored_this_turn(exchange_conv_id, True)
                         resolved_via = f"injection_map (doc_id={doc_id})"
-                        logger.info(f"Resolved conversation {exchange_conv_id} via {resolved_via}")
+                        logger.info(
+                            f"Resolved conversation {exchange_conv_id} via {resolved_via}"
+                        )
                         break
 
             # Fallback: if injection_map didn't resolve, check _last_exchange_cache
@@ -1251,7 +1383,9 @@ def create_app() -> FastAPI:
                             resolved_via = "last_exchange_cache (most recent unscored)"
                 if resolved_via:
                     _session_manager.set_scored_this_turn(exchange_conv_id, True)
-                    logger.info(f"Resolved conversation {exchange_conv_id} via {resolved_via}")
+                    logger.info(
+                        f"Resolved conversation {exchange_conv_id} via {resolved_via}"
+                    )
 
             # Look up the previous exchange doc_id (needed for summary replacement on OpenCode)
             # Claude Code: exchange_doc_id will be None (stop hook doesn't store exchanges)
@@ -1273,15 +1407,27 @@ def create_app() -> FastAPI:
                             previous = exc
                             exchange_conv_id = cid
                 if previous:
-                    logger.warning(f"Used 'most recent unscored' fallback - resolved to {exchange_conv_id}")
+                    logger.warning(
+                        f"Used 'most recent unscored' fallback - resolved to {exchange_conv_id}"
+                    )
 
-            if previous and previous.get("doc_id") and not previous.get("scored", False):
+            if (
+                previous
+                and previous.get("doc_id")
+                and not previous.get("scored", False)
+            ):
                 exchange_doc_id = previous["doc_id"]
                 # Score the exchange with the outcome (skip for "unknown" — no signal)
                 if request.outcome in ["worked", "failed", "partial"]:
-                    await _memory.record_outcome(doc_ids=[exchange_doc_id], outcome=request.outcome)
-                await _session_manager.mark_scored(exchange_conv_id, exchange_doc_id, request.outcome)
-                logger.info(f"Scored exchange {exchange_doc_id} with outcome={request.outcome}")
+                    await _memory.record_outcome(
+                        doc_ids=[exchange_doc_id], outcome=request.outcome
+                    )
+                await _session_manager.mark_scored(
+                    exchange_conv_id, exchange_doc_id, request.outcome
+                )
+                logger.info(
+                    f"Scored exchange {exchange_doc_id} with outcome={request.outcome}"
+                )
 
             # v0.2.3: Skip session file scan - doc_ids are in _search_cache or request.related
             # Old approach scanned ALL session files (O(n×m) I/O) - now O(1) cache lookup
@@ -1301,13 +1447,17 @@ def create_app() -> FastAPI:
             # If no cache for this ID, find the most recent cache entry
             # This handles MCP using "default" while hook caches under real session_id
             if not cached_doc_ids and _search_cache:
-                most_recent_key = max(_search_cache.keys(),
-                    key=lambda k: _search_cache[k].get("timestamp", ""))
+                most_recent_key = max(
+                    _search_cache.keys(),
+                    key=lambda k: _search_cache[k].get("timestamp", ""),
+                )
                 cached = _search_cache.get(most_recent_key, {})
                 cached_doc_ids = cached.get("doc_ids", [])
                 cache_key_used = most_recent_key
                 if cached_doc_ids:
-                    logger.info(f"Using cache from session {most_recent_key} (MCP used {conversation_id})")
+                    logger.info(
+                        f"Using cache from session {most_recent_key} (MCP used {conversation_id})"
+                    )
 
             # v0.2.8: Per-memory scoring - process each memory with individual outcome
             # v0.4.4: Score all memories concurrently
@@ -1316,26 +1466,44 @@ def create_app() -> FastAPI:
                 for doc_id, mem_outcome in request.memory_scores.items():
                     if mem_outcome in ["worked", "failed", "partial", "unknown"]:
                         outcome_tasks.append(
-                            _memory.record_outcome(doc_ids=[doc_id], outcome=mem_outcome)
+                            _memory.record_outcome(
+                                doc_ids=[doc_id], outcome=mem_outcome
+                            )
                         )
                         doc_ids_scored.append(doc_id)
                 if outcome_tasks:
                     await asyncio.gather(*outcome_tasks)
-                logger.info(f"Per-memory scoring: {len(doc_ids_scored)} memories with individual outcomes")
+                logger.info(
+                    f"Per-memory scoring: {len(doc_ids_scored)} memories with individual outcomes"
+                )
 
             # DEPRECATED: related param (backward compat)
             elif request.related is not None:
                 doc_ids_scored.extend(request.related)
-                logger.info(f"Direct scoring (deprecated): {len(request.related)} doc_ids from related param")
-                if doc_ids_scored and request.outcome in ["worked", "failed", "partial"]:
-                    await _memory.record_outcome(doc_ids=doc_ids_scored, outcome=request.outcome)
+                logger.info(
+                    f"Direct scoring (deprecated): {len(request.related)} doc_ids from related param"
+                )
+                if doc_ids_scored and request.outcome in [
+                    "worked",
+                    "failed",
+                    "partial",
+                ]:
+                    await _memory.record_outcome(
+                        doc_ids=doc_ids_scored, outcome=request.outcome
+                    )
 
             # Fallback: score all cached with exchange outcome
             elif cached_doc_ids:
                 doc_ids_scored.extend(cached_doc_ids)
                 logger.info(f"Cache scoring: {len(cached_doc_ids)} doc_ids")
-                if doc_ids_scored and request.outcome in ["worked", "failed", "partial"]:
-                    await _memory.record_outcome(doc_ids=doc_ids_scored, outcome=request.outcome)
+                if doc_ids_scored and request.outcome in [
+                    "worked",
+                    "failed",
+                    "partial",
+                ]:
+                    await _memory.record_outcome(
+                        doc_ids=doc_ids_scored, outcome=request.outcome
+                    )
 
             # v0.3.6: Store exchange summary
             # Claude Code: main LLM stores summary directly (no prior exchange to replace)
@@ -1355,20 +1523,29 @@ def create_app() -> FastAPI:
                                 metadata["memory_type"] = "exchange_summary"
                                 metadata["exchange_outcome"] = request.outcome
                                 metadata["summarized_at"] = datetime.now().isoformat()
-                                metadata["original_length"] = len(doc.get("content", ""))
+                                metadata["original_length"] = len(
+                                    doc.get("content", "")
+                                )
                                 # v0.4.5: noun_tags for TagCascade retrieval
                                 if request.noun_tags:
                                     import json as _json
-                                    metadata["noun_tags"] = _json.dumps(request.noun_tags)
 
-                                embedding = await _memory._embedding_service.embed_text(request.exchange_summary)
+                                    metadata["noun_tags"] = _json.dumps(
+                                        request.noun_tags
+                                    )
+
+                                embedding = await _memory._embedding_service.embed_text(
+                                    request.exchange_summary
+                                )
                                 await adapter.upsert_vectors(
                                     ids=[exchange_doc_id],
                                     vectors=[embedding],
                                     metadatas=[metadata],
                                 )
                                 summary_stored = True
-                                logger.info(f"Replaced exchange {exchange_doc_id} with summary ({len(request.exchange_summary)} chars, was {metadata.get('original_length', '?')})")
+                                logger.info(
+                                    f"Replaced exchange {exchange_doc_id} with summary ({len(request.exchange_summary)} chars, was {metadata.get('original_length', '?')})"
+                                )
                     else:
                         # Claude Code path: store summary directly as new working memory
                         summary_doc_id = await _memory.store_working(
@@ -1380,10 +1557,12 @@ def create_app() -> FastAPI:
                                 "summarized_at": datetime.now().isoformat(),
                                 "turn_type": "exchange",
                             },
-                            noun_tags=request.noun_tags
+                            noun_tags=request.noun_tags,
                         )
                         summary_stored = True
-                        logger.info(f"Stored exchange summary {summary_doc_id} directly ({len(request.exchange_summary)} chars)")
+                        logger.info(
+                            f"Stored exchange summary {summary_doc_id} directly ({len(request.exchange_summary)} chars)"
+                        )
                 except Exception as e:
                     logger.error(f"Failed to store exchange summary: {e}")
 
@@ -1403,12 +1582,14 @@ def create_app() -> FastAPI:
                                 "memory_type": "fact",
                                 "timestamp": datetime.now().isoformat(),
                             },
-                            noun_tags=request.noun_tags
+                            noun_tags=request.noun_tags,
                         )
                     except Exception as e:
                         logger.warning(f"Failed to store fact: {e}")
                 if request.facts:
-                    logger.info(f"Stored {len([f for f in request.facts if f and len(f.strip()) >= 10])} atomic facts")
+                    logger.info(
+                        f"Stored {len([f for f in request.facts if f and len(f.strip()) >= 10])} atomic facts"
+                    )
 
             # Log final result and trigger background updates
             if doc_ids_scored:
@@ -1421,7 +1602,7 @@ def create_app() -> FastAPI:
                     _deferred_action_kg_updates(
                         doc_ids=doc_ids_scored,
                         outcome=request.outcome,
-                        cached_query=cached_query
+                        cached_query=cached_query,
                     )
                 )
 
@@ -1439,7 +1620,7 @@ def create_app() -> FastAPI:
                 "success": True,
                 "outcome": request.outcome,
                 "documents_scored": len(doc_ids_scored),
-                "summary_stored": summary_stored
+                "summary_stored": summary_stored,
             }
 
         except Exception as e:
@@ -1461,12 +1642,16 @@ def create_app() -> FastAPI:
         try:
             collection = request.collection
             if collection not in _memory.collections:
-                raise HTTPException(status_code=400, detail=f"Unknown collection: {collection}")
+                raise HTTPException(
+                    status_code=400, detail=f"Unknown collection: {collection}"
+                )
 
             adapter = _memory.collections[collection]
             doc = adapter.get_fragment(request.doc_id)
             if not doc:
-                raise HTTPException(status_code=404, detail=f"Document not found: {request.doc_id}")
+                raise HTTPException(
+                    status_code=404, detail=f"Document not found: {request.doc_id}"
+                )
 
             # Update metadata with new content
             metadata = doc.get("metadata", {})
@@ -1481,13 +1666,17 @@ def create_app() -> FastAPI:
             # Re-embed with new content
             embedding = await _memory._embedding_service.embed_text(request.new_content)
             await adapter.upsert_vectors(
-                ids=[request.doc_id],
-                vectors=[embedding],
-                metadatas=[metadata]
+                ids=[request.doc_id], vectors=[embedding], metadatas=[metadata]
             )
 
-            logger.info(f"Updated content for {request.doc_id}: {metadata['original_length']} -> {len(request.new_content)} chars")
-            return {"success": True, "doc_id": request.doc_id, "new_length": len(request.new_content)}
+            logger.info(
+                f"Updated content for {request.doc_id}: {metadata['original_length']} -> {len(request.new_content)} chars"
+            )
+            return {
+                "success": True,
+                "doc_id": request.doc_id,
+                "new_length": len(request.new_content),
+            }
 
         except HTTPException:
             raise
@@ -1497,6 +1686,199 @@ def create_app() -> FastAPI:
 
     # v0.4.8: autoSummarize removed — caused Ollama contention with sidecar scoring.
     # Sidecar produces proper summaries; no oversized memories are created.
+
+    # Retag endpoint — re-extract tags on existing memories via LLM
+    VALID_RETAG_COLLECTIONS = {"working", "history", "patterns", "memory_bank", "all"}
+
+    class RetagRequest(BaseModel):
+        collection: str = Field(
+            default="all",
+            description="Collection to retag: working, history, patterns, memory_bank, or all",
+        )
+        limit: Optional[int] = Field(
+            default=None,
+            description="Maximum number of memories to process (max 5000)",
+            le=5000,
+            ge=1,
+        )
+        dry_run: bool = Field(
+            default=False, description="Preview changes without modifying"
+        )
+        model: Optional[str] = Field(
+            default=None,
+            description="Specific model to use (default: sidecar)",
+            max_length=100,
+        )
+
+    class RetagResponse(BaseModel):
+        processed: int = Field(description="Number of memories processed")
+        tags_added: int = Field(description="Number of new LLM tags added")
+        errors: int = Field(description="Number of errors encountered")
+        sample_updates: List[Dict[str, Any]] = Field(
+            default_factory=list, description="Sample of updated memories"
+        )
+
+    @app.post("/api/retag", response_model=RetagResponse)
+    async def retag_memories(request: RetagRequest):
+        """
+        Re-extract tags on existing memories using the sidecar LLM.
+
+        Reads memories, extracts fresh tags, replaces existing ones.
+        Use for ongoing cleanup or to improve tag quality over time.
+        """
+        if not _memory:
+            raise HTTPException(status_code=503, detail="Memory system not ready")
+
+        # v0.4.9: Validate collection name against whitelist
+        if request.collection not in VALID_RETAG_COLLECTIONS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid collection '{request.collection}'. Must be one of: {', '.join(sorted(VALID_RETAG_COLLECTIONS))}",
+            )
+
+        try:
+            # Determine collections to process
+            collections_to_process = []
+            if request.collection == "all":
+                collections_to_process = [
+                    "working",
+                    "history",
+                    "patterns",
+                    "memory_bank",
+                ]
+            else:
+                collections_to_process = [request.collection]
+
+            processed = 0
+            tags_added = 0
+            errors = 0
+            sample_updates = []
+
+            logger.info(
+                f"Starting retag operation: collections={collections_to_process}, limit={request.limit}, dry_run={request.dry_run}"
+            )
+
+            for collection_name in collections_to_process:
+                if collection_name not in _memory.collections:
+                    logger.warning(f"Skipping unknown collection: {collection_name}")
+                    continue
+
+                adapter = _memory.collections[collection_name]
+
+                # Get memories from collection via ChromaDB .get()
+                try:
+                    limit = request.limit or 5000
+                    result = adapter.collection.get(
+                        include=["documents", "metadatas"],
+                        limit=limit,
+                    )
+                    # Build list of dicts from ChromaDB result
+                    memories = []
+                    ids = result.get("ids", [])
+                    docs = result.get("documents", [])
+                    metas = result.get("metadatas", [])
+                    for i in range(len(ids)):
+                        memories.append({
+                            "id": ids[i],
+                            "content": docs[i] if i < len(docs) else "",
+                            "metadata": metas[i] if i < len(metas) else {},
+                        })
+                except Exception as e:
+                    logger.error(
+                        f"Failed to fetch memories from {collection_name}: {e}"
+                    )
+                    errors += 1
+                    continue
+
+                logger.info(
+                    f"Processing {len(memories)} memories from {collection_name}"
+                )
+
+                for memory in memories:
+                    try:
+                        processed += 1
+                        doc_id = memory.get("id", "")
+                        content = memory.get("content", "") or memory.get("text", "")
+                        metadata = memory.get("metadata", {})
+
+                        if not content:
+                            continue
+
+                        # Get existing tags
+                        existing_tags = []
+                        if "noun_tags" in metadata:
+                            try:
+                                existing_tags = json.loads(metadata["noun_tags"])
+                            except (json.JSONDecodeError, TypeError):
+                                existing_tags = []
+
+                        # Extract LLM tags — call sidecar directly
+                        # (retag is user-initiated, always uses sidecar regardless of platform)
+                        try:
+                            from roampal.sidecar_service import extract_tags as sidecar_extract_tags
+                            llm_tags = sidecar_extract_tags(content)
+                        except ImportError:
+                            llm_tags = None
+                        if not llm_tags:
+                            # LLM extraction failed
+                            continue
+
+                        # Replace tags with fresh LLM-extracted tags
+                        # Only update if tags are different
+                        if set(llm_tags) != set(existing_tags):
+                            tags_added += len(llm_tags)
+
+                            if not request.dry_run:
+                                # Update metadata with LLM tags (REPLACE old tags)
+                                metadata["noun_tags"] = json.dumps(llm_tags)
+                                metadata["retagged_at"] = datetime.now().isoformat()
+                                metadata["retag_model"] = request.model or "sidecar"
+
+                                # Update in database
+                                await adapter.upsert_vectors(
+                                    ids=[doc_id],
+                                    vectors=[
+                                        memory.get("embedding")
+                                    ],  # Keep existing embedding
+                                    metadatas=[metadata],
+                                )
+
+                            # Add to sample (first 5)
+                            if len(sample_updates) < 5:
+                                sample_updates.append(
+                                    {
+                                        "doc_id": doc_id,
+                                        "collection": collection_name,
+                                        "old_tags": existing_tags[:5],
+                                        "new_tags": llm_tags[:5],
+                                    }
+                                )
+
+                    except Exception as e:
+                        logger.error(f"Error processing memory {doc_id}: {e}")
+                        errors += 1
+
+                    # Check limit
+                    if request.limit and processed >= request.limit:
+                        break
+
+                if request.limit and processed >= request.limit:
+                    break
+
+            logger.info(
+                f"Retag complete: processed={processed}, tags_added={tags_added}, errors={errors}"
+            )
+
+            return RetagResponse(
+                processed=processed,
+                tags_added=tags_added,
+                errors=errors,
+                sample_updates=sample_updates,
+            )
+
+        except Exception as e:
+            logger.error(f"Retag operation failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
 
     # ==================== Health/Status Endpoints ====================
 
@@ -1513,17 +1895,15 @@ def create_app() -> FastAPI:
 
         if _memory and _memory.initialized and _memory._embedding_service:
             try:
-                # Actually test embedding - catches [Errno 22] corruption
                 test_vector = await _memory._embedding_service.embed_text("health check")
                 embedding_ok = len(test_vector) > 0
             except Exception as e:
                 embedding_error = str(e)
 
         if not embedding_ok:
-            # Return 503 so _ensure_server_running knows to restart
             raise HTTPException(
                 status_code=503,
-                detail=f"Embedding service unhealthy: {embedding_error or 'not initialized'}"
+                detail=f"Embedding service unhealthy: {embedding_error or 'not initialized'}",
             )
 
         return {
@@ -1531,7 +1911,7 @@ def create_app() -> FastAPI:
             "memory_initialized": _memory is not None and _memory.initialized,
             "session_manager_ready": _session_manager is not None,
             "embedding_ok": embedding_ok,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
         }
 
     @app.get("/api/stats")
@@ -1548,18 +1928,18 @@ def create_app() -> FastAPI:
 def start_server(host: str = "127.0.0.1", port: int = None, dev: bool = False):
     """
     Start the Roampal server with dev/prod isolation.
-    
+
     Args:
         host: Server host
         port: Server port (auto-determined from dev mode if not specified)
         dev: Run in dev mode (port 27183, Roampal_DEV data)
     """
     # Determine mode and port
-    dev_mode = dev or os.environ.get('ROAMPAL_DEV', '').lower() in ('1', 'true', 'yes')
+    dev_mode = dev or os.environ.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")
 
     # Set env var so lifespan() can read it
     if dev_mode:
-        os.environ['ROAMPAL_DEV'] = '1'
+        os.environ["ROAMPAL_DEV"] = "1"
 
     if port is None:
         port = DEV_PORT if dev_mode else PROD_PORT
@@ -1574,17 +1954,27 @@ def start_server(host: str = "127.0.0.1", port: int = None, dev: bool = False):
   Data: %APPDATA%/{data_hint}/data
 ===================================================
 """)
-    
+
     app = create_app()
     uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Roampal FastAPI Server")
     parser.add_argument("--host", default="127.0.0.1", help="Server host")
-    parser.add_argument("--port", type=int, default=None, help="Server port (default: 27182 prod, 27183 dev)")
-    parser.add_argument("--dev", action="store_true", help="Run in dev mode (port 27183, Roampal_DEV data)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Server port (default: 27182 prod, 27183 dev)",
+    )
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="Run in dev mode (port 27183, Roampal_DEV data)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)

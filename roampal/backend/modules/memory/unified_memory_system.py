@@ -29,6 +29,21 @@ from .routing_service import RoutingService
 from .tag_service import TagService
 from .search_service import SearchService
 
+# v0.4.9: Import sidecar service for LLM tag extraction (OpenCode only).
+# Claude Code doesn't use a sidecar — the main LLM handles tags via MCP tools.
+_platform = os.environ.get("ROAMPAL_PLATFORM", "")
+if _platform == "opencode":
+    try:
+        from roampal.sidecar_service import extract_tags
+
+        SIDECAR_AVAILABLE = True
+    except ImportError:
+        SIDECAR_AVAILABLE = False
+        extract_tags = None
+else:
+    SIDECAR_AVAILABLE = False
+    extract_tags = None
+
 logger = logging.getLogger(__name__)
 
 CollectionName = Literal["books", "working", "history", "patterns", "memory_bank"]
@@ -53,7 +68,10 @@ class ActionOutcome:
 
     Context is detected from conversation (coding, fitness, finance, creative_writing, etc.)
     """
-    action_type: str  # Tool name: "search_memory", "create_memory", "score_memories", etc.
+
+    action_type: (
+        str  # Tool name: "search_memory", "create_memory", "score_memories", etc.
+    )
     context_type: ContextType  # Topic: "coding", "fitness", "finance", etc.
     outcome: Literal["worked", "failed", "partial"]
     timestamp: datetime = field(default_factory=datetime.now)
@@ -163,11 +181,7 @@ def normalize_memory(result: Dict, collection: str = None) -> Dict:
     result["collection"] = collection
 
     # === Timestamps: standardize to created_at ===
-    created_at = (
-        metadata.get("created_at")
-        or metadata.get("timestamp")
-        or ""
-    )
+    created_at = metadata.get("created_at") or metadata.get("timestamp") or ""
     result["created_at"] = created_at
     metadata["created_at"] = created_at  # Write back so _apply_date_filters() sees it
     result["age"] = _humanize_age(created_at)
@@ -193,7 +207,9 @@ def normalize_memory(result: Dict, collection: str = None) -> Dict:
                         symbols.append("N")
                     elif outcome == "partial":
                         symbols.append("~")
-                result["outcome_history"] = "[" + "".join(symbols) + "]" if symbols else ""
+                result["outcome_history"] = (
+                    "[" + "".join(symbols) + "]" if symbols else ""
+                )
             else:
                 result["outcome_history"] = ""
         except (json.JSONDecodeError, TypeError):
@@ -261,11 +277,7 @@ class UnifiedMemorySystem:
     - memory_bank: Persistent user facts (LLM-controlled, never decays)
     """
 
-    def __init__(
-        self,
-        data_path: str = None,
-        config: Optional[MemoryConfig] = None
-    ):
+    def __init__(self, data_path: str = None, config: Optional[MemoryConfig] = None):
         """
         Initialize UnifiedMemorySystem.
 
@@ -282,22 +294,35 @@ class UnifiedMemorySystem:
         # Linux: ~/.local/share/Roampal/data
         if data_path is None:
             # Check for env override first
-            data_path = os.environ.get('ROAMPAL_DATA_PATH')
+            data_path = os.environ.get("ROAMPAL_DATA_PATH")
 
             if data_path is None:
                 # Check for dev mode - matches Desktop's ROAMPAL_DATA_DIR convention
                 # DEV: Roampal_DEV/data, PROD: Roampal/data
-                dev_mode = os.environ.get('ROAMPAL_DEV', '').lower() in ('1', 'true', 'yes')
-                app_folder = 'Roampal_DEV' if dev_mode else 'Roampal'
+                dev_mode = os.environ.get("ROAMPAL_DEV", "").lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                )
+                app_folder = "Roampal_DEV" if dev_mode else "Roampal"
 
-                if os.name == 'nt':  # Windows
-                    appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
-                    data_path = os.path.join(appdata, app_folder, 'data')
-                elif sys.platform == 'darwin':  # macOS
-                    data_path = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support', app_folder, 'data')
+                if os.name == "nt":  # Windows
+                    appdata = os.environ.get("APPDATA", os.path.expanduser("~"))
+                    data_path = os.path.join(appdata, app_folder, "data")
+                elif sys.platform == "darwin":  # macOS
+                    data_path = os.path.join(
+                        os.path.expanduser("~"),
+                        "Library",
+                        "Application Support",
+                        app_folder,
+                        "data",
+                    )
                 else:  # Linux — v0.4.1: respect XDG_DATA_HOME
-                    xdg_data = os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser('~'), '.local', 'share'))
-                    data_path = os.path.join(xdg_data, app_folder.lower(), 'data')
+                    xdg_data = os.environ.get(
+                        "XDG_DATA_HOME",
+                        os.path.join(os.path.expanduser("~"), ".local", "share"),
+                    )
+                    data_path = os.path.join(xdg_data, app_folder.lower(), "data")
         self.data_path = Path(data_path)
         self.data_path.mkdir(parents=True, exist_ok=True)
 
@@ -332,7 +357,7 @@ class UnifiedMemorySystem:
         """
         if self.ghost_registry_path.exists():
             try:
-                with open(self.ghost_registry_path, 'r') as f:
+                with open(self.ghost_registry_path, "r") as f:
                     data = json.load(f)
                     return set(data.get("ghost_ids", []))
             except Exception as e:
@@ -342,7 +367,7 @@ class UnifiedMemorySystem:
     def _save_ghost_registry(self):
         """Save ghost registry to disk."""
         try:
-            with open(self.ghost_registry_path, 'w') as f:
+            with open(self.ghost_registry_path, "w") as f:
                 json.dump({"ghost_ids": list(self.ghost_ids)}, f, indent=2)
             logger.debug(f"Saved ghost registry with {len(self.ghost_ids)} IDs")
         except Exception as e:
@@ -375,19 +400,21 @@ class UnifiedMemorySystem:
             # Check collections table
             cursor.execute("PRAGMA table_info(collections)")
             collections_columns = {col[1] for col in cursor.fetchall()}
-            if 'topic' not in collections_columns:
-                migrations_needed.append(('collections', 'topic', 'TEXT'))
+            if "topic" not in collections_columns:
+                migrations_needed.append(("collections", "topic", "TEXT"))
 
             # Check segments table (also needs 'topic' in ChromaDB 1.x)
             cursor.execute("PRAGMA table_info(segments)")
             segments_columns = {col[1] for col in cursor.fetchall()}
-            if 'topic' not in segments_columns:
-                migrations_needed.append(('segments', 'topic', 'TEXT'))
+            if "topic" not in segments_columns:
+                migrations_needed.append(("segments", "topic", "TEXT"))
 
             # Apply migrations
             for table, column, col_type in migrations_needed:
                 try:
-                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+                    cursor.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"
+                    )
                     logger.info(f"ChromaDB migration: Added {column} to {table}")
                 except sqlite3.OperationalError as e:
                     if "duplicate column" in str(e).lower():
@@ -399,7 +426,9 @@ class UnifiedMemorySystem:
             conn.close()
 
             if migrations_needed:
-                logger.info(f"ChromaDB schema migration complete: {len(migrations_needed)} columns added")
+                logger.info(
+                    f"ChromaDB schema migration complete: {len(migrations_needed)} columns added"
+                )
             else:
                 logger.debug("ChromaDB schema up to date")
 
@@ -430,14 +459,14 @@ class UnifiedMemorySystem:
             "working": "roampal_working",
             "history": "roampal_history",
             "patterns": "roampal_patterns",
-            "memory_bank": "roampal_memory_bank"
+            "memory_bank": "roampal_memory_bank",
         }
         # v0.4.4: Initialize all collection adapters concurrently
         adapters = []
         for short_name, chroma_name in collection_mapping.items():
             adapter = ChromaDBAdapter(
                 collection_name=chroma_name,
-                persist_directory=str(self.data_path / "chromadb")
+                persist_directory=str(self.data_path / "chromadb"),
             )
             adapters.append((short_name, chroma_name, adapter))
 
@@ -450,10 +479,10 @@ class UnifiedMemorySystem:
         self._scoring_service = ScoringService(config=self.config)
 
         # v0.4.5: Tag service replaces KG
-        # Regex-only extraction for now. Claude Code: main LLM will pass
-        # noun_tags via MCP tool params (future). OpenCode: sidecar handles
-        # tag extraction separately. No sidecar LLM calls from server side.
-        self._tag_service = TagService()
+        # v0.4.9: Wire to sidecar LLM for tag extraction (matches benchmark)
+        # If sidecar unavailable, TagService will return [] (no regex fallback)
+        llm_extract_fn = extract_tags if SIDECAR_AVAILABLE else None
+        self._tag_service = TagService(llm_extract_fn=llm_extract_fn)
 
         # Routing service (v0.4.5: simplified, no KG)
         self._routing_service = RoutingService(config=self.config)
@@ -462,27 +491,27 @@ class UnifiedMemorySystem:
         self._promotion_service = PromotionService(
             collections=self.collections,
             embed_fn=self._embedding_service.embed_text,
-            config=self.config
+            config=self.config,
         )
 
         # OutcomeService wired to PromotionService — garbage now gets deleted
         self._outcome_service = OutcomeService(
             collections=self.collections,
             promotion_service=self._promotion_service,
-            config=self.config
+            config=self.config,
         )
 
         self._memory_bank_service = MemoryBankService(
             collection=self.collections["memory_bank"],
             embed_fn=self._embedding_service.embed_text,
             config=self.config,
-            search_fn=self.search
+            search_fn=self.search,
         )
 
         self._context_service = ContextService(
             collections=self.collections,
             embed_fn=self._embedding_service.embed_text,
-            config=self.config
+            config=self.config,
         )
 
         # v0.4.5: Tag-routed search replaces KG-based search
@@ -503,7 +532,6 @@ class UnifiedMemorySystem:
 
         # Startup cleanup: delete garbage memories (score < 0.2)
         await self._startup_cleanup()
-
 
     async def _startup_cleanup(self):
         """
@@ -540,7 +568,9 @@ class UnifiedMemorySystem:
                 if ids_to_delete:
                     adapter.delete_vectors(ids_to_delete)
                     deleted_count += len(ids_to_delete)
-                    logger.info(f"Startup cleanup: deleted {len(ids_to_delete)} garbage items from {coll_name}")
+                    logger.info(
+                        f"Startup cleanup: deleted {len(ids_to_delete)} garbage items from {coll_name}"
+                    )
 
             except Exception as e:
                 logger.warning(f"Startup cleanup error for {coll_name}: {e}")
@@ -562,7 +592,7 @@ class UnifiedMemorySystem:
         limit: int = 10,
         collections: Optional[List[CollectionName]] = None,
         metadata_filters: Optional[Dict[str, Any]] = None,
-        sort_by: Optional[str] = None
+        sort_by: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search memory with optional collection filtering.
@@ -595,7 +625,9 @@ class UnifiedMemorySystem:
                 )
 
                 # Filter ghost IDs (deleted books)
-                all_results = [r for r in all_results if r.get("id", "") not in self.ghost_ids]
+                all_results = [
+                    r for r in all_results if r.get("id", "") not in self.ghost_ids
+                ]
 
                 # Add legacy field aliases for Desktop compatibility
                 for r in all_results:
@@ -605,21 +637,32 @@ class UnifiedMemorySystem:
 
                 # Apply sort_by override
                 if sort_by == "recency":
+
                     def get_timestamp(x):
                         metadata = x.get("metadata", {})
-                        ts = metadata.get("timestamp") or metadata.get("created_at") or ""
+                        ts = (
+                            metadata.get("timestamp")
+                            or metadata.get("created_at")
+                            or ""
+                        )
                         return ts if ts else "0"
+
                     all_results.sort(key=get_timestamp, reverse=True)
                     return all_results[:limit]
                 elif sort_by == "score":
-                    all_results.sort(key=lambda x: x.get("metadata", {}).get("score", 0.5), reverse=True)
+                    all_results.sort(
+                        key=lambda x: x.get("metadata", {}).get("score", 0.5),
+                        reverse=True,
+                    )
                     return all_results[:limit]
                 else:
                     # Default: already sorted by final_rank_score from SearchService
-                    return all_results[:limit * 2]
+                    return all_results[: limit * 2]
 
             except Exception as e:
-                logger.warning(f"SearchService search failed, falling back to inline: {e}")
+                logger.warning(
+                    f"SearchService search failed, falling back to inline: {e}"
+                )
 
         # Fallback: inline search (pre-initialization or SearchService failure)
         if collections is None:
@@ -634,9 +677,7 @@ class UnifiedMemorySystem:
 
             try:
                 results = await self.collections[coll_name].query_vectors(
-                    query_vector=query_vector,
-                    top_k=limit,
-                    filters=metadata_filters
+                    query_vector=query_vector, top_k=limit, filters=metadata_filters
                 )
 
                 for r in results:
@@ -675,18 +716,22 @@ class UnifiedMemorySystem:
                 logger.warning(f"Error searching {coll_name}: {e}")
 
         if sort_by == "recency":
+
             def get_timestamp(x):
                 metadata = x.get("metadata", {})
                 ts = metadata.get("timestamp") or metadata.get("created_at") or ""
                 return ts if ts else "0"
+
             all_results.sort(key=get_timestamp, reverse=True)
             return all_results[:limit]
         elif sort_by == "score":
-            all_results.sort(key=lambda x: x.get("metadata", {}).get("score", 0.5), reverse=True)
+            all_results.sort(
+                key=lambda x: x.get("metadata", {}).get("score", 0.5), reverse=True
+            )
             return all_results[:limit]
         else:
             all_results.sort(key=lambda x: x.get("final_rank_score", 0), reverse=True)
-            return all_results[:limit * 2]
+            return all_results[: limit * 2]
 
     # ==================== Generic Store (Desktop-compatible wrapper) ====================
 
@@ -694,7 +739,7 @@ class UnifiedMemorySystem:
         self,
         text: str,
         collection: str = "working",
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Store text in a collection (Desktop-compatible wrapper).
@@ -725,6 +770,7 @@ class UnifiedMemorySystem:
         elif collection in ("patterns", "history"):
             # Direct store to patterns/history (Desktop-compatible)
             import uuid
+
             doc_id = f"{collection}_{uuid.uuid4().hex[:8]}"
             final_metadata = {
                 "text": text,
@@ -732,17 +778,15 @@ class UnifiedMemorySystem:
                 "score": 0.5,
                 "uses": 0,
                 "timestamp": datetime.now().isoformat(),
-                **(metadata or {})
+                **(metadata or {}),
             }
             embedding = await self._embedding_service.embed_text(text)
             await self.collections[collection].upsert_vectors(
-                ids=[doc_id],
-                vectors=[embedding],
-                metadatas=[final_metadata]
+                ids=[doc_id], vectors=[embedding], metadatas=[final_metadata]
             )
 
             # v0.4.5: Extract noun tags for TagCascade retrieval
-            if hasattr(self, '_tag_service') and self._tag_service:
+            if hasattr(self, "_tag_service") and self._tag_service:
                 try:
                     tags = self._tag_service.extract_tags(text)
                     if tags:
@@ -766,7 +810,7 @@ class UnifiedMemorySystem:
         noun_tags: Optional[List[str]] = None,
         importance: float = 0.7,
         confidence: float = 0.7,
-        always_inject: bool = False
+        always_inject: bool = False,
     ) -> str:
         """
         Store a fact in memory_bank.
@@ -790,7 +834,7 @@ class UnifiedMemorySystem:
             tags=tags or [],
             importance=importance,
             confidence=confidence,
-            always_inject=always_inject
+            always_inject=always_inject,
         )
 
         # v0.4.5: noun_tags for TagCascade retrieval
@@ -798,9 +842,9 @@ class UnifiedMemorySystem:
             self.collections["memory_bank"].update_fragment_metadata(
                 doc_id, {"noun_tags": json.dumps(noun_tags)}
             )
-            if hasattr(self, '_tag_service') and self._tag_service:
+            if hasattr(self, "_tag_service") and self._tag_service:
                 self._tag_service.add_known_tags(noun_tags)
-        elif hasattr(self, '_tag_service') and self._tag_service:
+        elif hasattr(self, "_tag_service") and self._tag_service:
             try:
                 extracted = self._tag_service.extract_tags(text)
                 if extracted:
@@ -813,9 +857,7 @@ class UnifiedMemorySystem:
         return doc_id
 
     async def update_memory_bank(
-        self,
-        old_content: str,
-        new_content: str
+        self, old_content: str, new_content: str
     ) -> Optional[str]:
         """
         Update a memory_bank entry.
@@ -880,7 +922,7 @@ class UnifiedMemorySystem:
                         "id": doc_id,
                         "content": doc.get("content", ""),
                         "metadata": doc.get("metadata", {}),
-                        "collection": coll_name
+                        "collection": coll_name,
                     }
                     return normalize_memory(result, coll_name)
         return None
@@ -894,7 +936,7 @@ class UnifiedMemorySystem:
         failure_reason: Optional[str] = None,
         # Desktop-compatible parameters
         doc_id: str = None,
-        context: Dict[str, Any] = None
+        context: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
         Record outcome for searched documents.
@@ -924,22 +966,22 @@ class UnifiedMemorySystem:
         updates = []
         for single_doc_id in doc_ids:
             result = await self._outcome_service.record_outcome(
-                doc_id=single_doc_id,
-                outcome=outcome,
-                failure_reason=failure_reason
+                doc_id=single_doc_id, outcome=outcome, failure_reason=failure_reason
             )
             if result:
-                updates.append({
-                    "doc_id": single_doc_id,
-                    "new_score": result.get("score"),
-                    "outcome": outcome
-                })
+                updates.append(
+                    {
+                        "doc_id": single_doc_id,
+                        "new_score": result.get("score"),
+                        "outcome": outcome,
+                    }
+                )
 
         logger.info(f"Recorded outcome '{outcome}' for {len(updates)} documents")
         return {
             "outcome": outcome,
             "documents_updated": len(updates),
-            "updates": updates
+            "updates": updates,
         }
 
     # ==================== Context Analysis (for Hooks) ====================
@@ -948,7 +990,7 @@ class UnifiedMemorySystem:
         self,
         query: str,
         conversation_id: str = None,
-        recent_conversation: List[Dict[str, Any]] = None
+        recent_conversation: List[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Get context to inject into LLM prompt via hooks.
@@ -974,7 +1016,7 @@ class UnifiedMemorySystem:
             "memories": [],
             "user_facts": [],
             "formatted_injection": "",
-            "doc_ids": []
+            "doc_ids": [],
         }
 
         # 0. Fetch always_inject memories (core identity - always included)
@@ -992,33 +1034,35 @@ class UnifiedMemorySystem:
         # Lane 1: summaries/context (4 slots)
         # memory_bank items included (no memory_type field, $ne "fact" includes them)
         summary_results = await self.search(
-            query=query, limit=4, collections=all_collections,
-            metadata_filters={"memory_type": {"$ne": "fact"}}
+            query=query,
+            limit=4,
+            collections=all_collections,
+            metadata_filters={"memory_type": {"$ne": "fact"}},
         )
 
         # Lane 2: facts (4 slots)
         # memory_bank excluded naturally (no items have memory_type: "fact")
         fact_results = await self.search(
-            query=query, limit=4, collections=all_collections,
-            metadata_filters={"memory_type": "fact"}
+            query=query,
+            limit=4,
+            collections=all_collections,
+            metadata_filters={"memory_type": "fact"},
         )
 
         # Merge: 4 summaries + 4 facts
         all_results = summary_results + fact_results
 
         # Filter empty — keep all 8 (4 summaries + 4 facts)
-        top_memories = [
-            m for m in all_results
-            if m.get("content") or m.get("text")
-        ]
+        top_memories = [m for m in all_results if m.get("content") or m.get("text")]
 
         result["memories"] = top_memories
-        result["relevant_memories"] = top_memories  # Alias for selective scoring in hooks
+        result["relevant_memories"] = (
+            top_memories  # Alias for selective scoring in hooks
+        )
         result["doc_ids"] = [m.get("id") for m in top_memories if m.get("id")]
         result["formatted_injection"] = self._format_context_injection(result)
 
         return result
-
 
     def _format_context_injection(self, context: Dict[str, Any]) -> str:
         """
@@ -1028,6 +1072,7 @@ class UnifiedMemorySystem:
         Extracts user name from identity-tagged memories.
         """
         import re
+
         parts = []
         user_name = None
 
@@ -1047,11 +1092,19 @@ class UnifiedMemorySystem:
             if "identity" not in tags:
                 continue
 
-            content = fact.get("content") or fact.get("text") or fact.get("metadata", {}).get("text", "")
+            content = (
+                fact.get("content")
+                or fact.get("text")
+                or fact.get("metadata", {}).get("text", "")
+            )
             content_lower = content.lower()
 
             # Look for name patterns
-            if "name is" in content_lower or "i'm " in content_lower or "i am " in content_lower:
+            if (
+                "name is" in content_lower
+                or "i'm " in content_lower
+                or "i am " in content_lower
+            ):
                 # Try "name is X" pattern
                 match = re.search(r"name is (\w+)", content, re.IGNORECASE)
                 if match:
@@ -1066,7 +1119,9 @@ class UnifiedMemorySystem:
         memories = context.get("memories", [])
 
         if user_name or memories:
-            parts.append("You have persistent memory about this user via Roampal. Memory tags: wilson:N% = reliability from past scoring, used:Nx = times retrieved, last:worked/failed/partial/unknown = whether this memory was *helpful* last time (not whether a task succeeded). [id:...] tags can be looked up with search_memory(id=...). Memories may be outdated or wrong. Verify before treating as ground truth. The context below was retrieved from past conversations. If the user references past interactions or asks if you remember them, use this context — you DO remember.")
+            parts.append(
+                "You have persistent memory about this user via Roampal. Memory tags: wilson:N% = reliability from past scoring, used:Nx = times retrieved, last:worked/failed/partial/unknown = whether this memory was *helpful* last time (not whether a task succeeded). [id:...] tags can be looked up with search_memory(id=...). Memories may be outdated or wrong. Verify before treating as ground truth. The context below was retrieved from past conversations. If the user references past interactions or asks if you remember them, use this context — you DO remember."
+            )
             parts.append("")
             parts.append("═══ KNOWN CONTEXT ═══")
 
@@ -1078,7 +1133,9 @@ class UnifiedMemorySystem:
             summaries = []
             facts = []
             for mem in memories:
-                normalized = normalize_memory(dict(mem), mem.get("collection", "unknown"))
+                normalized = normalize_memory(
+                    dict(mem), mem.get("collection", "unknown")
+                )
                 mem_type = mem.get("metadata", {}).get("memory_type", "")
                 if mem_type == "fact":
                     facts.append(normalized)
@@ -1115,7 +1172,9 @@ class UnifiedMemorySystem:
 
             if facts:
                 parts.append("")
-                parts.append("Facts (auto-extracted from conversation — use for direction, not authority. Verify before citing as true):")
+                parts.append(
+                    "Facts (auto-extracted from conversation — use for direction, not authority. Verify before citing as true):"
+                )
                 for f in facts:
                     parts.append(_format_mem(f))
 
@@ -1128,10 +1187,7 @@ class UnifiedMemorySystem:
     # ==================== Book/Document Operations ====================
 
     def _chunk_by_sentences(
-        self,
-        content: str,
-        chunk_size: int = 1000,
-        chunk_overlap: int = 200
+        self, content: str, chunk_size: int = 1000, chunk_overlap: int = 200
     ) -> List[str]:
         """
         v0.2.0: Chunk content by sentence boundaries.
@@ -1155,7 +1211,7 @@ class UnifiedMemorySystem:
 
         # Split by sentence boundaries (. ! ? followed by space/newline)
         # Keep the punctuation with the sentence
-        sentence_pattern = r'(?<=[.!?])\s+'
+        sentence_pattern = r"(?<=[.!?])\s+"
         sentences = re.split(sentence_pattern, content)
 
         # Guard: If no sentences found (no punctuation), fall back to character chunking
@@ -1171,7 +1227,7 @@ class UnifiedMemorySystem:
 
             # If adding this sentence exceeds chunk size, finalize current chunk
             if current_length + sentence_len > chunk_size and current_chunk:
-                chunks.append(' '.join(current_chunk))
+                chunks.append(" ".join(current_chunk))
 
                 # Calculate overlap: keep sentences from end that fit in overlap
                 overlap_chunk = []
@@ -1191,15 +1247,12 @@ class UnifiedMemorySystem:
 
         # Don't forget the last chunk
         if current_chunk:
-            chunks.append(' '.join(current_chunk))
+            chunks.append(" ".join(current_chunk))
 
         return chunks if chunks else [content]
 
     def _chunk_by_chars(
-        self,
-        content: str,
-        chunk_size: int,
-        chunk_overlap: int
+        self, content: str, chunk_size: int, chunk_overlap: int
     ) -> List[str]:
         """
         Fallback: Character-based chunking for content without sentence boundaries.
@@ -1236,8 +1289,7 @@ class UnifiedMemorySystem:
         try:
             # Query for chunks with this title
             results = books_collection.collection.get(
-                where={"title": title},
-                include=["metadatas"]
+                where={"title": title}, include=["metadatas"]
             )
 
             if results and results.get("ids"):
@@ -1253,7 +1305,7 @@ class UnifiedMemorySystem:
         title: str = None,
         source: str = None,
         chunk_size: int = 1000,
-        chunk_overlap: int = 200
+        chunk_overlap: int = 200,
     ) -> List[str]:
         """
         Store a document in the books collection.
@@ -1274,16 +1326,20 @@ class UnifiedMemorySystem:
             await self.initialize()
 
         # v0.2.0: File size limit check
-        content_size = len(content.encode('utf-8'))
+        content_size = len(content.encode("utf-8"))
         if content_size > MAX_BOOK_SIZE:
             size_mb = content_size / (1024 * 1024)
-            raise ValueError(f"Content too large ({size_mb:.1f}MB > 10MB limit). Split into smaller files.")
+            raise ValueError(
+                f"Content too large ({size_mb:.1f}MB > 10MB limit). Split into smaller files."
+            )
 
         # v0.2.0: Duplicate detection - check if book with same title exists
         if title:
             existing = await self._check_book_exists(title)
             if existing:
-                logger.info(f"Book '{title}' already exists ({len(existing)} chunks), skipping")
+                logger.info(
+                    f"Book '{title}' already exists ({len(existing)} chunks), skipping"
+                )
                 return existing
 
         # v0.2.0: Sentence-based chunking (preserves semantic boundaries)
@@ -1310,7 +1366,7 @@ class UnifiedMemorySystem:
                 "source": source or "unknown",
                 "chunk_index": i,
                 "total_chunks": len(chunks),
-                "created_at": created_at
+                "created_at": created_at,
             }
 
             metadatas.append(meta)
@@ -1318,9 +1374,7 @@ class UnifiedMemorySystem:
         # v0.2.0: Batch upsert with rollback on failure
         try:
             await self.collections["books"].upsert_vectors(
-                ids=doc_ids,
-                vectors=embeddings,
-                metadatas=metadatas
+                ids=doc_ids, vectors=embeddings, metadatas=metadatas
             )
         except Exception as e:
             # Rollback: delete any chunks that may have been inserted
@@ -1365,8 +1419,7 @@ class UnifiedMemorySystem:
         # Find all chunks with this title
         try:
             results = books_collection.collection.get(
-                where={"title": title},
-                include=["metadatas"]
+                where={"title": title}, include=["metadatas"]
             )
         except Exception as e:
             return {"removed": 0, "error": str(e)}
@@ -1379,15 +1432,13 @@ class UnifiedMemorySystem:
         # This avoids HNSW index corruption while making chunks invisible
         self.ghost_ids.update(doc_ids)
         self._save_ghost_registry()
-        logger.info(f"Ghosted {len(doc_ids)} chunks for book '{title}' (non-destructive)")
+        logger.info(
+            f"Ghosted {len(doc_ids)} chunks for book '{title}' (non-destructive)"
+        )
 
         # v0.4.5: Action KG cleanup removed (KG deleted)
 
-        return {
-            "removed": len(doc_ids),
-            "title": title,
-            "method": "ghost_registry"
-        }
+        return {"removed": len(doc_ids), "title": title, "method": "ghost_registry"}
 
     async def list_books(self) -> List[Dict[str, Any]]:
         """
@@ -1420,7 +1471,11 @@ class UnifiedMemorySystem:
             if doc_id in self.ghost_ids:
                 continue
 
-            metadata = results.get("metadatas", [])[i] if i < len(results.get("metadatas", [])) else {}
+            metadata = (
+                results.get("metadatas", [])[i]
+                if i < len(results.get("metadatas", []))
+                else {}
+            )
             title = metadata.get("title", "Untitled")
 
             if title not in books_by_title:
@@ -1428,7 +1483,7 @@ class UnifiedMemorySystem:
                     "title": title,
                     "source": metadata.get("source", "unknown"),
                     "created_at": metadata.get("created_at", ""),
-                    "chunk_count": 0
+                    "chunk_count": 0,
                 }
             books_by_title[title]["chunk_count"] += 1
 
@@ -1444,7 +1499,7 @@ class UnifiedMemorySystem:
         conversation_id: str = None,
         metadata: Dict[str, Any] = None,
         initial_score: float = 0.5,
-        noun_tags: Optional[List[str]] = None
+        noun_tags: Optional[List[str]] = None,
     ) -> str:
         """
         Store content in working memory.
@@ -1473,18 +1528,18 @@ class UnifiedMemorySystem:
             "score": initial_score,
             "uses": 0,
             "created_at": datetime.now().isoformat(),
-            "conversation_id": conversation_id or "unknown"
+            "conversation_id": conversation_id or "unknown",
         }
         if metadata:
             meta.update(metadata)
 
         # v0.4.5: noun_tags for TagCascade retrieval
-        # Use provided tags (from LLM via MCP tool), fall back to regex for migration
+        # v0.4.9: LLM-only tag extraction (matches benchmark). No regex fallback.
         if noun_tags:
             meta["noun_tags"] = json.dumps(noun_tags)
-            if hasattr(self, '_tag_service') and self._tag_service:
+            if hasattr(self, "_tag_service") and self._tag_service:
                 self._tag_service.add_known_tags(noun_tags)
-        elif hasattr(self, '_tag_service') and self._tag_service:
+        elif hasattr(self, "_tag_service") and self._tag_service:
             try:
                 tags = self._tag_service.extract_tags(content)
                 if tags:
@@ -1493,9 +1548,7 @@ class UnifiedMemorySystem:
                 logger.warning(f"Tag extraction failed for working memory: {e}")
 
         await self.collections["working"].upsert_vectors(
-            ids=[doc_id],
-            vectors=[embedding],
-            metadatas=[meta]
+            ids=[doc_id], vectors=[embedding], metadatas=[meta]
         )
 
         return doc_id
@@ -1515,7 +1568,7 @@ class UnifiedMemorySystem:
         stats = {
             "initialized": self.initialized,
             "data_path": str(self.data_path),
-            "collections": {}
+            "collections": {},
         }
 
         for name, adapter in self.collections.items():
@@ -1539,12 +1592,48 @@ class UnifiedMemorySystem:
             return []
 
         import re
-        words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
 
-        stop_words = {'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had',
-                      'her', 'was', 'one', 'our', 'out', 'has', 'have', 'been', 'this', 'that',
-                      'with', 'they', 'from', 'what', 'when', 'where', 'which', 'how', 'why',
-                      'just', 'will', 'would', 'could', 'should', 'there', 'their', 'about'}
+        words = re.findall(r"\b[a-zA-Z]{3,}\b", text.lower())
+
+        stop_words = {
+            "the",
+            "and",
+            "for",
+            "are",
+            "but",
+            "not",
+            "you",
+            "all",
+            "can",
+            "had",
+            "her",
+            "was",
+            "one",
+            "our",
+            "out",
+            "has",
+            "have",
+            "been",
+            "this",
+            "that",
+            "with",
+            "they",
+            "from",
+            "what",
+            "when",
+            "where",
+            "which",
+            "how",
+            "why",
+            "just",
+            "will",
+            "would",
+            "could",
+            "should",
+            "there",
+            "their",
+            "about",
+        }
 
         concepts = [w for w in words if w not in stop_words]
         return concepts[:10]
@@ -1557,7 +1646,11 @@ class UnifiedMemorySystem:
     def get_tier_recommendations(self, concepts: List[str]) -> Dict[str, Any]:
         """v0.4.5: Stub for backward compat. Returns all collections."""
         ALL_COLLECTIONS = ["working", "patterns", "history", "books", "memory_bank"]
-        return {"top_collections": ALL_COLLECTIONS.copy(), "match_count": 0, "confidence_level": "exploration"}
+        return {
+            "top_collections": ALL_COLLECTIONS.copy(),
+            "match_count": 0,
+            "confidence_level": "exploration",
+        }
 
     # v0.4.5: All KG methods below this line removed. Only get_tier_recommendations
     # stub kept above for backward compatibility. Removed methods:
