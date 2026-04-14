@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-RUN git clone https://github.com/roampal-ai/roampal-core . && git checkout aeae927
+RUN git clone https://github.com/roampal-ai/roampal-core . && git checkout b83e704
 
 RUN uv venv /app/venv --python 3.12 && VIRTUAL_ENV=/app/venv uv pip install .
 
