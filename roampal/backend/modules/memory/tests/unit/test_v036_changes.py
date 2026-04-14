@@ -276,10 +276,11 @@ class TestBatchPromotionParity:
 
 
 # ============================================================================
-# Test 4: Auto-Summarize Endpoint (Change 10)
+# Test 4: Auto-Summarize Endpoint — REMOVED in v0.4.8
+# autoSummarize caused Ollama contention with sidecar scoring.
 # ============================================================================
 
-class TestAutoSummarizeEndpoint:
+class _TestAutoSummarizeEndpoint_REMOVED:
     """Test POST /api/memory/auto-summarize-one endpoint."""
 
     @pytest.fixture

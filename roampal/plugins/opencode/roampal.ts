@@ -452,55 +452,8 @@ async function getContextFromRoampal(
   }
 }
 
-async function storeExchange(
-  sessionId: string,
-  userPrompt: string,
-  assistantResponse: string
-): Promise<void> {
-  try {
-    const response = await fetch(`${ROAMPAL_HOOK_URL}/stop`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        conversation_id: sessionId,
-        user_message: userPrompt,
-        assistant_response: assistantResponse
-      })
-    })
-
-    if (!response.ok) {
-      // v0.3.2: Self-healing on 503
-      if (response.status === 503) {
-        console.error("[roampal] Server unhealthy (503) during exchange store, attempting restart...")
-        if (await restartServer()) {
-          const retry = await fetch(`${ROAMPAL_HOOK_URL}/stop`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ conversation_id: sessionId, user_message: userPrompt, assistant_response: assistantResponse })
-          })
-          if (!retry.ok) console.error(`[roampal] Retry store exchange failed: ${retry.status}`)
-        }
-      } else {
-        console.error(`[roampal] Failed to store exchange: ${response.status}`)
-      }
-    }
-  } catch (error) {
-    // v0.3.2: Self-healing on connection failure
-    console.error("[roampal] Failed to store exchange, attempting restart...")
-    if (await restartServer()) {
-      try {
-        const retry = await fetch(`${ROAMPAL_HOOK_URL}/stop`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ conversation_id: sessionId, user_message: userPrompt, assistant_response: assistantResponse })
-        })
-        if (!retry.ok) console.error(`[roampal] Retry store exchange failed: ${retry.status}`)
-      } catch {
-        console.error("[roampal] Retry store exchange also failed")
-      }
-    }
-  }
-}
+// v0.4.8: storeExchange removed — sidecar stores summaries via /stop.
+// If sidecar fails, nothing is stored (no raw transcript pollution).
 
 // ============================================================================
 // Helper Functions
@@ -566,9 +519,9 @@ MEMORY SCORES: For each memory, judge based on topic relevance and exchange outc
 7. When in doubt → "unknown"`
       : ""
 
-    const scoringPrompt = `You are part of a memory system for an AI assistant. You ARE the main AI in this system — write as if you are making a note for your future self.
-
-The user said:
+    // v0.4.8: Call 1 — score_exchange (summary + outcome + memory_scores only).
+    // Matches benchmark sidecar_score(). Tags and facts extracted separately.
+    const scoringPrompt = `The user said:
 "${exchange.user}"
 
 You responded:
@@ -578,7 +531,7 @@ The user then followed up with:
 "${currentUserMessage}"
 ${memorySection}
 Respond with ONLY a JSON object:
-{ "summary": "<~300 chars>", "outcome": "<worked|failed|partial|unknown>", "noun_tags": ["<lowercase nouns>"], "facts": ["<atomic fact 1>", "<atomic fact 2>"]${memoryScoreSection} }
+{ "summary": "<~300 chars>", "outcome": "<worked|failed|partial|unknown>"${memoryScoreSection} }
 
 SUMMARY (under 300 chars): Capture what happened AND what changed. Summaries provide context and continuity — the story behind the facts.
 - Include names, topics, and the flow of the conversation
@@ -588,32 +541,13 @@ BAD: "User and assistant had a conversation" (empty, no content)
 BAD: "Temperature is 350F" (that's a fact, not a summary)
 GOOD: "User corrected the baking temp from 375F to 350F while adapting the recipe for a convection oven — first attempt burned the edges"
 GOOD: "Discussed switching API from REST to GraphQL after mobile team reported nested query issues with the current setup"
+GOOD: "User shared that their daughter Emma starts kindergarten in September, worried about the bus route — asked for tips on easing the transition"
 
 OUTCOME: Based on the user's follow-up:
 - worked: user confirmed, moved on, or was satisfied
 - failed: user corrected you, got frustrated, or asked to redo
 - partial: helped but incomplete or needed adjustment
 - unknown: no clear signal
-
-NOUN_TAGS: Extract the key TOPIC nouns from this exchange — people's names, places, objects, and specific things the exchange is actually about.
-- Use actual names, not pronouns (skip 'he', 'she', 'they', 'user', 'assistant')
-- Keep each tag as a short noun phrase (1-3 words), lowercase, max 8
-- Include both proper nouns and important common nouns
-- Skip meta-words about the conversation itself: source, answer, details, accuracy, response, question, topic, context, information, correction, update, memory
-- Skip generic verbs/actions: said, told, mentioned, discussed, talked, asked
-- Focus on WHO and WHAT the exchange is about, not how it was communicated
-
-FACTS: Extract key facts worth remembering from this exchange. Rules:
-- Include WHO or WHAT each fact is about — names, projects, topics
-- Combine related details into ONE rich fact rather than many fragments
-- Include specifics: dates, versions, preferences, decisions, reasons
-- ONE fact per entry, max 150 characters
-- Skip vague feelings, pleasantries, or generic observations
-- If no useful facts, return empty array
-GOOD: "The auth service uses JWT with 24h expiry, needs refresh token rotation added"
-GOOD: "User prefers TypeScript over JavaScript and uses Zod for validation"
-BAD: "They discussed something" (no specifics)
-BAD: "It was helpful" (no content)
 ${memoryInstructions}`
 
     // Build model queue. Simple and explicit — only models the user chose:
@@ -706,7 +640,7 @@ ${memoryInstructions}`
               messages: [
                 // /no_think disables qwen3's thinking mode (avoids burning all tokens on chain-of-thought).
                 // Other models ignore it as a harmless prefix. Scoring is simple — doesn't need reasoning.
-                { role: "system", content: "/no_think\nYou are part of a memory system. Return ONLY valid JSON with summary, outcome, noun_tags, facts, and memory_scores fields. No other text. Be concise." },
+                { role: "system", content: "/no_think\nYou are part of a memory system. Return ONLY valid JSON with summary, outcome, and memory_scores fields. No other text. Be concise." },
                 { role: "user", content: "/no_think\n" + scoringPrompt }
               ],
               max_tokens: 2000,
@@ -785,8 +719,8 @@ ${memoryInstructions}`
           }
 
           const summary = typeof result.summary === "string" ? result.summary : ""
-          const nounTags = Array.isArray(result.noun_tags) ? result.noun_tags.filter((t: unknown) => typeof t === "string") : []
-          const facts = Array.isArray(result.facts) ? result.facts.filter((f: unknown) => typeof f === "string" && (f as string).length > 10) : []
+          // v0.4.8: noun_tags and facts are NOT in Call 1. Tags extracted server-side at store time.
+          // Facts extracted in Call 2 below.
 
           // v0.3.6: Per-memory scoring from sidecar when available.
           // Falls back to blanket exchange outcome if model didn't return memory_scores.
@@ -822,9 +756,9 @@ ${memoryInstructions}`
                 conversation_id: sessionId,
                 outcome,
                 memory_scores: memoryScores,
-                exchange_summary: summary || undefined,
-                noun_tags: nounTags.length > 0 ? nounTags : undefined,
-                facts: facts.length > 0 ? facts : undefined
+                exchange_summary: summary || undefined
+                // v0.4.8: noun_tags removed — server extracts tags at store time.
+                // Facts sent separately via Call 2 below.
               })
             })
 
@@ -842,7 +776,7 @@ ${memoryInstructions}`
           }
 
           // v0.3.6: Store exchange summary as working memory (matches Claude Code sidecar)
-          // This creates a separate compact entry alongside the full exchange from storeExchange()
+          // v0.4.8: Sidecar stores the summary via /stop (storeExchange removed)
           if (summary) {
             try {
               // Fingerprint: simple hash of first 200 chars of user+assistant (matches cli.py format)
@@ -888,7 +822,7 @@ ${memoryInstructions}`
                   conversation_id: sessionId,
                   user_message: exchange.user.slice(0, 200),
                   assistant_response: summary,
-                  noun_tags: nounTags.length > 0 ? nounTags : undefined,
+                  // v0.4.8: noun_tags not sent — server extracts tags at store time
                   metadata: {
                     memory_type: "exchange_summary",
                     sidecar_outcome: outcome,
@@ -932,6 +866,77 @@ ${memoryInstructions}`
 
           // Clear circuit breaker on success — model is healthy again
           modelCircuitBreaker.delete(target.model)
+
+          // v0.4.8: Call 2 — extract_facts (separate LLM call, 30s timeout).
+          // Matches benchmark sidecar_extract_facts(). Tags handled server-side at store time.
+          try {
+            const factsPrompt = `Extract key facts worth remembering from this exchange. Rules:
+- Include WHO or WHAT each fact is about — names, projects, topics
+- Combine related details into ONE rich fact rather than many fragments
+- Include specifics: dates, versions, preferences, decisions, reasons
+- ONE fact per line, max 150 characters
+- Skip vague feelings, pleasantries, or generic observations
+
+GOOD: "The auth service uses JWT with 24h expiry, needs refresh token rotation added"
+GOOD: "User prefers TypeScript over JavaScript and uses Zod for validation"
+BAD: "They discussed something" (no specifics)
+BAD: "It was helpful" (no content)
+
+User: ${exchange.user.slice(0, 500)}
+Assistant: ${exchange.assistant.slice(0, 300)}
+
+Return ONLY a JSON object: {"facts": ["fact 1", "fact 2"]}
+If no useful facts, return: {"facts": []}`
+
+            const factsHeaders: Record<string, string> = { "Content-Type": "application/json" }
+            if (target.key) factsHeaders["Authorization"] = `Bearer ${target.key}`
+
+            const factsResp = await fetch(`${target.url}/chat/completions`, {
+              method: "POST",
+              headers: factsHeaders,
+              body: JSON.stringify({
+                model: target.model,
+                messages: [
+                  { role: "system", content: "/no_think\nExtract key facts. Return ONLY valid JSON with a facts array. No other text." },
+                  { role: "user", content: "/no_think\n" + factsPrompt }
+                ],
+                max_tokens: 1000,
+                temperature: 0,
+                think: false
+              }),
+              signal: AbortSignal.timeout(30000)
+            })
+
+            if (factsResp.ok) {
+              const factsData = await factsResp.json()
+              const factsMsg = factsData.choices?.[0]?.message || {}
+              const factsContent = factsMsg.content || factsMsg.reasoning_content || factsMsg.reasoning || ""
+              const factsJsonMatch = factsContent.match(/\{[\s\S]*\}/)
+              if (factsJsonMatch) {
+                const factsResult = JSON.parse(factsJsonMatch[0])
+                const extractedFacts = Array.isArray(factsResult.facts)
+                  ? factsResult.facts.filter((f: unknown) => typeof f === "string" && (f as string).length > 10)
+                  : []
+                if (extractedFacts.length > 0) {
+                  // Send facts to server (noun_tags handled by store_working at store time)
+                  await fetch(`${ROAMPAL_API_URL}/record-outcome`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      conversation_id: sessionId,
+                      outcome: "unknown",
+                      memory_scores: {},
+                      facts: extractedFacts
+                    })
+                  })
+                  debugLog(`scoreExchange FACTS: ${extractedFacts.length} facts extracted via ${target.label}`)
+                }
+              }
+            }
+          } catch (factsErr) {
+            debugLog(`scoreExchange FACTS error (non-fatal): ${factsErr}`)
+          }
+
           return true  // Done — exit all loops
 
         } catch (error) {
@@ -955,147 +960,8 @@ ${memoryInstructions}`
   }
 }
 
-// ============================================================================
-// Auto-Summarize Old Memories (v0.3.6 Change 10)
-// ============================================================================
-
-/**
- * Summarize one old long memory during idle. Sidecar-first, Zen fallback.
- *
- * 1. Call POST /api/memory/auto-summarize-one on the server
- * 2. If server returns {summarized: true} → done
- * 3. If server returns {summarized: false, reason: "backend_failed"} → fall back to Zen
- * 4. If server returns {summarized: false, reason: "no_candidates"} → silently return
- * 5. On any error: log warning, don't retry (next idle picks it up)
- */
-async function autoSummarizeOldMemory(): Promise<void> {
-  try {
-    const resp = await fetch(`${ROAMPAL_API_URL}/memory/auto-summarize-one`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: AbortSignal.timeout(15000)  // 15s — sidecar can be slow
-    })
-
-    if (!resp.ok) {
-      debugLog(`autoSummarize: server returned ${resp.status}`)
-      return
-    }
-
-    const data = await resp.json() as {
-      summarized: boolean
-      reason?: string
-      doc_id?: string
-      collection?: string
-      content?: string
-      old_len?: number
-      new_len?: number
-    }
-
-    if (data.summarized) {
-      debugLog(`autoSummarize: SUCCESS ${data.doc_id} (${data.old_len} -> ${data.new_len} chars)`)
-      return
-    }
-
-    if (data.reason === "no_candidates") {
-      // Nothing to summarize — all caught up
-      return
-    }
-
-    if (data.reason === "backend_failed" && data.content && data.doc_id && data.collection) {
-      // Server's sidecar failed — fall back to Zen directly from plugin
-      debugLog(`autoSummarize: sidecar failed for ${data.doc_id}, trying Zen fallback`)
-
-      const summarizePrompt = `You are part of a memory system for an AI assistant. You ARE the main AI — write a first-person note to your future self (~300 chars). Capture the important details from this exchange.
-
-Exchange:
-"${data.content}"
-
-Respond with ONLY a JSON object:
-{"summary": "<~300 chars>"}`
-
-      // Try Zen models (same rotation as scoring)
-      const zenModels = [...ZEN_SCORING_MODELS]
-      for (const model of zenModels) {
-        try {
-          const headers: Record<string, string> = { "Content-Type": "application/json" }
-          if (zenApiKey) headers["Authorization"] = `Bearer ${zenApiKey}`
-
-          const zenResp = await fetch(`${zenBaseURL}/chat/completions`, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              model,
-              messages: [
-                { role: "system", content: "You are part of a memory system. Return ONLY valid JSON with a summary field." },
-                { role: "user", content: summarizePrompt }
-              ],
-              max_tokens: 800
-            }),
-            signal: AbortSignal.timeout(8000)
-          })
-
-          if (!zenResp.ok) {
-            debugLog(`autoSummarize: Zen ${model} returned ${zenResp.status}`)
-            continue
-          }
-
-          const zenData = await zenResp.json()
-          const responseText = zenData.choices?.[0]?.message?.content
-            || zenData.choices?.[0]?.message?.reasoning_content
-            || ""
-
-          const jsonMatch = responseText.match(/\{[\s\S]*\}/)
-          if (!jsonMatch) {
-            debugLog(`autoSummarize: Zen ${model} no JSON in response`)
-            continue
-          }
-
-          const result = JSON.parse(jsonMatch[0])
-          const summary = typeof result.summary === "string" ? result.summary : ""
-          if (!summary) {
-            debugLog(`autoSummarize: Zen ${model} empty summary`)
-            continue
-          }
-
-          // Enforce length to prevent re-summarization loops
-          const finalSummary = summary.length > 400 ? summary.slice(0, 380) + "... [truncated]" : summary
-
-          // Save via update-content endpoint
-          const updateResp = await fetch(`${ROAMPAL_API_URL}/memory/update-content`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              doc_id: data.doc_id,
-              collection: data.collection,
-              new_content: finalSummary
-            }),
-            signal: AbortSignal.timeout(5000)
-          })
-
-          if (updateResp.ok) {
-            debugLog(`autoSummarize: Zen ${model} SUCCESS ${data.doc_id} (${data.old_len} -> ${finalSummary.length} chars)`)
-          } else {
-            debugLog(`autoSummarize: update-content failed ${updateResp.status}`)
-          }
-          return  // Done regardless of update success
-
-        } catch (err) {
-          debugLog(`autoSummarize: Zen ${model} error: ${err}`)
-          continue
-        }
-      }
-
-      debugLog(`autoSummarize: all Zen models failed for ${data.doc_id}`)
-      return
-    }
-
-    // Other reasons (memory_not_ready, etc.) — silently skip
-    debugLog(`autoSummarize: skipped (${data.reason})`)
-
-  } catch (err) {
-    debugLog(`autoSummarize: error: ${err}`)
-  }
-}
+// v0.4.8: autoSummarize removed — caused Ollama contention with sidecar scoring.
+// Sidecar produces proper summaries; no oversized memories are created.
 
 // ============================================================================
 // Plugin Export
@@ -1592,8 +1458,24 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
 
             if (ctx?.userPrompt && textParts?.size) {
               const assistantText = Array.from(textParts.values()).join("\n")
-              await storeExchange(sid, ctx.userPrompt, assistantText)
-              debugLog(`Stored exchange for session ${sid}`)
+              // v0.4.8: lifecycle_only=true — stores to JSONL for scoring prompts
+              // and marks exchange as completed (triggers scoringRequired on next turn).
+              // Does NOT store raw text to ChromaDB. Sidecar stores summary separately.
+              try {
+                await fetch(`${ROAMPAL_HOOK_URL}/stop`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    conversation_id: sid,
+                    user_message: ctx.userPrompt,
+                    assistant_response: assistantText,
+                    lifecycle_only: true
+                  })
+                })
+              } catch (err) {
+                debugLog(`session.idle: lifecycle stop hook error: ${err}`)
+              }
+              debugLog(`session.idle: exchange registered (${ctx.userPrompt.length}+${assistantText.length} chars), sidecar will store summary`)
 
               // Reset for next exchange
               ctx.userPrompt = ""
@@ -1650,16 +1532,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
               }
             }
 
-            // v0.4.7: Auto-summarize ONLY when sidecar is healthy and scoring completed.
-            // autoSummarize hits Ollama via the server — if scoring also just hit Ollama,
-            // they compete for the single inference slot, causing timeouts and circuit breaks.
-            if (!scoringBroken && !pendingScoring) {
-              try {
-                await autoSummarizeOldMemory()
-              } catch (err) {
-                debugLog(`session.idle: autoSummarize error: ${err}`)
-              }
-            }
+            // v0.4.8: autoSummarize removed (Ollama contention). Sidecar handles all summarization.
 
             // Clear state for next exchange
             assistantMessageIds.delete(sid)

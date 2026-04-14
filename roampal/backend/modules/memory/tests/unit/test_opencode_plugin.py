@@ -162,12 +162,10 @@ class TestSelfHealing:
         # Should call restartServer on 503
         assert re.search(r'response\.status\s*===\s*503.*restartServer', plugin_source, re.DOTALL)
 
-    def test_store_exchange_retries_on_503(self, plugin_source):
-        """storeExchange retries after 503."""
-        # Both functions should have self-healing
-        # Count occurrences of restartServer() calls
+    def test_get_context_retries_on_503(self, plugin_source):
+        """getContext retries after 503 (storeExchange removed in v0.4.8)."""
         restart_calls = plugin_source.count("await restartServer()")
-        assert restart_calls >= 4  # 2 in getContext (503 + catch) + 2 in storeExchange (503 + catch)
+        assert restart_calls >= 2  # 2 in getContext (503 + catch)
 
     def test_detached_server_spawn(self, plugin_source):
         """Server is spawned detached so it outlives the plugin."""
@@ -321,10 +319,9 @@ class TestExchangeCapture:
         # Should use part.text (not msg.content)
         assert "part.text" in plugin_source
 
-    def test_session_idle_calls_store_exchange(self, plugin_source):
-        """session.idle assembles response and calls storeExchange."""
-        assert "storeExchange(" in plugin_source
-        # Should join text parts
+    def test_session_idle_captures_exchange(self, plugin_source):
+        """session.idle assembles response text (v0.4.8: storeExchange removed, sidecar stores)."""
+        # Should join text parts for sidecar scoring
         assert "Array.from(textParts.values()).join" in plugin_source
 
     def test_sends_to_stop_endpoint(self, plugin_source):

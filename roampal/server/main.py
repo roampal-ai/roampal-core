@@ -521,10 +521,11 @@ async def lifespan(app: FastAPI):
         if cleaned > 0:
             logger.info(f"v0.2.9 migration: cleaned up {cleaned} archived memories")
 
-    # v0.4.7: Strip noun_tags from facts (tags are for summaries only).
-    # Facts were incorrectly given regex-extracted tags in v0.4.5-v0.4.6.1.
+    # v0.4.8: Re-tag facts that had noun_tags stripped by v0.4.7's migration.
+    # Benchmark proves tagged facts improve TagCascade retrieval.
+    # Uses store_working's built-in regex tag extraction for facts with empty tags.
     try:
-        stripped_count = 0
+        retagged_count = 0
         for coll_name in ["working", "history", "patterns"]:
             if coll_name not in _memory.collections:
                 continue
@@ -534,18 +535,22 @@ async def lifespan(app: FastAPI):
                 continue
             for i, doc_id in enumerate(items["ids"]):
                 metadata = items["metadatas"][i] if i < len(items["metadatas"]) else {}
-                noun_tags_raw = metadata.get("noun_tags")
-                if noun_tags_raw and noun_tags_raw != "[]":
-                    # Clear the noun_tags field
-                    adapter.collection.update(
-                        ids=[doc_id],
-                        metadatas=[{**metadata, "noun_tags": "[]"}]
-                    )
-                    stripped_count += 1
-        if stripped_count > 0:
-            logger.info(f"v0.4.7 migration: stripped noun_tags from {stripped_count} facts")
+                noun_tags_raw = metadata.get("noun_tags", "")
+                content = items["documents"][i] if i < len(items["documents"]) else ""
+                if (not noun_tags_raw or noun_tags_raw == "[]") and content:
+                    # Re-extract tags via regex
+                    if hasattr(_memory, '_tag_service') and _memory._tag_service:
+                        tags = _memory._tag_service.extract_tags(content)
+                        if tags:
+                            adapter.collection.update(
+                                ids=[doc_id],
+                                metadatas=[{**metadata, "noun_tags": json.dumps(tags)}]
+                            )
+                            retagged_count += 1
+        if retagged_count > 0:
+            logger.info(f"v0.4.8 migration: re-tagged {retagged_count} facts")
     except Exception as e:
-        logger.warning(f"v0.4.7 fact tag migration error: {e}")
+        logger.warning(f"v0.4.8 fact re-tag migration error: {e}")
 
     # Initialize session manager (uses same data path)
     _session_manager = SessionManager(_memory.data_path)
@@ -884,10 +889,7 @@ def create_app() -> FastAPI:
             else:
                 logger.info(f"No scoring required this turn for {conversation_id} - not blocking")
 
-            # v0.3.6: Spawn background auto-summarize task (non-blocking)
-            # One old memory cleaned up per stop hook cycle.
-            # Follows existing pattern from _deferred_action_kg_updates().
-            asyncio.create_task(_auto_summarize_one_memory())
+            # v0.4.8: autoSummarize removed — caused Ollama contention with sidecar scoring.
 
             return StopHookResponse(
                 stored=bool(doc_id),
@@ -1386,8 +1388,9 @@ def create_app() -> FastAPI:
                     logger.error(f"Failed to store exchange summary: {e}")
 
             # v0.4.5: Store atomic facts as separate working memories
-            # v0.4.7: No noun_tags on facts — tags are for summaries only.
-            # Facts are retrieved via cosine similarity, not tag-routing.
+            # v0.4.8: Restore noun_tags on facts — benchmark proves tagged facts
+            # improve TagCascade retrieval. Pass exchange-level tags; store_working's
+            # regex fallback provides per-fact extraction if no LLM tags available.
             if request.facts and _memory:
                 for fact_text in request.facts:
                     if not fact_text or len(fact_text.strip()) < 10:
@@ -1399,7 +1402,8 @@ def create_app() -> FastAPI:
                             metadata={
                                 "memory_type": "fact",
                                 "timestamp": datetime.now().isoformat(),
-                            }
+                            },
+                            noun_tags=request.noun_tags
                         )
                     except Exception as e:
                         logger.warning(f"Failed to store fact: {e}")
@@ -1491,157 +1495,8 @@ def create_app() -> FastAPI:
             logger.error(f"Error updating content: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
-    # ==================== Auto-Summarize (v0.3.6 Change 10) ====================
-
-    async def _do_auto_summarize_one() -> Dict[str, Any]:
-        """
-        Find one long memory and summarize it. Shared by endpoint and background task.
-
-        v0.3.6: Sidecar-first routing — uses user's configured backend (Custom > Haiku > Zen > Ollama).
-        Returns dict with {summarized, reason, doc_id, old_len, new_len} or
-        {summarized: false, reason, doc_id, collection, content, old_len} for plugin Zen fallback.
-        """
-        if not _memory:
-            return {"summarized": False, "reason": "memory_not_ready"}
-
-        # Search for candidates across working, history, patterns
-        candidates = []
-        for coll_name in ["working", "history", "patterns"]:
-            try:
-                results = await _memory.search(
-                    query="",
-                    collections=[coll_name],
-                    limit=10,
-                    sort_by="recency"
-                )
-                for r in results:
-                    content = r.get("content", "")
-                    metadata = r.get("metadata", {})
-                    if len(content) > 500 and not metadata.get("summarized_at"):
-                        candidates.append((coll_name, r))
-                        if len(candidates) >= 1:
-                            break
-            except Exception as e:
-                logger.warning(f"Auto-summarize search error for {coll_name}: {e}")
-
-            if candidates:
-                break
-
-        if not candidates:
-            return {"summarized": False, "reason": "no_candidates"}
-
-        coll_name, memory = candidates[0]
-        content = memory.get("content", "")
-        doc_id = memory.get("id", memory.get("doc_id", ""))
-
-        # Summarize via sidecar (Custom > Haiku > Zen > Ollama > claude -p)
-        try:
-            from roampal.sidecar_service import summarize_only
-            summary = await asyncio.to_thread(summarize_only, content)
-        except Exception as e:
-            logger.warning(f"Auto-summarize backend error: {e}")
-            return {
-                "summarized": False, "reason": "backend_failed",
-                "doc_id": doc_id, "collection": coll_name,
-                "content": content, "old_len": len(content)
-            }
-
-        if not summary:
-            return {
-                "summarized": False, "reason": "backend_failed",
-                "doc_id": doc_id, "collection": coll_name,
-                "content": content, "old_len": len(content)
-            }
-
-        # Enforce summary length to prevent re-summarization loops
-        if len(summary) > 400:
-            summary = summary[:380] + "... [truncated]"
-
-        # v0.4.7: Extract tags from the summary (for TagCascade retrieval).
-        # No fact extraction — sidecar handles facts at exchange time.
-        # autoSummarize is just cleanup for oversized memories the sidecar missed.
-        extracted_tags = []
-        try:
-            from roampal.sidecar_service import extract_tags
-            tags_result = await asyncio.to_thread(extract_tags, summary)
-            if tags_result:
-                extracted_tags = tags_result
-        except Exception as e:
-            logger.debug(f"Auto-summarize tag extraction error (non-fatal): {e}")
-
-        # Update memory with summary + tags
-        try:
-            adapter = _memory.collections.get(coll_name)
-            if not adapter:
-                return {"summarized": False, "reason": "collection_not_found"}
-
-            doc = adapter.get_fragment(doc_id)
-            if not doc:
-                return {"summarized": False, "reason": "doc_not_found"}
-
-            metadata = doc.get("metadata", {})
-            metadata["text"] = summary
-            metadata["content"] = summary
-            metadata["summarized_at"] = datetime.now().isoformat()
-            metadata["original_length"] = len(content)
-            if extracted_tags:
-                import json as _json
-                metadata["noun_tags"] = _json.dumps(extracted_tags)
-
-            embedding = await _memory._embedding_service.embed_text(summary)
-            await adapter.upsert_vectors(
-                ids=[doc_id],
-                vectors=[embedding],
-                metadatas=[metadata]
-            )
-
-            logger.info(f"Auto-summarized {doc_id}: {len(content)} -> {len(summary)} chars, {len(extracted_tags)} tags")
-            return {
-                "summarized": True, "doc_id": doc_id,
-                "old_len": len(content), "new_len": len(summary),
-                "tags": len(extracted_tags)
-            }
-        except Exception as e:
-            logger.error(f"Auto-summarize update error: {e}")
-            return {"summarized": False, "reason": "update_failed"}
-
-    async def _auto_summarize_one_memory():
-        """
-        Background task: summarize one long memory. Non-blocking.
-
-        v0.3.6: Spawned at end of stop_hook handler via asyncio.create_task().
-        Follows existing pattern from _deferred_action_kg_updates().
-        """
-        try:
-            result = await _do_auto_summarize_one()
-            if result.get("summarized"):
-                logger.info(f"[Background] Auto-summarized {result['doc_id']}: {result['old_len']} -> {result['new_len']} chars")
-            elif result.get("reason") == "no_candidates":
-                logger.debug("[Background] No auto-summarize candidates found")
-            else:
-                logger.info(f"[Background] Auto-summarize skipped: {result.get('reason', 'unknown')}")
-        except Exception as e:
-            logger.error(f"[Background] Auto-summarize error: {e}")
-
-    @app.post("/api/memory/auto-summarize-one")
-    async def auto_summarize_one():
-        """
-        Find and summarize one long memory.
-
-        v0.3.6: Called by OpenCode plugin (session.idle) and Claude Code background task.
-        Sidecar-first: uses user's configured backend before plugin falls back to Zen.
-
-        Returns:
-            {summarized: true, doc_id, old_len, new_len} on success
-            {summarized: false, reason: "no_candidates"} if nothing to summarize
-            {summarized: false, reason: "backend_failed", doc_id, collection, content, old_len}
-                if sidecar failed (plugin can fall back to Zen)
-        """
-        if not _memory:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
-
-        result = await _do_auto_summarize_one()
-        return result
+    # v0.4.8: autoSummarize removed — caused Ollama contention with sidecar scoring.
+    # Sidecar produces proper summaries; no oversized memories are created.
 
     # ==================== Health/Status Endpoints ====================
 
