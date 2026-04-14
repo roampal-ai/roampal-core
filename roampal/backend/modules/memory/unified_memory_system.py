@@ -785,16 +785,8 @@ class UnifiedMemorySystem:
                 ids=[doc_id], vectors=[embedding], metadatas=[final_metadata]
             )
 
-            # v0.4.5: Extract noun tags for TagCascade retrieval
-            if hasattr(self, "_tag_service") and self._tag_service:
-                try:
-                    tags = self._tag_service.extract_tags(text)
-                    if tags:
-                        self.collections[collection].update_fragment_metadata(
-                            doc_id, {"noun_tags": json.dumps(tags)}
-                        )
-                except Exception as e:
-                    logger.warning(f"Tag extraction failed for {doc_id}: {e}")
+            # v0.4.9: Tags carried from source memory metadata.
+            # No regex extraction — use `roampal retag` for migration.
 
             return doc_id
         else:
@@ -838,21 +830,13 @@ class UnifiedMemorySystem:
         )
 
         # v0.4.5: noun_tags for TagCascade retrieval
+        # v0.4.9: LLM-only tags only. No regex fallback — use `roampal retag` for migration.
         if noun_tags:
             self.collections["memory_bank"].update_fragment_metadata(
                 doc_id, {"noun_tags": json.dumps(noun_tags)}
             )
             if hasattr(self, "_tag_service") and self._tag_service:
                 self._tag_service.add_known_tags(noun_tags)
-        elif hasattr(self, "_tag_service") and self._tag_service:
-            try:
-                extracted = self._tag_service.extract_tags(text)
-                if extracted:
-                    self.collections["memory_bank"].update_fragment_metadata(
-                        doc_id, {"noun_tags": json.dumps(extracted)}
-                    )
-            except Exception as e:
-                logger.warning(f"Tag extraction failed for {doc_id}: {e}")
 
         return doc_id
 
@@ -1534,18 +1518,11 @@ class UnifiedMemorySystem:
             meta.update(metadata)
 
         # v0.4.5: noun_tags for TagCascade retrieval
-        # v0.4.9: LLM-only tag extraction (matches benchmark). No regex fallback.
+        # v0.4.9: LLM-only tags only. No regex fallback — use `roampal retag` for migration.
         if noun_tags:
             meta["noun_tags"] = json.dumps(noun_tags)
             if hasattr(self, "_tag_service") and self._tag_service:
                 self._tag_service.add_known_tags(noun_tags)
-        elif hasattr(self, "_tag_service") and self._tag_service:
-            try:
-                tags = self._tag_service.extract_tags(content)
-                if tags:
-                    meta["noun_tags"] = json.dumps(tags)
-            except Exception as e:
-                logger.warning(f"Tag extraction failed for working memory: {e}")
 
         await self.collections["working"].upsert_vectors(
             ids=[doc_id], vectors=[embedding], metadatas=[meta]

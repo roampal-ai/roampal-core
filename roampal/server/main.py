@@ -589,37 +589,6 @@ async def lifespan(app: FastAPI):
         if cleaned > 0:
             logger.info(f"v0.2.9 migration: cleaned up {cleaned} archived memories")
 
-    # v0.4.8: Re-tag facts that had noun_tags stripped by v0.4.7's migration.
-    # Benchmark proves tagged facts improve TagCascade retrieval.
-    # Uses store_working's built-in regex tag extraction for facts with empty tags.
-    try:
-        retagged_count = 0
-        for coll_name in ["working", "history", "patterns"]:
-            if coll_name not in _memory.collections:
-                continue
-            adapter = _memory.collections[coll_name]
-            items = adapter.collection.get(limit=10000, where={"memory_type": "fact"})
-            if not items or not items.get("ids"):
-                continue
-            for i, doc_id in enumerate(items["ids"]):
-                metadata = items["metadatas"][i] if i < len(items["metadatas"]) else {}
-                noun_tags_raw = metadata.get("noun_tags", "")
-                content = items["documents"][i] if i < len(items["documents"]) else ""
-                if (not noun_tags_raw or noun_tags_raw == "[]") and content:
-                    # Re-extract tags via regex
-                    if hasattr(_memory, "_tag_service") and _memory._tag_service:
-                        tags = _memory._tag_service.extract_tags(content)
-                        if tags:
-                            adapter.collection.update(
-                                ids=[doc_id],
-                                metadatas=[{**metadata, "noun_tags": json.dumps(tags)}],
-                            )
-                            retagged_count += 1
-        if retagged_count > 0:
-            logger.info(f"v0.4.8 migration: re-tagged {retagged_count} facts")
-    except Exception as e:
-        logger.warning(f"v0.4.8 fact re-tag migration error: {e}")
-
     # Initialize session manager (uses same data path)
     _session_manager = SessionManager(_memory.data_path)
     logger.info("Session manager initialized")

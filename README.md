@@ -136,6 +136,7 @@ roampal remove <title>      # Remove a book by title
 roampal sidecar status      # Check scoring model configuration (OpenCode)
 roampal sidecar setup       # Configure scoring model (OpenCode)
 roampal sidecar test        # Test scoring model response format (OpenCode)
+roampal retag               # Re-extract tags on memories using sidecar LLM
 roampal sidecar disable     # Remove scoring model configuration (OpenCode)
 ```
 
