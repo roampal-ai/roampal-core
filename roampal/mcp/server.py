@@ -446,61 +446,39 @@ def run_mcp_server(dev: bool = False):
         tools = [
             types.Tool(
                 name="search_memory",
-                description="""Search your persistent memory. Use when you need details beyond what KNOWN CONTEXT provided.
+                description="""Search persistent memory across all collections. Use when you need details beyond what was automatically provided in context.
 
-WHEN TO SEARCH:
-• User says "remember", "I told you", "we discussed" → search immediately
-• You need more detail than the context provided
-• You see [id:...] in KNOWN CONTEXT and want full details → use id= parameter
+WHEN TO USE:
+• User references past conversations ("remember", "I told you", "we discussed")
+• You need more detail than the injected context provided
+• You want to verify a memory by ID before acting on it (use id= parameter)
+• You want to browse recent memories by time (use days_back= parameter)
 
-WHEN NOT TO SEARCH:
-• General knowledge questions (use your training)
-• KNOWN CONTEXT already gave you the answer
+WHEN NOT TO USE:
+• General knowledge questions — use your training data
+• The injected context already answers the question
+• You want to store something — use add_to_memory_bank or record_response
 
-Collections: working (24h then auto-promotes), history (30d scored), patterns (permanent scored), memory_bank (permanent), books (permanent docs)
-Omit 'collections' parameter for auto-routing (recommended).
+BEHAVIOR:
+• Searches across 5 collections: working (recent), history (scored), patterns (proven), memory_bank (permanent facts), books (documents)
+• Omit 'collections' for automatic routing (recommended)
+• Returns ranked results with scores, age, and usage metadata
+• Results include formatted indicators: [YYN] (outcome history), s:0.7 (score), w:0.68 (confidence), use count, age, [id:doc_id]
 
-TEMPORAL SEARCH:
-Use days_back=N to search by time without a semantic query.
-Examples: days_back=7 → last 7 days. days_back=1, collections=["working"] → today's working memory.
-Combine with query for time-filtered semantic search: query="auth", days_back=14.
-
-ID LOOKUP:
-Use id="patterns_abc123" to look up a specific memory directly (bypasses search).
-Useful when you see [id:...] tags in KNOWN CONTEXT and want full metadata.
-
-READING RESULTS:
-• [YYN] = outcome history (last 3: Y=worked, ~=partial, N=failed)
-• s:0.7 = outcome score (0-1, higher = more successful outcomes)
-• w:0.68 = Wilson confidence score (statistical lower bound, 0-1)
-• 8 uses = times this memory has been surfaced and scored
-• 5d = age of memory
-• [id:patterns_abc123] = memory ID for lookup or scoring
-
-VERIFICATION USE:
-• Before stating a fact from memory as definitive, search for it
-• If you find conflicting memories on the same topic, prefer the
-  newer one and score the older one "failed" on the next scoring prompt
-• Use id= lookup to verify specific memories referenced in KNOWN CONTEXT
-  before building conclusions on them
+ERROR HANDLING:
+• No query, days_back, or id provided → returns "Provide at least one of: query, days_back, or id"
+• No matches found → returns "No results found for '...'"
+• Invalid collection name → collection is ignored
+• ID lookup with nonexistent ID → returns "Memory 'id' not found."
 
 RETURNS:
-Each result contains: content (the memory text), metadata (created_at, score, uses, outcome_history,
-noun_tags, Wilson confidence, collection name), and a formatted display line with age, scores, and
-usage stats. Results are pre-formatted with indicators like [YYN] (outcome history), s:0.7 (score),
-w:0.68 (Wilson), and use count.
-
-HOW THIS DIFFERS FROM OTHER TOOLS:
-• search_memory = READ existing memories (this tool)
-• add_to_memory_bank = WRITE new permanent facts
-• record_response = WRITE new exchange takeaways (auto-scored over time)
-• score_memories = EVALUATE existing memories for retrieval quality""",
+Formatted text with numbered results. Each result shows: [collection] (age, score, confidence, uses, outcome_history) [id:doc_id] content""",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Search query - use the users EXACT words/phrases, do NOT simplify or extract keywords"
+                            "description": "Natural language search query. Use the user's exact words — do not simplify or extract keywords. Example: \"auth bug we fixed last week\""
                         },
                         "days_back": {
                             "type": "integer",
@@ -526,7 +504,7 @@ HOW THIS DIFFERS FROM OTHER TOOLS:
                         },
                         "metadata": {
                             "type": "object",
-                            "description": "Optional filters. Use sparingly. Examples: created_at='2025-11-12', last_outcome='worked', has_code=true",
+                            "description": "Optional metadata filters. Example: {\"memory_type\": \"fact\"}",
                             "additionalProperties": True
                         },
                         "sort_by": {
@@ -545,143 +523,111 @@ HOW THIS DIFFERS FROM OTHER TOOLS:
             ),
             types.Tool(
                 name="add_to_memory_bank",
-                description="""Store PERMANENT facts that help maintain continuity across sessions.
+                description="""Store a permanent fact for cross-session continuity. Use for identity, preferences, goals, and project context.
 
-WHAT BELONGS HERE:
-• User identity (name, role, background) - MUST use tags=["identity"]
-• Preferences (communication style, tools, workflows)
-• Goals and projects (what they're working on, priorities)
-• Progress tracking (what worked, what failed, strategy iterations)
-• Useful context that would be lost between sessions
+WHEN TO USE:
+• User shares identity information (name, role, background) — use tags=["identity"]
+• User states a preference or standing rule
+• Important project context that should persist across all sessions
+• Knowledge that helps you be more effective for this user
 
-WHAT DOES NOT BELONG:
-• Raw conversation exchanges (auto-captured in working/history)
-• Temporary session facts (current task details)
-• Every fact you hear - be SELECTIVE, this is for PERMANENT knowledge
+WHEN NOT TO USE:
+• Session-specific details or temporary context — let working memory handle it
+• Raw conversation content — auto-captured by the scoring system
+• Exchange takeaways — use record_response instead (those get outcome-scored)
+• Research dumps or large documents — use books collection via CLI
 
-TAG MEANINGS:
-• identity - name, role, background (REQUIRED for cold start detection)
-• preference - communication style, tools they like, how they work
-• goal - what they're trying to achieve long-term
-• project - current projects, codebases, repos
-• system_mastery - things you learned about being effective for THIS user
-• agent_growth - meta-learning about how to improve as an assistant
+BEHAVIOR:
+• Creates a new memory in the memory_bank collection with a generated doc_id
+• Memory_bank facts are permanent and NOT outcome-scored — they persist until you update or delete them
+• If always_inject=true, the fact appears in every context injection (use only for core identity)
+• Duplicate content is allowed — check with search_memory first to avoid redundancy
+• Keep facts concise (~300 chars). One concept per fact. Put key info first.
 
-ALWAYS_INJECT:
-Use sparingly. Only for facts needed on EVERY message (core identity).
-Most facts should NOT be always_inject - they surface via semantic search when relevant.
-
-SIZE GUIDANCE:
-• Keep facts AS SMALL AS POSSIBLE - aim for ~300 chars or less
-• The first ~300 chars of each fact appear in cold start profile summaries
-• Longer facts work but only the beginning shows on cold start - put the key info first
-• Research dumps belong in books collection, not memory_bank
-• If you notice massive facts (1000+ chars), offer to condense them
-• One concept per fact - split multi-topic content into separate memories
-
-Rule of thumb: If it helps maintain continuity across sessions OR enables learning/improvement, store it. If it's session-specific, don't.
-
-Note: memory_bank is NOT outcome-scored. Facts persist until deleted.
-
-STORAGE DISCIPLINE:
-• confidence=0.9+ is reserved for facts you VERIFIED against source
-  (code, docs, tool output). Not for things you "know"
-• confidence=0.7 is the default — use it unless you have evidence
-• confidence=0.5 for unverified claims, approximate numbers, or
-  things the user told you that you couldn't confirm
-• Before storing, ask: "Will this still be true next week?" If not,
-  it doesn't belong in memory_bank — let working/history handle it
-• One fact per memory. Don't combine unrelated information
-
-HOW THIS DIFFERS FROM record_response:
-• add_to_memory_bank = permanent, unscored facts (identity, preferences, goals). YOU manage the lifecycle via update_memory/delete_memory. Survives indefinitely.
-• record_response = exchange takeaways that enter the outcome-scored pipeline (working → history → patterns). The system manages lifecycle automatically based on scoring feedback.
-Use add_to_memory_bank for standing facts. Use record_response for session learnings.
+ERROR HANDLING:
+• Missing noun_tags → returns validation error (required field)
+• Empty content → accepted but not useful (avoid)
 
 RETURNS:
-JSON with 'status' ('stored'), the assigned doc_id, and the collection ('memory_bank').""",
+Text confirmation with assigned doc_id. Example: "Added to memory bank (ID: memory_bank_a1b2c3d4)" """,
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "content": {"type": "string", "description": "The fact to remember"},
-                        "tags": {"type": "array", "items": {"type": "string"}, "description": "Categories: identity, preference, goal, project, system_mastery, agent_growth"},
-                        "noun_tags": {"type": "array", "items": {"type": "string"}, "description": "Key TOPIC nouns from the content. Use actual names not pronouns (skip he/she/they/user/assistant). Lowercase, 1-3 words each, max 8. Include proper nouns and important common nouns. Skip meta-words (source, answer, details, accuracy, response, question, topic, context, information, correction, update, memory) and verbs (said, told, mentioned, discussed, talked, asked). Focus on WHO and WHAT, not how it was communicated."},
-                        "importance": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.7, "description": "How critical (0.0-1.0)"},
-                        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.7, "description": "How certain (0.0-1.0)"},
-                        "always_inject": {"type": "boolean", "default": False, "description": "If true, this memory appears in EVERY context (use for core identity only)"}
+                        "content": {"type": "string", "description": "The fact to store. Keep concise (~300 chars). One concept per fact. Example: \"Logan is a data scientist focused on AI memory systems\""},
+                        "tags": {"type": "array", "items": {"type": "string"}, "description": "Semantic categories: 'identity' (name, role), 'preference' (workflow, style), 'goal' (objectives), 'project' (codebases), 'system_mastery' (effectiveness tips), 'agent_growth' (meta-learning). Use 'identity' for user profile facts."},
+                        "noun_tags": {"type": "array", "items": {"type": "string"}, "description": "Topic nouns for tag-based retrieval. Lowercase, 1-3 words each, max 8. Use names not pronouns. Example: [\"logan\", \"data science\", \"roampal\"]"},
+                        "importance": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.7, "description": "How critical this fact is (0.0-1.0, default: 0.7). Use 0.9+ for core identity facts."},
+                        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.7, "description": "How certain you are (0.0-1.0, default: 0.7). Use 0.9+ only for verified facts. Use 0.5 for unconfirmed claims."},
+                        "always_inject": {"type": "boolean", "default": False, "description": "If true, this fact appears in every context injection. Use only for core identity. Default: false."}
                     },
                     "required": ["content", "noun_tags"]
                 }
             ),
             types.Tool(
                 name="update_memory",
-                description="""Update an existing memory_bank fact when information changes or needs correction.
-
-MEMORY LIFECYCLE:
-Roampal has 5 collections. This tool ONLY updates memory_bank (permanent, unscored facts).
-• working → auto-promotes to history after 24h (outcome-scored)
-• history → auto-promotes to patterns after 30d (outcome-scored)
-• patterns → permanent (outcome-scored, high-confidence)
-• memory_bank → permanent (NOT outcome-scored — you manage it manually)
-• books → permanent document storage (use 'roampal ingest' CLI)
-
-Working/history/patterns are managed by the scoring system (score_memories tool).
-memory_bank facts persist until YOU update or delete them — no automatic cleanup.
+                description="""Replace an existing memory_bank fact with updated content. Use when information changes but the topic is still relevant.
 
 WHEN TO USE:
-• A memory_bank fact is outdated (e.g., version changed, path moved, status updated)
-• You gave wrong info because of a stale memory — fix it in the same turn
-• A fact is incomplete and needs more detail
-• Don't wait to be told — this is YOUR memory, maintain it proactively
+• A stored fact is outdated (e.g., version number changed, project status updated)
+• A fact needs correction or more detail
+• You gave wrong info because of a stale memory — fix it immediately
 
-UPDATE vs DELETE (use delete_memory instead when):
-• The fact is completely wrong or no longer relevant at all
-• The fact has been superseded by a different memory on a different topic
-• Use update_memory when the TOPIC is still relevant but DETAILS changed
+WHEN NOT TO USE:
+• The fact is completely wrong or irrelevant — use delete_memory instead
+• You want to update working/history/patterns memories — those are managed automatically by scoring
+• You want to add a new fact — use add_to_memory_bank instead
 
-MATCHING BEHAVIOR:
-old_content is matched semantically (cosine similarity), not as an exact string.
-You don't need to paste the exact text — a close paraphrase will match.
-If no match is found, the update fails silently and nothing is changed.
+BEHAVIOR:
+• Finds the closest semantic match to old_content in memory_bank
+• Replaces the matched memory's content with new_content, preserving its doc_id and metadata
+• Only searches memory_bank collection — cannot update working/history/patterns
+• old_content does not need to be exact — a close paraphrase works (semantic matching)
+
+ERROR HANDLING:
+• No semantic match found → returns "Memory not found for update", no changes made
+• Both parameters are required — omitting either returns an error
 
 RETURNS:
-JSON with 'status' ('updated' or 'not_found') and the matched memory's doc_id if successful.""",
+Text confirmation with doc_id on success. Example: "Updated memory (ID: memory_bank_a1b2c3d4)" """,
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "old_content": {"type": "string", "description": "The existing fact to find and replace. Matched via semantic similarity — a close paraphrase works, exact text is not required."},
-                        "new_content": {"type": "string", "description": "The corrected or updated fact to store in place of the old one. Keep concise (~300 chars). One concept per fact."}
+                        "old_content": {"type": "string", "description": "The existing fact to find and replace. Matched by semantic similarity — exact text not required. Example: \"User prefers dark mode\""},
+                        "new_content": {"type": "string", "description": "The corrected or updated fact. Keep concise (~300 chars). One concept per fact. Example: \"User switched to light mode in April 2026\""}
                     },
                     "required": ["old_content", "new_content"]
                 }
             ),
             types.Tool(
                 name="delete_memory",
-                description="""Permanently delete a memory_bank fact. This action is IRREVERSIBLE — the memory cannot be recovered.
-
-SCOPE: Only deletes from memory_bank (permanent unscored facts). Cannot delete from working, history, or patterns — those collections are managed automatically by the outcome scoring system (score_memories tool). Memories scored "failed" repeatedly in those collections are demoted or pruned automatically.
+                description="""Permanently remove a memory_bank fact. This action is irreversible.
 
 WHEN TO USE:
-• A memory_bank fact is completely wrong, stale, or harmful
-• A fact is redundant (covered by a newer, better memory)
-• A memory has been misleading you across sessions — don't just note it, remove it
-• memory_bank is NOT outcome-scored, so scoring alone won't remove bad facts. You must delete them directly.
+• A fact is completely wrong, stale, or misleading
+• A fact is redundant (superseded by a newer memory)
+• A memory_bank fact keeps causing incorrect responses — remove it directly
 
-WHEN TO USE update_memory INSTEAD:
-• The topic is still relevant but the details changed (version, path, status)
-• The fact needs correction, not removal
+WHEN NOT TO USE:
+• The topic is still relevant but details changed — use update_memory instead
+• You want to remove working/history/patterns memories — those are managed by scoring automatically (score them "failed" to demote)
 
-MATCHING BEHAVIOR:
-content is matched via semantic similarity (cosine distance), not exact string match.
-A close paraphrase will find the right memory. If multiple memories match, the closest match is deleted.
-If no match is found, nothing is deleted and the operation reports 'not_found'.
+BEHAVIOR:
+• Searches memory_bank by semantic similarity to find the closest match
+• Deletes the best-matching memory permanently
+• Only operates on memory_bank — cannot delete from other collections
+• Content is matched by meaning, not exact text — a paraphrase works
+• If multiple memories are similar, only the closest match is deleted
+
+ERROR HANDLING:
+• No semantic match found → returns "Memory not found for deletion", nothing deleted
+• Empty content → still attempts search (avoid — provide a meaningful description)
 
 RETURNS:
-JSON with 'status' ('deleted' or 'not_found') and the matched memory's doc_id and content preview if successful.""",
+Text confirmation on success: "Memory deleted successfully". On no match: "Memory not found for deletion".""",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "content": {"type": "string", "description": "The memory to delete, described in natural language. Matched via semantic similarity — use a close paraphrase of the fact you want to remove."}
+                        "content": {"type": "string", "description": "Describe the memory to delete in natural language. Matched by semantic similarity — a paraphrase works. Example: \"User's old email address\""}
                     },
                     "required": ["content"]
                 }
@@ -695,35 +641,30 @@ JSON with 'status' ('deleted' or 'not_found') and the matched memory's doc_id an
         if not _hide_score_tool:
             tools.append(types.Tool(
                 name="score_memories",
-                description="""Score memories from your previous context to train the outcome-based retrieval system. This is the core feedback loop — memories scored "worked" get promoted, "failed" get demoted or pruned.
+                description="""Score memories that were retrieved in your previous context. Each memory gets an outcome rating that adjusts its future retrieval priority.
 
-WHEN TO USE: ONLY when the <roampal-score-required> hook prompt appears (once per exchange, automatically triggered). Do NOT call at other times. For storing learnings at any time, use record_response instead.
+WHEN TO USE:
+• When prompted by the scoring hook (appears as a scoring prompt in context)
+• Score every memory ID listed in the prompt
 
-HOW IT WORKS:
-1. The hook prompt lists memory IDs to score (from [id:...] tags in KNOWN CONTEXT)
-2. You score each memory based on whether it helped your previous response
-3. Scores feed into Wilson confidence scoring — statistical lower-bound that balances signal vs noise
-4. Over time, helpful memories surface more; misleading ones get pruned
+WHEN NOT TO USE:
+• To store new information — use record_response or add_to_memory_bank instead
+• Without a scoring prompt — this tool evaluates existing memories, not new ones
 
-This tool differs from record_response: score_memories evaluates EXISTING memories for retrieval quality. record_response STORES NEW learnings. Use both — score_memories every turn (when prompted), record_response only for significant exchanges.
+BEHAVIOR:
+• Updates confidence scores on each scored memory
+• Memories repeatedly scored "failed" are automatically demoted or removed
+• exchange_summary is stored as a new working memory for future retrieval
+• facts (if provided) are stored as separate working memories
+• Unknown memory IDs in memory_scores are silently skipped
 
-SCORING GUIDE:
-• worked = this memory directly helped your response
-• partial = somewhat helpful or tangentially relevant
-• unknown = present in context but you didn't use it
-• failed = this memory was MISLEADING — you gave wrong info because of it
-
-⚠️ "failed" means MISLEADING, not just unused. If you didn't use a memory, score "unknown" not "failed".
-A memory scored "failed" 3 times is demoted or deleted — this is intentional pruning, not punishment.
-
-SIDE EFFECTS:
-• Updates Wilson confidence scores on scored memories
-• Memories below score threshold are auto-demoted (working→history) or pruned
-• exchange_summary and facts are stored as new working memories for future retrieval
-• noun_tags are attached for tag-based retrieval (TagCascade)
+ERROR HANDLING:
+• Missing memory_scores → returns an error
+• Empty memory_scores map → accepted but scores nothing
+• Server unreachable → returns "Error: ..." with details
 
 RETURNS:
-JSON confirmation with count of memories scored and summary storage status.""",
+Text confirmation. Example: "Scored (8 memories updated). Summary stored (300 chars)" """,
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -733,26 +674,26 @@ JSON confirmation with count of memories scored and summary storage status.""",
                                 "type": "string",
                                 "enum": ["worked", "failed", "partial", "unknown"]
                             },
-                            "description": "Map of memory doc_id to outcome score. Example: {\"patterns_abc123\": \"worked\", \"history_def456\": \"unknown\"}. MUST include all memory IDs listed in the scoring prompt. MAY include additional memories visible in KNOWN CONTEXT."
+                            "description": "Object mapping memory IDs to outcomes. Keys are doc_ids, values are: 'worked' (helped your response), 'partial' (somewhat relevant), 'unknown' (present but unused), 'failed' (misleading — caused incorrect response). Example: {\"history_abc123\": \"worked\", \"patterns_def456\": \"unknown\"}"
                         },
                         "exchange_summary": {
                             "type": "string",
-                            "description": "~300 char summary of the previous exchange. Stored as a new working memory for future retrieval. Should capture WHAT happened and the outcome, not just what was discussed."
+                            "description": "1-3 sentence summary of the previous exchange (~300 chars). Captures what happened and the outcome. Stored as a working memory for future retrieval."
                         },
                         "exchange_outcome": {
                             "type": "string",
                             "enum": ["worked", "failed", "partial", "unknown"],
-                            "description": "Overall effectiveness of your previous response. 'worked' = user confirmed or continued productively. 'failed' = user corrected you or was frustrated. 'partial' = mixed results. 'unknown' = can't determine."
+                            "description": "Overall result of the previous exchange. 'worked' = user confirmed or continued. 'failed' = user corrected you. 'partial' = mixed. 'unknown' = unclear."
                         },
                         "noun_tags": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Key TOPIC nouns from the exchange. Use actual names not pronouns (skip he/she/they/user/assistant). Lowercase, 1-3 words each, max 8. Include proper nouns and important common nouns. Skip meta-words (source, answer, details, accuracy, response, question, topic, context, information, correction, update, memory) and verbs (said, told, mentioned, discussed, talked, asked). Focus on WHO and WHAT, not how it was communicated."
+                            "description": "Topic nouns from the exchange for tag-based retrieval. Lowercase, 1-3 words each, max 8. Use names not pronouns. Example: [\"react\", \"auth bug\", \"logan\"]"
                         },
                         "facts": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Atomic facts extracted from this exchange, stored as separate working memories. One fact per string, max 150 chars. Include WHO/WHAT with specifics (dates, names, preferences, decisions). Skip vague observations. Example: [\"User prefers snake_case in Python code\", \"v0.4.6 released on 2026-04-13\"]"
+                            "description": "Atomic facts from this exchange, stored as separate working memories. One fact per string, max 150 chars. Include specifics (dates, names, decisions). Example: [\"User prefers snake_case\", \"v2.0 released 2026-04-01\"]"
                         }
                     },
                     "required": ["memory_scores"]
@@ -763,28 +704,37 @@ JSON confirmation with count of memories scored and summary storage status.""",
             name="record_response",
             description="""Store a key takeaway when the transcript alone won't capture important learning.
 
-OPTIONAL - Only use for significant exchanges:
+WHEN TO USE (optional — most exchanges don't need this):
 • Major decisions made
 • Complex solutions that worked
 • User corrections (what you got wrong and why)
 • Important context that would be lost
 
-Most routine exchanges don't need this - the transcript is enough.
-NOT for permanent preferences or standing rules — use add_to_memory_bank for those.
+WHEN NOT TO USE:
+• Routine exchanges — the transcript is enough
+• Permanent preferences or standing rules — use add_to_memory_bank for those
+• Scoring existing memories — use score_memories for that
 
-Key takeaways start at 0.7 (user explicitly asked to remember = higher confidence).
-Scoring happens automatically on subsequent turns: +0.2 worked, +0.05 partial, -0.3 failed.""",
+BEHAVIOR:
+• Stores the takeaway as a new working memory with initial score 0.7
+• Working memories are automatically scored on subsequent turns (+0.2 worked, +0.05 partial, -0.3 failed)
+• Over time, useful takeaways promote to history (30d) then patterns (permanent)
+• Returns text confirmation with the stored takeaway
+
+ERROR HANDLING:
+• Empty key_takeaway → returns "Error: 'key_takeaway' is required"
+• Missing noun_tags → accepted but reduces retrieval quality""",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "key_takeaway": {
                         "type": "string",
-                        "description": "1-2 sentence summary of the important learning"
+                        "description": "1-2 sentence summary of the important learning. Be specific — include names, decisions, outcomes. Example: \"User prefers one bundled PR for refactors — splitting would be churn\""
                     },
                     "noun_tags": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Key TOPIC nouns from the takeaway. Use actual names not pronouns (skip he/she/they/user/assistant). Lowercase, 1-3 words each, max 8. Include proper nouns and important common nouns. Skip meta-words (source, answer, details, accuracy, response, question, topic, context, information, correction, update, memory) and verbs (said, told, mentioned, discussed, talked, asked). Focus on WHO and WHAT, not how it was communicated."
+                        "description": "Topic nouns for tag-based retrieval. Lowercase, 1-3 words each, max 8. Use names not pronouns. Example: [\"react\", \"auth flow\", \"logan\"]"
                     }
                 },
                 "required": ["key_takeaway", "noun_tags"]
