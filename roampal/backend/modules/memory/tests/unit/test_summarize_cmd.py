@@ -73,7 +73,8 @@ class TestSummarizeThreshold:
             call_count["summarize"] += 1
             return "Summarized version"
 
-        with patch("roampal.sidecar_service.get_backend_info", return_value="Ollama (test)"), \
+        with patch("roampal.cli._check_sidecar_configured", return_value=True), \
+             patch("roampal.sidecar_service.get_backend_info", return_value="Ollama (test)"), \
              patch("roampal.sidecar_service.summarize_only", side_effect=mock_summarize), \
              patch("roampal.sidecar_service.extract_tags", return_value=["test"]), \
              patch("roampal.cli._is_interactive", return_value=False), \

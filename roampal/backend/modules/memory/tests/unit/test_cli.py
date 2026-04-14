@@ -512,6 +512,7 @@ class TestCmdInit:
 
         with patch("roampal.cli.Path.home", return_value=tmp_path), \
              patch("roampal.cli.configure_opencode") as mock_configure, \
+             patch("roampal.cli._prompt_smart_onboarding"), \
              patch("roampal.cli.collect_email"), \
              patch("roampal.cli.print_banner"), \
              patch("roampal.cli.print_update_notice"), \
@@ -562,6 +563,7 @@ class TestCmdInit:
              patch("shutil.which", return_value=None), \
              patch("roampal.cli.configure_claude_code") as mock_cc, \
              patch("roampal.cli.configure_opencode") as mock_oc, \
+             patch("roampal.cli._prompt_smart_onboarding"), \
              patch("roampal.cli.collect_email"), \
              patch("roampal.cli.print_banner"), \
              patch("roampal.cli.print_update_notice"), \
