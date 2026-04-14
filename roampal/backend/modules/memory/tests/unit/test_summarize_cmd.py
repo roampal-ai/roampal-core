@@ -128,7 +128,8 @@ class TestTagExtraction:
 
         update_payloads = []
 
-        with patch("roampal.sidecar_service.get_backend_info", return_value="Ollama (test)"), \
+        with patch("roampal.cli._check_sidecar_configured", return_value=True), \
+             patch("roampal.sidecar_service.get_backend_info", return_value="Ollama (test)"), \
              patch("roampal.sidecar_service.summarize_only", return_value="Summary about roampal python project"), \
              patch("roampal.sidecar_service.extract_tags", side_effect=mock_extract_tags), \
              patch("roampal.cli._is_interactive", return_value=False), \
@@ -162,7 +163,8 @@ class TestTagExtraction:
 
         update_payloads = []
 
-        with patch("roampal.sidecar_service.get_backend_info", return_value="Ollama (test)"), \
+        with patch("roampal.cli._check_sidecar_configured", return_value=True), \
+             patch("roampal.sidecar_service.get_backend_info", return_value="Ollama (test)"), \
              patch("roampal.sidecar_service.summarize_only", return_value="Summary text"), \
              patch("roampal.sidecar_service.extract_tags", side_effect=mock_extract_tags), \
              patch("roampal.cli._is_interactive", return_value=False), \
