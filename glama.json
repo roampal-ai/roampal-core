@@ -1,4 +1,9 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
-  "maintainers": ["roampal-ai"]
+  "maintainers": ["roampal-ai"],
+  "version": "0.4.9.3",
+  "pinned_commit": "d8586b3",
+  "description": "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)",
+  "keywords": ["memory", "mcp", "claude-code", "opencode", "ai", "persistent-memory"],
+  "release_notes": "v0.4.9.3 hotfix: Fix CLI sidecar diagnostic commands. `roampal sidecar test` and `status` now load config from opencode.json and work correctly."
 }
