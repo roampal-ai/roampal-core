@@ -2429,7 +2429,11 @@ def cmd_retag(args):
         "model": args.model,
     }
 
-    mode_str = f"{YELLOW}DRY RUN — preview only, nothing will change{RESET}" if args.dry_run else "Live — tags will be replaced"
+    mode_str = (
+        f"{YELLOW}DRY RUN — preview only, nothing will change{RESET}"
+        if args.dry_run
+        else "Live — tags will be replaced"
+    )
     print(f"\n  Collection: {args.collection}")
     if args.limit:
         print(f"  Limit:      {args.limit} memories")
@@ -2604,11 +2608,7 @@ def _check_sidecar_configured() -> bool:
     if config_path and config_path.exists():
         try:
             config = json.loads(config_path.read_text())
-            env = (
-                config.get("mcp", {})
-                .get("roampal-core", {})
-                .get("environment", {})
-            )
+            env = config.get("mcp", {}).get("roampal-core", {}).get("environment", {})
             url = env.get("ROAMPAL_SIDECAR_URL", "")
             model = env.get("ROAMPAL_SIDECAR_MODEL", "")
             key = env.get("ROAMPAL_SIDECAR_KEY", "")
@@ -2927,7 +2927,9 @@ def _sidecar_model_picker(config: dict, config_path: Path) -> bool:
             print(f"\n{YELLOW}Using free community models.{RESET}")
             return False
         else:
-            print(f"\n{YELLOW}Cancelled. Run 'roampal sidecar setup' when ready.{RESET}")
+            print(
+                f"\n{YELLOW}Cancelled. Run 'roampal sidecar setup' when ready.{RESET}"
+            )
             return False
 
     # --- Models found: show numbered list ---
@@ -2946,7 +2948,9 @@ def _sidecar_model_picker(config: dict, config_path: Path) -> bool:
 
     print(f"")
     print(f"  {BOLD}[{custom_idx}]{RESET} Configure custom API endpoint")
-    print(f"  {BOLD}[{free_idx}]{RESET} Use free community models (may be rate-limited)")
+    print(
+        f"  {BOLD}[{free_idx}]{RESET} Use free community models (may be rate-limited)"
+    )
     print(f"  {BOLD}[{cancel_idx}]{RESET} Cancel")
 
     try:
@@ -2973,7 +2977,11 @@ def _sidecar_model_picker(config: dict, config_path: Path) -> bool:
     elif choice_num == free_idx:
         print(f"\n{YELLOW}Using free community models.{RESET}")
         mcp_env = config.get("mcp", {}).get("roampal-core", {}).get("environment", {})
-        for key in ["ROAMPAL_SIDECAR_URL", "ROAMPAL_SIDECAR_KEY", "ROAMPAL_SIDECAR_MODEL"]:
+        for key in [
+            "ROAMPAL_SIDECAR_URL",
+            "ROAMPAL_SIDECAR_KEY",
+            "ROAMPAL_SIDECAR_MODEL",
+        ]:
             mcp_env.pop(key, None)
         config_path.write_text(json.dumps(config, indent=2))
         return False
@@ -3054,6 +3062,11 @@ def _prompt_smart_onboarding(force: bool = False):
 def cmd_sidecar(args):
     """Configure sidecar scoring model."""
     subcommand = args.sidecar_command or "setup"
+
+    # v0.4.9.3: Load sidecar config from opencode.json before any sidecar command
+    # This ensures CLI commands use the same config as the MCP server
+    if subcommand in ["test", "status"]:
+        _check_sidecar_configured()
 
     if subcommand == "status":
         _cmd_sidecar_status(args)
