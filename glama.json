@@ -1,9 +1,9 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "maintainers": ["roampal-ai"],
-  "version": "0.4.9.3",
-  "pinned_commit": "d8586b3",
+  "version": "0.5.0",
+  "pinned_commit": "a6be6db",
   "description": "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)",
   "keywords": ["memory", "mcp", "claude-code", "opencode", "ai", "persistent-memory"],
-  "release_notes": "v0.4.9.3 hotfix: Fix CLI sidecar diagnostic commands. `roampal sidecar test` and `status` now load config from opencode.json and work correctly."
+  "release_notes": "v0.5.0: Subagent filtering (Issue #4), OpenAI sidecar fix (think:false removal), scoring status visibility (consecutive failure counter), fact extraction input cap bumped to 8K+8K, summary cap to 2000 chars. 64 tests."
 }
