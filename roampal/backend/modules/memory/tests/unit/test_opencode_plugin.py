@@ -280,12 +280,14 @@ class TestSessionStateManagement:
 
     def test_session_idle_cleans_assistant_state(self, plugin_source):
         """session.idle clears assistant tracking for next exchange."""
+        # The cleanup is inside the debounced setTimeout callback, not the top-level case.
+        # Use a broader regex that captures the full session.idle block including the callback.
         idle_match = re.search(
-            r'case\s*"session\.idle".*?break\s*\}',
+            r'case\s*"session\.idle".*?case\s*"session\.compacted"',
             plugin_source,
             re.DOTALL
         )
-        assert idle_match, "session.idle case not found"
+        assert idle_match, "session.idle block not found"
         idle_block = idle_match.group(0)
 
         assert "assistantMessageIds.delete" in idle_block
@@ -327,6 +329,149 @@ class TestExchangeCapture:
     def test_sends_to_stop_endpoint(self, plugin_source):
         """storeExchange sends to /api/hooks/stop endpoint."""
         assert "/api/hooks/stop" in plugin_source
+
+
+# ============================================================================
+# v0.5.0: Subagent Filtering (Issue #4)
+# ============================================================================
+
+class TestSubagentFiltering:
+    """Verify subagent filtering implementation."""
+
+    def test_subagent_sessions_set_defined(self, plugin_source):
+        """subagentSessions Set is defined for tracking subagent sessions."""
+        assert "const subagentSessions = new Set<string>()" in plugin_source
+
+    def test_primary_sessions_set_defined(self, plugin_source):
+        """primarySessions Set tracks sessions where chat.message fired."""
+        assert "const primarySessions = new Set<string>()" in plugin_source
+
+    def test_cached_agent_modes_defined(self, plugin_source):
+        """cachedAgentModes Map caches agent name-to-mode mapping."""
+        assert "let cachedAgentModes = new Map<string, string>()" in plugin_source
+
+    def test_is_subagent_helper_exists(self, plugin_source):
+        """isSubagent() helper function is defined."""
+        assert "function isSubagent(agentName?: string): boolean" in plugin_source
+
+    def test_is_subagent_checks_mode_first(self, plugin_source):
+        """isSubagent() checks cachedAgentModes before name heuristic."""
+        # Mode check should come before the toLowerCase() heuristic
+        mode_pos = plugin_source.find('cachedAgentModes.get(agentName)')
+        heuristic_pos = plugin_source.find('agentName.toLowerCase()')
+        assert mode_pos > 0 and heuristic_pos > 0
+        assert mode_pos < heuristic_pos, "Mode check should come before name heuristic"
+
+    def test_allow_subagents_config(self, plugin_source):
+        """ROAMPAL_ALLOW_SUBAGENTS env var is read from config."""
+        assert "ROAMPAL_ALLOW_SUBAGENTS" in plugin_source
+        assert "ALLOW_SUBAGENTS" in plugin_source
+
+    def test_chat_message_marks_primary_session(self, plugin_source):
+        """chat.message adds session to primarySessions."""
+        assert "primarySessions.add(sessionId)" in plugin_source
+
+    def test_session_idle_checks_primary(self, plugin_source):
+        """session.idle skips sessions not in primarySessions."""
+        assert "primarySessions.has(sid)" in plugin_source
+
+    def test_session_idle_subagent_guard(self, plugin_source):
+        """session.idle has explicit subagentSessions check."""
+        assert "subagentSessions.has(sid)" in plugin_source
+
+    def test_system_transform_subagent_guard(self, plugin_source):
+        """system.transform skips subagent sessions."""
+        assert "subagentSessions.has(sessionId)" in plugin_source
+
+    def test_session_deleted_cleans_subagent_state(self, plugin_source):
+        """session.deleted cleans up subagent and primary tracking."""
+        deleted_match = re.search(
+            r'case\s*"session\.deleted".*?break\s*\}',
+            plugin_source,
+            re.DOTALL
+        )
+        assert deleted_match, "session.deleted case not found"
+        deleted_block = deleted_match.group(0)
+        assert "subagentSessions.delete" in deleted_block
+        assert "primarySessions.delete" in deleted_block
+
+    def test_agent_api_has_timeout(self, plugin_source):
+        """client.app.agents() call is wrapped in Promise.race timeout."""
+        assert "Promise.race" in plugin_source
+
+    def test_agent_api_optional_chaining(self, plugin_source):
+        """client.app.agents() uses optional chaining for safety."""
+        assert "client as any).app?.agents?.()" in plugin_source
+
+
+# ============================================================================
+# v0.5.0: Sidecar Request Body (think:false removal)
+# ============================================================================
+
+class TestSidecarRequestBody:
+    """Verify think:false was removed from sidecar requests."""
+
+    def test_no_think_false_in_request(self, plugin_source):
+        """Request body does not contain think: false field."""
+        # Should not have think: false as an actual field (comment references OK)
+        # Look for think: false NOT preceded by // (not in a comment)
+        think_matches = re.findall(r'^\s+think:\s*false', plugin_source, re.MULTILINE)
+        assert len(think_matches) == 0, f"Found think: false in request body: {think_matches}"
+
+    def test_no_think_prefix_still_present(self, plugin_source):
+        """/no_think text prefix is still used in messages (safe approach)."""
+        assert "/no_think" in plugin_source
+
+
+# ============================================================================
+# v0.5.0: Consecutive Failure Counter
+# ============================================================================
+
+class TestConsecutiveFailureCounter:
+    """Verify scoringBroken boolean was replaced with failure counter."""
+
+    def test_consecutive_failures_defined(self, plugin_source):
+        """consecutiveFailures counter is defined."""
+        assert "let consecutiveFailures" in plugin_source
+
+    def test_no_scoring_broken_boolean(self, plugin_source):
+        """scoringBroken boolean is no longer used (only in comments)."""
+        # Should not have `scoringBroken = ` assignments (only in comments)
+        assignments = re.findall(r'^\s+scoringBroken\s*=', plugin_source, re.MULTILINE)
+        assert len(assignments) == 0, f"Found scoringBroken assignments: {assignments}"
+
+    def test_counter_resets_on_success(self, plugin_source):
+        """consecutiveFailures resets to 0 on scoring success."""
+        assert "consecutiveFailures = 0" in plugin_source
+
+    def test_counter_increments_on_failure(self, plugin_source):
+        """consecutiveFailures increments on scoring failure."""
+        assert "consecutiveFailures++" in plugin_source
+
+    def test_status_tag_uses_threshold(self, plugin_source):
+        """Status tag checks consecutiveFailures >= 2 for persistent failure."""
+        assert "consecutiveFailures >= 2" in plugin_source
+
+    def test_status_tag_shows_failure_count(self, plugin_source):
+        """Status tag includes actual failure count when broken."""
+        assert "consecutiveFailures}" in plugin_source or "consecutiveFailures} consecutive" in plugin_source
+
+
+# ============================================================================
+# v0.5.0: Sidecar Input/Output Caps
+# ============================================================================
+
+class TestSidecarCaps:
+    """Verify sidecar input and output caps."""
+
+    def test_facts_input_cap_8k(self, plugin_source):
+        """Facts extraction uses 8K char cap for user and assistant."""
+        assert "exchange.user.slice(0, 8000)" in plugin_source
+        assert "exchange.assistant.slice(0, 8000)" in plugin_source
+
+    def test_summary_output_cap_2000(self, plugin_source):
+        """Summary prompt instructs 2000 char limit."""
+        assert "2000 chars" in plugin_source
 
 
 if __name__ == "__main__":

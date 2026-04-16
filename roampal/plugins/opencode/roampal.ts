@@ -77,6 +77,22 @@ const assistantMessageIds = new Map<string, Set<string>>()
 // Map<sessionID, Map<partID, fullText>>
 const assistantTextParts = new Map<string, Map<string, string>>()
 
+// v0.4.9.4: Subagent filtering (Issue #4).
+// Sessions belonging to subagents are tracked here so hooks without agent info
+// (session.idle, message.part.updated) can skip them. Populated in chat.message
+// where input.agent is available; checked in session.idle where it's not.
+const subagentSessions = new Set<string>()
+
+// v0.5.0: Track sessions where chat.message fired (primary sessions).
+// OpenCode does NOT fire chat.message for subagent sessions — only event hooks
+// (message.part.updated, session.idle) fire. If a session reaches session.idle
+// but was never seen by chat.message, it's a subagent.
+const primarySessions = new Set<string>()
+
+// Cached agent definitions from client.app.agents() — populated at plugin load.
+// Maps agent name → mode ("primary" | "subagent").
+let cachedAgentModes = new Map<string, string>()
+
 // v0.4.2: Debounce session.idle to avoid acting on subagent completions.
 // OpenCode fires session.idle when subagents finish (issue #13334), which can
 // store incomplete exchanges and corrupt the scoring loop. Debounce waits 1.5s
@@ -95,7 +111,7 @@ let scoringInFlight = false
 // OpenCode passes MCP env vars to MCP server subprocesses but NOT to plugins, so we read
 // the config file directly instead of process.env.
 // Fallback: process.env still checked for manual/testing overrides.
-function _loadSidecarConfig(): { url: string; key: string; model: string; disabled: boolean } {
+function _loadSidecarConfig(): { url: string; key: string; model: string; disabled: boolean; allowSubagents: boolean } {
   try {
     // v0.4.0: Respect XDG_CONFIG_HOME on Linux
     const configDir = process.env.XDG_CONFIG_HOME || join(
@@ -111,6 +127,7 @@ function _loadSidecarConfig(): { url: string; key: string; model: string; disabl
       key: env.ROAMPAL_SIDECAR_KEY || process.env.ROAMPAL_SIDECAR_KEY || "",
       model: env.ROAMPAL_SIDECAR_MODEL || process.env.ROAMPAL_SIDECAR_MODEL || "",
       disabled: (env.ROAMPAL_SIDECAR_DISABLED === "true") || (process.env.ROAMPAL_SIDECAR_DISABLED === "true"),
+      allowSubagents: (env.ROAMPAL_ALLOW_SUBAGENTS === "1") || (process.env.ROAMPAL_ALLOW_SUBAGENTS === "1"),
     }
   } catch {
     // Config not found — fall back to process.env only
@@ -119,6 +136,7 @@ function _loadSidecarConfig(): { url: string; key: string; model: string; disabl
       key: process.env.ROAMPAL_SIDECAR_KEY || "",
       model: process.env.ROAMPAL_SIDECAR_MODEL || "",
       disabled: process.env.ROAMPAL_SIDECAR_DISABLED === "true",
+      allowSubagents: process.env.ROAMPAL_ALLOW_SUBAGENTS === "1",
     }
   }
 }
@@ -127,7 +145,8 @@ const CUSTOM_SIDECAR_URL = _sidecarCfg.url
 const CUSTOM_SIDECAR_KEY = _sidecarCfg.key
 const CUSTOM_SIDECAR_MODEL = _sidecarCfg.model
 const SIDECAR_DISABLED = _sidecarCfg.disabled
-debugLog(`Sidecar config loaded: custom=${CUSTOM_SIDECAR_URL ? `${CUSTOM_SIDECAR_MODEL} via ${CUSTOM_SIDECAR_URL}` : "none (zen)"}, disabled=${SIDECAR_DISABLED}`)
+const ALLOW_SUBAGENTS = _sidecarCfg.allowSubagents
+debugLog(`Sidecar config loaded: custom=${CUSTOM_SIDECAR_URL ? `${CUSTOM_SIDECAR_MODEL} via ${CUSTOM_SIDECAR_URL}` : "none (zen)"}, disabled=${SIDECAR_DISABLED}, allowSubagents=${ALLOW_SUBAGENTS}`)
 
 // Zen proxy — default for scoring to save API credits (even for paid users).
 // Defaults hardcoded; dynamically updated if "opencode" provider seen in chat.params.
@@ -209,9 +228,11 @@ let capturedProvider: {
 // Scoring Status State
 // ============================================================================
 
-// Tracks whether sidecar scoring is currently broken (all models exhausted twice).
-// Used to inject status into context so the model can inform the user.
-let scoringBroken = SIDECAR_DISABLED  // Start broken if disabled for testing
+// v0.5.0: Consecutive failure counter replaces boolean scoringBroken.
+// Tracks how many exchanges in a row have failed scoring. Resets to 0 on success.
+// Status tag shows "unavailable" at 2+ consecutive failures (1 could be transient).
+// Retries happen every exchange regardless of count — never permanently gives up.
+let consecutiveFailures = SIDECAR_DISABLED ? 2 : 0
 let lastScorerLabel = ""  // e.g. "zen(glm-4.7-free)" or "fallback(deepseek-chat)"
 
 // Per-session onboarding flag — inject first-run message once per session.
@@ -465,6 +486,21 @@ function extractTextFromParts(parts: any[]): string {
   return textPart?.text || ""
 }
 
+/**
+ * v0.4.9.4: Detect subagent by mode (Issue #4).
+ * Primary: uses cachedAgentModes from client.app.agents() (authoritative).
+ * Fallback: name-based heuristic for when the API isn't available.
+ */
+function isSubagent(agentName?: string): boolean {
+  if (!agentName) return false
+  // Mode-based: authoritative if agent list was cached
+  const mode = cachedAgentModes.get(agentName)
+  if (mode) return mode === "subagent"
+  // Fallback heuristic: catch common subagent naming patterns
+  const lower = agentName.toLowerCase()
+  return lower.includes("subagent") || lower.startsWith("task-") || lower.startsWith("task_")
+}
+
 // ============================================================================
 // Independent LLM Scoring
 // ============================================================================
@@ -531,9 +567,9 @@ The user then followed up with:
 "${currentUserMessage}"
 ${memorySection}
 Respond with ONLY a JSON object:
-{ "summary": "<~300 chars>", "outcome": "<worked|failed|partial|unknown>"${memoryScoreSection} }
+{ "summary": "<~2000 chars>", "outcome": "<worked|failed|partial|unknown>"${memoryScoreSection} }
 
-SUMMARY (under 300 chars): Capture what happened AND what changed. Summaries provide context and continuity — the story behind the facts.
+SUMMARY (under 2000 chars): Capture what happened AND what changed. Summaries provide context and continuity — the story behind the facts.
 - Include names, topics, and the flow of the conversation
 - Note corrections, decisions, and new information alongside the context
 - Help future retrieval understand WHY something matters, not just WHAT
@@ -632,6 +668,10 @@ ${memoryInstructions}`
           const headers: Record<string, string> = { "Content-Type": "application/json" }
           if (target.key) headers["Authorization"] = `Bearer ${target.key}`
 
+          // v0.4.9.4: `think: false` removed entirely.
+          // Was Ollama-specific but broke OpenAI/Azure/Groq/etc (400 on unknown fields).
+          // The /no_think text prefix in messages already handles reasoning model suppression
+          // for all providers — no API-level field needed.
           const resp = await fetch(`${target.url}/chat/completions`, {
             method: "POST",
             headers,
@@ -645,10 +685,6 @@ ${memoryInstructions}`
               ],
               max_tokens: 2000,
               temperature: 0,
-              // Ollama-native flag to disable thinking/reasoning mode.
-              // Works alongside /no_think prefix for belt-and-suspenders reliability.
-              // Non-Ollama servers ignore unknown fields.
-              think: false
             }),
             signal: AbortSignal.timeout(requestTimeout)
           })
@@ -764,14 +800,14 @@ ${memoryInstructions}`
 
             if (scoreResp.ok) {
               debugLog(`scoreExchange SUCCESS: ${outcome} via ${target.label}, ${Object.keys(memoryScores).length} memories`)
-              scoringBroken = false
+              consecutiveFailures = 0
               lastScorerLabel = target.label
             } else {
               debugLog(`scoreExchange post failed: ${scoreResp.status}`)
             }
           } else {
             debugLog(`scoreExchange SUCCESS: ${outcome} via ${target.label} (no memory scoring — no memories surfaced)`)
-            scoringBroken = false
+            consecutiveFailures = 0
             lastScorerLabel = target.label
           }
 
@@ -882,8 +918,8 @@ GOOD: "User prefers TypeScript over JavaScript and uses Zod for validation"
 BAD: "They discussed something" (no specifics)
 BAD: "It was helpful" (no content)
 
-User: ${exchange.user.slice(0, 500)}
-Assistant: ${exchange.assistant.slice(0, 300)}
+User: ${exchange.user.slice(0, 8000)}
+Assistant: ${exchange.assistant.slice(0, 8000)}
 
 Return ONLY a JSON object: {"facts": ["fact 1", "fact 2"]}
 If no useful facts, return: {"facts": []}`
@@ -902,7 +938,6 @@ If no useful facts, return: {"facts": []}`
                 ],
                 max_tokens: 1000,
                 temperature: 0,
-                think: false
               }),
               signal: AbortSignal.timeout(30000)
             })
@@ -953,7 +988,7 @@ If no useful facts, return: {"facts": []}`
     }
 
     debugLog(`scoreExchange FAILED — all models exhausted`)
-    // Don't set scoringBroken here — only set it after deferred retry also fails (session.idle)
+    // Don't increment consecutiveFailures here — only after deferred retry also fails (session.idle)
     return false
   } finally {
     scoringInFlight = false
@@ -990,6 +1025,31 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
     }
   } catch {
     debugLog(`Plugin load: Zen model discovery failed, using hardcoded list`)
+  }
+
+  // v0.4.9.4: Cache agent definitions for subagent filtering (Issue #4).
+  // client.app.agents() returns agent list with name + mode ("primary" | "subagent").
+  // Cached once at load; refreshed on cache miss in chat.message.
+  // Wrapped in timeout — some OpenCode versions may not have this API, and awaiting
+  // a non-existent method can hang indefinitely, blocking plugin initialization.
+  try {
+    const agentPromise = (client as any).app?.agents?.()
+    if (agentPromise && typeof agentPromise.then === "function") {
+      const agents = await Promise.race([
+        agentPromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000))
+      ])
+      if (Array.isArray(agents)) {
+        for (const a of agents as any[]) {
+          if (a.name && a.mode) cachedAgentModes.set(a.name, a.mode)
+        }
+        debugLog(`Plugin load: cached ${cachedAgentModes.size} agent modes: ${[...cachedAgentModes.entries()].map(([n, m]) => `${n}=${m}`).join(", ")}`)
+      }
+    } else {
+      debugLog(`Plugin load: client.app.agents not available — subagent filtering will use name heuristic`)
+    }
+  } catch (err) {
+    debugLog(`Plugin load: client.app.agents() failed (${err}) — subagent filtering will use name heuristic`)
   }
 
   return {
@@ -1069,6 +1129,39 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
       const userText = extractTextFromParts(output.parts)
 
       if (!userText) return
+
+      // v0.4.9.4: Subagent filtering (Issue #4).
+      // Skip context fetch + exchange tracking for subagent sessions.
+      // Cache miss: refresh agent list in case agents were added after plugin load.
+      if (!ALLOW_SUBAGENTS && input.agent) {
+        if (!cachedAgentModes.has(input.agent)) {
+          try {
+            const agentPromise = (client as any).app?.agents?.()
+            if (agentPromise && typeof agentPromise.then === "function") {
+              const agents = await Promise.race([
+                agentPromise,
+                new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000))
+              ])
+              if (Array.isArray(agents)) {
+                cachedAgentModes = new Map()
+                for (const a of agents as any[]) {
+                  if (a.name && a.mode) cachedAgentModes.set(a.name, a.mode)
+                }
+                debugLog(`chat.message: refreshed agent cache (${cachedAgentModes.size} agents)`)
+              }
+            }
+          } catch { /* best effort — isSubagent falls back to name heuristic */ }
+        }
+        if (isSubagent(input.agent)) {
+          subagentSessions.add(sessionId)
+          debugLog(`chat.message: skipping subagent "${input.agent}" (session ${sessionId})`)
+          return
+        }
+      }
+
+      // v0.5.0: Mark this as a primary session (chat.message fired).
+      // Subagent sessions never get chat.message — used by session.idle to detect them.
+      primarySessions.add(sessionId)
 
       // Store user text for exchange tracking
       lastUserMessage.set(sessionId, userText)
@@ -1178,22 +1271,21 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
       const sessionId = input.sessionID
       if (!sessionId) return
 
+      // v0.4.9.4: Skip context injection for subagent sessions (Issue #4).
+      if (subagentSessions.has(sessionId)) {
+        debugLog(`system.transform: skipping subagent session ${sessionId}`)
+        return
+      }
+
       // Inject scoring status tag.
       const cached = cachedContext.get(sessionId)
       
-      // v0.4.9: Better error messaging — show helpful info but minimize annoyance
+      // v0.5.0: Status tag based on consecutive failure count.
+      // 0 = healthy, 1 = transient (silent), 2+ = persistent failure (tell user).
       let scoringStatusTag = ""
-      
-      if (scoringBroken) {
-        // Only show broken message once per session to avoid annoying popups
-        if (!sessionOnboarded.has(sessionId)) {
-          scoringStatusTag = `[Note: Memory scoring unavailable. Free models may be rate-limited. Run "roampal sidecar setup" for local model. Memories work without scoring.]`
-          sessionOnboarded.add(sessionId)
-          debugLog(`Showing sidecar setup hint for session ${sessionId} (once only)`)
-        } else {
-          // After first notification, show minimal status
-          scoringStatusTag = `[roampal scoring: unavailable]`
-        }
+
+      if (consecutiveFailures >= 2) {
+        scoringStatusTag = `[roampal scoring: failed (${consecutiveFailures} consecutive failures). Check sidecar config or run "roampal sidecar setup".]`
       } else if (lastScorerLabel) {
         scoringStatusTag = `[roampal scoring: ok via ${lastScorerLabel}]`
       } else {
@@ -1458,6 +1550,13 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           const sid = event.properties?.sessionID
           if (!sid) break
 
+          // v0.4.9.4: Skip subagent sessions entirely (Issue #4).
+          // Subagent sessions were flagged in chat.message where input.agent is available.
+          if (subagentSessions.has(sid)) {
+            debugLog(`session.idle: skipping subagent session ${sid}`)
+            break
+          }
+
           // Cancel any existing timer for this session
           if (idleTimers.has(sid)) {
             clearTimeout(idleTimers.get(sid))
@@ -1471,7 +1570,18 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
             const ctx = sessionContextMap.get(sid)
             const textParts = assistantTextParts.get(sid)
 
-            debugLog(`session.idle (debounced): sid=${sid}, userPrompt=${!!ctx?.userPrompt}, textParts=${textParts?.size || 0}`)
+            debugLog(`session.idle (debounced): sid=${sid}, userPrompt=${!!ctx?.userPrompt}, textParts=${textParts?.size || 0}, primary=${primarySessions.has(sid)}`)
+
+            // v0.5.0: Skip sessions where chat.message never fired (subagents).
+            // OpenCode doesn't fire chat.message for subagent child sessions,
+            // so primarySessions won't contain them. This catches subagents even
+            // when client.app.agents() is unavailable and name heuristic doesn't match.
+            if (!ALLOW_SUBAGENTS && !primarySessions.has(sid)) {
+              debugLog(`session.idle: skipping non-primary session ${sid} (no chat.message fired — likely subagent)`)
+              assistantMessageIds.delete(sid)
+              assistantTextParts.delete(sid)
+              return
+            }
 
             if (ctx?.userPrompt && textParts?.size) {
               const assistantText = Array.from(textParts.values()).join("\n")
@@ -1508,15 +1618,13 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
                   debugLog(`session.idle: Deferred scoring succeeded`)
                   pendingScoring = null
                 } else {
-                  scoringBroken = true
-                  console.warn("[roampal] Memory scoring failed twice in a row — check ROAMPAL_SIDECAR_URL/KEY/MODEL or Zen availability")
-                  debugLog(`session.idle: Deferred scoring also failed — scoringBroken=true, dropping payload`)
+                  consecutiveFailures++
+                  debugLog(`session.idle: Deferred scoring also failed — consecutiveFailures=${consecutiveFailures}, dropping payload`)
                   pendingScoring = null
                 }
               } catch (err) {
-                scoringBroken = true
-                console.warn("[roampal] Memory scoring failed twice in a row — check ROAMPAL_SIDECAR_URL/KEY/MODEL or Zen availability")
-                debugLog(`session.idle: Deferred scoring error — scoringBroken=true, dropping payload: ${err}`)
+                consecutiveFailures++
+                debugLog(`session.idle: Deferred scoring error — consecutiveFailures=${consecutiveFailures}, dropping payload: ${err}`)
                 pendingScoring = null
               }
             }
@@ -1529,13 +1637,9 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
               if (SIDECAR_DISABLED) {
                 debugLog(`session.idle: Sidecar DISABLED (testing) — skipping scoring entirely`)
               } else {
-                // v0.4.7: Auto-reset scoringBroken — give sidecar another chance each exchange.
-                // Without this, one failure permanently kills scoring for the session.
-                if (scoringBroken) {
-                  scoringBroken = false
-                  debugLog(`session.idle: Resetting scoringBroken — giving sidecar another chance`)
-                }
-                debugLog(`session.idle: Running sidecar for ${sid} (memories=${scoringData.memories?.length || 0})`)
+                // v0.5.0: No auto-reset. Counter only resets on success (inside scoreExchangeViaLLM).
+                // Sidecar retries every exchange regardless of consecutiveFailures — never gives up.
+                debugLog(`session.idle: Running sidecar for ${sid} (memories=${scoringData.memories?.length || 0}, consecutiveFailures=${consecutiveFailures})`)
                 try {
                   const ok = await scoreExchangeViaLLM(sid, scoringData.userMessage, scoringData.exchange, scoringData.memories)
                   if (!ok) {
@@ -1591,6 +1695,8 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           cachedContext.delete(sid)
           pendingScoringData.delete(sid)
           includeRecentOnNextTurn.delete(sid)
+          subagentSessions.delete(sid)  // v0.4.9.4: cleanup subagent tracking
+          primarySessions.delete(sid)   // v0.5.0: cleanup primary session tracking
           sessionOnboarded.delete(sid)  // v0.4.0: prevent memory leak
           debugLog(`Session deleted: ${sid}`)
           break
