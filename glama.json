@@ -1,9 +1,9 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "maintainers": ["roampal-ai"],
-  "version": "0.5.0",
-  "pinned_commit": "a6be6db",
+  "version": "0.5.1",
+  "pinned_commit": "021f5c5",
   "description": "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)",
   "keywords": ["memory", "mcp", "claude-code", "opencode", "ai", "persistent-memory"],
-  "release_notes": "v0.5.0: Subagent filtering (Issue #4), OpenAI sidecar fix (think:false removal), scoring status visibility (consecutive failure counter), fact extraction input cap bumped to 8K+8K, summary cap to 2000 chars. 64 tests."
+  "release_notes": "v0.5.1: Named memory profiles (Issue #5) — create, switch, and isolate memory stores per project, per shell, or per MCP client via `roampal profile` commands or `ROAMPAL_PROFILE` env. Sidecar scoring input cap (8K) aligned with fact-extraction cap. 52 new profile tests, 564 backend tests passing."
 }
