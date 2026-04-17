@@ -544,6 +544,22 @@ async def lifespan(app: FastAPI):
     dev_mode = os.environ.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")
     data_path = os.environ.get("ROAMPAL_DATA_PATH")
 
+    # v0.5.1: Named profile. Precedence: ROAMPAL_PROFILE env var > persisted
+    # active_profile file ('roampal profile use <name>') > 'default'.
+    # Delegating to active_profile_name() for the full precedence chain.
+    from roampal.profile_manager import (
+        active_profile_name,
+        active_profile_source,
+        DEFAULT_PROFILE,
+    )
+
+    resolved_name = active_profile_name()
+    profile_name = resolved_name if resolved_name != DEFAULT_PROFILE else None
+    if profile_name:
+        logger.info(
+            f"Using named profile: {profile_name} (source: {active_profile_source()})"
+        )
+
     # If dev mode and no custom path, use DEV data directory
     if dev_mode and not data_path:
         if os.name == "nt":  # Windows
@@ -564,7 +580,7 @@ async def lifespan(app: FastAPI):
 
     # v0.4.1: Wrap initialization in try/except with user-friendly guidance
     try:
-        _memory = UnifiedMemorySystem(data_path=data_path)
+        _memory = UnifiedMemorySystem(data_path=data_path, profile_name=profile_name)
         await _memory.initialize()
         logger.info("Memory system initialized")
     except ImportError as e:

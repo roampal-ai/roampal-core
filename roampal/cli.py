@@ -1029,6 +1029,11 @@ def cmd_start(args):
         args.port if args.port != PROD_PORT else default_port
     )  # Use default unless explicitly overridden
 
+    # v0.5.1: Named profile support. --profile overrides ROAMPAL_PROFILE env.
+    profile_name = getattr(args, "profile", None)
+    if profile_name:
+        os.environ["ROAMPAL_PROFILE"] = profile_name
+
     # Handle dev mode - uses Roampal_DEV folder
     if is_dev:
         os.environ["ROAMPAL_DEV"] = "1"
@@ -1037,10 +1042,23 @@ def cmd_start(args):
         print(f"  Data path: {data_path}")
         print(f"  Port: {port} (PROD uses {PROD_PORT})\n")
     else:
-        data_path = get_data_dir(dev=False)
-        print(f"{GREEN}PROD MODE{RESET}")
-        print(f"  Data path: {data_path}")
-        print(f"  Port: {port}\n")
+        if profile_name and profile_name != "default":
+            # v0.5.1: resolve path via profile registry for display
+            from roampal.profile_manager import ProfileRegistry, ProfileNotFoundError
+            try:
+                data_path = ProfileRegistry().resolve(profile_name)
+            except ProfileNotFoundError:
+                print(f"{RED}Error:{RESET} profile {profile_name!r} is not registered.")
+                print(f"Create it first: {BLUE}roampal profile create {profile_name}{RESET}")
+                return 1
+            print(f"{GREEN}PROD MODE{RESET} - profile: {profile_name}")
+            print(f"  Data path: {data_path}")
+            print(f"  Port: {port}\n")
+        else:
+            data_path = get_data_dir(dev=False)
+            print(f"{GREEN}PROD MODE{RESET}")
+            print(f"  Data path: {data_path}")
+            print(f"  Port: {port}\n")
 
     print(f"{BOLD}Starting Roampal server...{RESET}\n")
 
@@ -1057,15 +1075,11 @@ def cmd_start(args):
     start_server(host=host, port=port)
 
 
-def cmd_stop(args):
-    """Stop the Roampal server."""
+def _stop_server_on_port(port: int, *, verbose: bool = True) -> bool:
+    """Kill the server listening on `port`. Returns True if something was killed.
 
-    is_dev = is_dev_mode(args)
-    default_port = DEV_PORT if is_dev else PROD_PORT
-    port = args.port if args.port else default_port
-
-    print(f"{BOLD}Stopping Roampal server on port {port}...{RESET}\n")
-
+    v0.5.1: extracted from cmd_stop so 'profile switch' can reuse the logic.
+    """
     killed = False
     if sys.platform == "win32":
         try:
@@ -1081,11 +1095,13 @@ def cmd_stop(args):
                             capture_output=True,
                             timeout=5,
                         )
-                        print(f"  {GREEN}Killed server process (PID {pid}){RESET}")
+                        if verbose:
+                            print(f"  {GREEN}Killed server process (PID {pid}){RESET}")
                         killed = True
                     break
         except Exception as e:
-            print(f"  {RED}Error finding server process: {e}{RESET}")
+            if verbose:
+                print(f"  {RED}Error finding server process: {e}{RESET}")
     else:
         try:
             result = subprocess.run(
@@ -1094,10 +1110,25 @@ def cmd_stop(args):
             pid = result.stdout.strip().split("\n")[0] if result.stdout.strip() else ""
             if pid and pid.isdigit():
                 subprocess.run(["kill", "-9", pid], capture_output=True, timeout=5)
-                print(f"  {GREEN}Killed server process (PID {pid}){RESET}")
+                if verbose:
+                    print(f"  {GREEN}Killed server process (PID {pid}){RESET}")
                 killed = True
         except Exception as e:
-            print(f"  {RED}Error finding server process: {e}{RESET}")
+            if verbose:
+                print(f"  {RED}Error finding server process: {e}{RESET}")
+    return killed
+
+
+def cmd_stop(args):
+    """Stop the Roampal server."""
+
+    is_dev = is_dev_mode(args)
+    default_port = DEV_PORT if is_dev else PROD_PORT
+    port = args.port if args.port else default_port
+
+    print(f"{BOLD}Stopping Roampal server on port {port}...{RESET}\n")
+
+    killed = _stop_server_on_port(port, verbose=True)
 
     if not killed:
         print(f"  {YELLOW}No server found on port {port}{RESET}")
@@ -3207,6 +3238,228 @@ def _cmd_sidecar_test(args):
         print(f"Run {BLUE}roampal sidecar setup{RESET} to reconfigure.")
 
 
+def cmd_profile(args):
+    """Manage named memory profiles (v0.5.1).
+
+    Subcommands:
+      list       — show all registered profiles and resolved paths
+      create     — create a new profile (auto-located under default base)
+      register   — register an existing directory as a named profile
+      delete     — remove a profile from the registry (optional --destroy-data)
+      show       — print the active profile and its resolved path
+    """
+    from roampal.profile_manager import (
+        DEFAULT_PROFILE,
+        InvalidProfileNameError,
+        ProfileAlreadyExistsError,
+        ProfileError,
+        ProfileNotFoundError,
+        ProfileRegistry,
+        active_profile_name,
+        active_profile_source,
+        clear_active_profile_file,
+        resolve_data_path,
+        system_default_data_path,
+        write_active_profile_file,
+    )
+
+    sub = getattr(args, "profile_command", None)
+    reg = ProfileRegistry()
+
+    if sub == "list" or sub is None:
+        profiles = reg.list()
+        print(f"Default profile: {system_default_data_path()}")
+        if not profiles:
+            print("No named profiles registered.")
+            print(f"Create one: {BLUE}roampal profile create <name>{RESET}")
+            return 0
+        print()
+        print(f"Registered profiles ({len(profiles)}):")
+        for p in profiles:
+            resolved = reg.resolve(profile=p)
+            suffix = " (custom path)" if p.path else ""
+            print(f"  {p.name}{suffix}")
+            print(f"    slug: {p.slug}")
+            print(f"    path: {resolved}")
+        return 0
+
+    if sub == "show":
+        active = active_profile_name()
+        source = active_profile_source()
+        try:
+            resolved = resolve_data_path(active, registry=reg)
+        except ProfileNotFoundError:
+            print(
+                f"{YELLOW}Active profile {active!r} is not registered.{RESET}"
+            )
+            print(f"Register or create it: {BLUE}roampal profile create {active}{RESET}")
+            return 1
+        source_label = {
+            "env": "ROAMPAL_PROFILE env var",
+            "file": "persisted via 'roampal profile use'",
+            "default": "fallback (no env var, no persisted file)",
+        }.get(source, source)
+        print(f"Active profile: {active}  ({source_label})")
+        print(f"Data path:      {resolved}")
+        if os.environ.get("ROAMPAL_DATA_PATH"):
+            print(
+                f"{YELLOW}Note: ROAMPAL_DATA_PATH env var is set and overrides profile resolution.{RESET}"
+            )
+        return 0
+
+    if sub == "use":
+        name = args.name
+        if name == DEFAULT_PROFILE:
+            # Using "default" is the same as unuse — clear the file.
+            removed = clear_active_profile_file()
+            if removed:
+                print(f"{GREEN}Reverted persisted active profile to {DEFAULT_PROFILE}{RESET}")
+            else:
+                print(f"Active profile is already {DEFAULT_PROFILE}")
+            return 0
+        # Verify it's registered before persisting.
+        if not reg.exists(name):
+            print(f"{RED}Error:{RESET} profile {name!r} is not registered")
+            print(f"Create it first: {BLUE}roampal profile create {name}{RESET}")
+            return 1
+        write_active_profile_file(name)
+        resolved = reg.resolve(name)
+        print(f"{GREEN}Active profile set to {name!r} (persistent){RESET}")
+        print(f"  Data path: {resolved}")
+        if os.environ.get("ROAMPAL_PROFILE", "").strip():
+            print(
+                f"{YELLOW}Note: ROAMPAL_PROFILE env var is set in this shell and will override the persisted value for this session.{RESET}"
+            )
+        return 0
+
+    if sub == "unuse":
+        removed = clear_active_profile_file()
+        if removed:
+            print(
+                f"{GREEN}Cleared persisted active profile. Falling back to ROAMPAL_PROFILE env var or '{DEFAULT_PROFILE}'.{RESET}"
+            )
+        else:
+            print("No persisted active profile was set.")
+        return 0
+
+    if sub == "switch":
+        # One-shot: persist the new active profile AND stop any running server
+        # so the next MCP tool call / 'roampal start' spawns against the new profile.
+        name = args.name
+
+        # Step 1: set the persisted active profile (same as 'use')
+        if name == DEFAULT_PROFILE:
+            removed = clear_active_profile_file()
+            if removed:
+                print(f"{GREEN}Reverted persisted active profile to {DEFAULT_PROFILE}{RESET}")
+            else:
+                print(f"Active profile is already {DEFAULT_PROFILE}")
+        else:
+            if not reg.exists(name):
+                print(f"{RED}Error:{RESET} profile {name!r} is not registered")
+                print(f"Create it first: {BLUE}roampal profile create {name}{RESET}")
+                return 1
+            write_active_profile_file(name)
+            resolved = reg.resolve(name)
+            print(f"{GREEN}Active profile set to {name!r} (persistent){RESET}")
+            print(f"  Data path: {resolved}")
+
+        # Step 2: stop any running server on the standard ports so next spawn
+        # picks up the new profile. Silent — don't fail switch if no server runs.
+        print()
+        print(f"{BOLD}Stopping any running server so next spawn uses {name!r}...{RESET}")
+        for port in (PROD_PORT, DEV_PORT):
+            killed = _stop_server_on_port(port, verbose=False)
+            if killed:
+                print(f"  {GREEN}Stopped server on port {port}{RESET}")
+
+        print()
+        print(
+            f"{GREEN}Ready. Next MCP tool call or 'roampal start' will spawn on profile {name!r}.{RESET}"
+        )
+        if os.environ.get("ROAMPAL_PROFILE", "").strip():
+            print(
+                f"{YELLOW}Note: ROAMPAL_PROFILE env var is set in this shell and will override the persisted value for commands run here.{RESET}"
+            )
+        return 0
+
+    if sub == "create":
+        name = args.name
+        try:
+            p = reg.create(name)
+        except (ProfileAlreadyExistsError, InvalidProfileNameError) as e:
+            print(f"{RED}Error:{RESET} {e}")
+            return 1
+        resolved = reg.resolve(profile=p)
+        print(f"{GREEN}Created profile {name!r}{RESET}")
+        print(f"  slug: {p.slug}")
+        print(f"  path: {resolved}")
+        print()
+        print(f"Start the server with this profile:")
+        print(f"  {BLUE}roampal start --profile {name}{RESET}")
+        print(f"Or set the env var in your MCP config:")
+        print(f'  {BLUE}"env": {{ "ROAMPAL_PROFILE": "{name}" }}{RESET}')
+        return 0
+
+    if sub == "register":
+        name = args.name
+        path = args.path
+        if not os.path.isabs(path):
+            path = os.path.abspath(path)
+        try:
+            p = reg.register(name, path)
+        except (ProfileAlreadyExistsError, InvalidProfileNameError, ProfileError) as e:
+            print(f"{RED}Error:{RESET} {e}")
+            return 1
+        print(f"{GREEN}Registered profile {name!r}{RESET}")
+        print(f"  slug: {p.slug}")
+        print(f"  path: {p.path}")
+        if not Path(p.path).exists():
+            print(
+                f"{YELLOW}Note: path does not exist yet — will be created on first use.{RESET}"
+            )
+        return 0
+
+    if sub == "delete":
+        name = args.name
+        if name == DEFAULT_PROFILE:
+            print(f"{RED}Error:{RESET} cannot delete the default profile")
+            return 1
+        try:
+            profile = reg.get(name)
+            if profile is None:
+                print(f"{RED}Error:{RESET} profile {name!r} not registered")
+                return 1
+            resolved = reg.resolve(profile=profile)
+        except ProfileError as e:
+            print(f"{RED}Error:{RESET} {e}")
+            return 1
+
+        destroy = bool(getattr(args, "destroy_data", False))
+        if destroy and not _NO_INPUT:
+            confirm = input(
+                f"{YELLOW}Destroy data at {resolved}? (yes/no): {RESET}"
+            ).strip().lower()
+            if confirm != "yes":
+                print("Cancelled.")
+                return 1
+
+        try:
+            reg.delete(name, destroy_data=destroy)
+        except ProfileError as e:
+            print(f"{RED}Error:{RESET} {e}")
+            return 1
+        if destroy:
+            print(f"{GREEN}Deleted profile {name!r} and destroyed data at {resolved}{RESET}")
+        else:
+            print(f"{GREEN}Unregistered profile {name!r}{RESET}")
+            print(f"  (data at {resolved} was NOT deleted — remove manually if desired)")
+        return 0
+
+    print(f"{RED}Unknown profile subcommand: {sub!r}{RESET}")
+    return 1
+
+
 def main():
     """Main CLI entry point."""
     from roampal import __version__
@@ -3290,6 +3543,11 @@ examples:
     start_parser.add_argument("--port", type=int, default=27182, help="Server port")
     start_parser.add_argument(
         "--dev", action="store_true", help="Dev mode - use separate data directory"
+    )
+    start_parser.add_argument(
+        "--profile",
+        default=None,
+        help="Named memory profile (v0.5.1). See 'roampal profile --help'.",
     )
 
     # stop command
@@ -3484,6 +3742,47 @@ examples:
     doctor_parser.add_argument(
         "--dev", action="store_true", help="Check dev mode configuration"
     )
+    doctor_parser.add_argument(
+        "--profile", default=None, help="Named memory profile (v0.5.1)"
+    )
+
+    # profile command (v0.5.1) — manage named memory profiles
+    profile_parser = subparsers.add_parser(
+        "profile", help="Manage named memory profiles"
+    )
+    profile_sub = profile_parser.add_subparsers(dest="profile_command")
+    profile_sub.add_parser("list", help="List registered profiles")
+    profile_sub.add_parser("show", help="Show the active profile and its path")
+    p_use = profile_sub.add_parser(
+        "use", help="Persistently set the active profile (global default)"
+    )
+    p_use.add_argument("name", help="Profile name (use 'default' to clear)")
+    profile_sub.add_parser(
+        "unuse", help="Clear the persisted active profile (revert to default)"
+    )
+    p_switch = profile_sub.add_parser(
+        "switch",
+        help="Set active profile AND stop any running server so next spawn uses it",
+    )
+    p_switch.add_argument("name", help="Profile name (use 'default' to revert)")
+    p_create = profile_sub.add_parser("create", help="Create a new profile")
+    p_create.add_argument("name", help="Profile name (e.g. 'work', 'project-a')")
+    p_register = profile_sub.add_parser(
+        "register", help="Register an existing directory as a named profile"
+    )
+    p_register.add_argument("name", help="Profile name")
+    p_register.add_argument(
+        "--path", required=True, help="Existing data directory to register"
+    )
+    p_delete = profile_sub.add_parser(
+        "delete", help="Remove a profile from the registry"
+    )
+    p_delete.add_argument("name", help="Profile name to delete")
+    p_delete.add_argument(
+        "--destroy-data",
+        action="store_true",
+        help="Also delete the profile's data directory (irreversible)",
+    )
 
     # help command (alias for --help)
     subparsers.add_parser("help", help="Show this help message")
@@ -3526,6 +3825,8 @@ examples:
         cmd_sidecar(args)
     elif args.command == "doctor":
         exit_code = cmd_doctor(args) or 0
+    elif args.command == "profile":
+        exit_code = cmd_profile(args) or 0
     elif args.command == "help":
         parser.print_help()
     else:

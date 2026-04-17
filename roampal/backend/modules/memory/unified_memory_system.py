@@ -277,28 +277,51 @@ class UnifiedMemorySystem:
     - memory_bank: Persistent user facts (LLM-controlled, never decays)
     """
 
-    def __init__(self, data_path: str = None, config: Optional[MemoryConfig] = None):
+    def __init__(
+        self,
+        data_path: str = None,
+        config: Optional[MemoryConfig] = None,
+        profile_name: Optional[str] = None,
+    ):
         """
         Initialize UnifiedMemorySystem.
 
         Args:
-            data_path: Path for ChromaDB storage. Defaults to %APPDATA%/Roampal/data
+            data_path: Path for ChromaDB storage. Explicit paths always win.
             config: Memory configuration
+            profile_name: v0.5.1 — named profile from the profile registry.
+                Resolves via roampal.profile_manager when data_path is None
+                and ROAMPAL_DATA_PATH env is unset. None/"default" preserves
+                pre-v0.5.1 behaviour (system default path, dev/prod-aware).
         """
         self.config = config or MemoryConfig()
 
-        # Default data path - same as Roampal Desktop
-        # Can override with ROAMPAL_DATA_PATH env var
-        # Windows: %APPDATA%/Roampal/data (or dev-data for dev mode)
-        # macOS: ~/Library/Application Support/Roampal/data
-        # Linux: ~/.local/share/Roampal/data
+        # Resolution precedence:
+        #   1. Explicit data_path arg (constructor caller knows best)
+        #   2. ROAMPAL_DATA_PATH env var (backward-compat override)
+        #   3. profile_name via registry (v0.5.1 feature)
+        #   4. System default (dev/prod-aware, pre-v0.5.1 behaviour)
         if data_path is None:
-            # Check for env override first
             data_path = os.environ.get("ROAMPAL_DATA_PATH")
 
+            if data_path is None and profile_name and profile_name != "default":
+                # Delegate to profile_manager for registered profiles.
+                from roampal.profile_manager import (
+                    ProfileNotFoundError,
+                    ProfileRegistry,
+                )
+
+                try:
+                    data_path = ProfileRegistry().resolve(profile_name)
+                except ProfileNotFoundError:
+                    logger.warning(
+                        "Profile %r not registered; falling back to system default",
+                        profile_name,
+                    )
+                    data_path = None
+
             if data_path is None:
-                # Check for dev mode - matches Desktop's ROAMPAL_DATA_DIR convention
-                # DEV: Roampal_DEV/data, PROD: Roampal/data
+                # System default — same as pre-v0.5.1. Dev/prod aware.
                 dev_mode = os.environ.get("ROAMPAL_DEV", "").lower() in (
                     "1",
                     "true",
@@ -325,6 +348,7 @@ class UnifiedMemorySystem:
                     data_path = os.path.join(xdg_data, app_folder.lower(), "data")
         self.data_path = Path(data_path)
         self.data_path.mkdir(parents=True, exist_ok=True)
+        self.profile_name = profile_name or "default"
 
         # Services (lazy initialized)
         self._embedding_service: Optional[EmbeddingService] = None

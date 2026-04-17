@@ -429,15 +429,55 @@ score_delta = base_delta * time_weight
 ## Data Storage
 
 ### ChromaDB (Vector Store)
-- Location: `%APPDATA%/Roampal/data/chromadb` (Windows prod)
-- Location: `%APPDATA%/Roampal_DEV/data/chromadb` (Windows dev, `ROAMPAL_DEV=1`)
+- Default location: `%APPDATA%/Roampal/data/chromadb` (Windows prod)
+- Dev mode: `%APPDATA%/Roampal_DEV/data/chromadb` (Windows dev, `ROAMPAL_DEV=1`)
+- Named profile: `%APPDATA%/Roampal/data/<slug>/chromadb` (v0.5.1, see Named Memory Profiles below)
+- Custom path: honored via `ROAMPAL_DATA_PATH` env var (takes precedence over profiles)
 - Embeddings: `paraphrase-multilingual-mpnet-base-v2` via ONNX Runtime (768-dim)
 - Collections: `roampal_books`, `roampal_working`, `roampal_history`, `roampal_patterns`, `roampal_memory_bank` (matches Desktop)
 
 ### Session Files (JSONL)
-- Location: `%APPDATA%/Roampal/data/mcp_sessions/`
+- Location: `<resolved_data_path>/mcp_sessions/`
 - Format: One exchange per pair of lines
 - Purpose: Track scored/unscored state for enforcement
+
+---
+
+## Named Memory Profiles (v0.5.1)
+
+Users can maintain multiple isolated memory stores. Each profile has its own ChromaDB + session files, fully segregated from others. Common use cases: per-project memory, Claude Code vs OpenCode separation, work/home split.
+
+### Registry
+
+- File: `<config_dir>/profiles.json`
+- Structure: `{ "<name>": <path or null>, ... }`
+- `null` path → auto-locate at `<system_default_base>/<slug>/`
+- string path → use that path verbatim (lets users register pre-existing directories without data migration)
+- Managed via `roampal profile create|register|delete|list`
+
+### Active profile resolution
+
+There are two precedence chains in play — one for the server picking which profile to bind to at startup, and one for `UnifiedMemorySystem` translating a profile name into a data path.
+
+**`active_profile_name()` — which profile is active** (highest wins):
+1. `ROAMPAL_PROFILE` env var (per-shell or per-project via MCP config `env: {}`)
+2. Persisted `<config_dir>/active_profile` file (`roampal profile use <name>`)
+3. `"default"`
+
+**`UnifiedMemorySystem.__init__` — path resolution for the bound profile** (highest wins):
+1. Explicit `data_path` constructor argument
+2. `ROAMPAL_DATA_PATH` env var (backward-compat override)
+3. `profile_name` argument → `ProfileRegistry.resolve()` (registered custom path or auto-located slug dir)
+4. System default (`%APPDATA%/Roampal/data`, dev-mode-aware)
+
+The server's `lifespan` calls `active_profile_name()` to pick the profile, passes it to `UnifiedMemorySystem(profile_name=...)`, which then runs its own path-resolution chain. Once initialized, the server is bound to that data path for its lifetime. Swapping profiles requires stopping the server — `roampal profile switch <name>` writes the new active profile and kills the server in one step, and the next MCP tool call triggers `_ensure_server_running` which spawns a fresh server bound to the new profile.
+
+### File layout
+
+- `roampal/profile_manager.py` — `ProfileRegistry`, `profile_slug`, `resolve_data_path`, `active_profile_name`, `active_profile_source`, active-profile file read/write/clear
+- `roampal/backend/modules/memory/unified_memory_system.py` — `__init__(data_path, config, profile_name)` — profile_name arg resolves via ProfileRegistry when no explicit path/env
+- `roampal/server/main.py` — `lifespan()` calls `active_profile_name()` and passes to `UnifiedMemorySystem`
+- `roampal/cli.py` — `cmd_profile()` dispatcher + `profile` subparser group with `list`/`show`/`create`/`register`/`delete`/`use`/`unuse`/`switch` actions; `--profile` flag added to `start` and `doctor`
 
 ---
 

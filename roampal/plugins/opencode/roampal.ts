@@ -557,14 +557,16 @@ MEMORY SCORES: For each memory, judge based on topic relevance and exchange outc
 
     // v0.4.8: Call 1 — score_exchange (summary + outcome + memory_scores only).
     // Matches benchmark sidecar_score(). Tags and facts extracted separately.
+    // v0.5.1: Cap exchange fields at 8K chars to match extract_facts; safety net
+    // against a massive exchange blowing the scoring model's context window.
     const scoringPrompt = `The user said:
-"${exchange.user}"
+"${exchange.user.slice(0, 8000)}"
 
 You responded:
-"${exchange.assistant}"
+"${exchange.assistant.slice(0, 8000)}"
 
 The user then followed up with:
-"${currentUserMessage}"
+"${currentUserMessage.slice(0, 8000)}"
 ${memorySection}
 Respond with ONLY a JSON object:
 { "summary": "<~2000 chars>", "outcome": "<worked|failed|partial|unknown>"${memoryScoreSection} }

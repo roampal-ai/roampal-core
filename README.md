@@ -11,23 +11,13 @@
 </p>
 
 <p align="center">
-  <a href="https://glama.ai/mcp/servers/roampal-ai/roampal-core"><img src="https://glama.ai/mcp/servers/roampal-ai/roampal-core/badges/card.svg" alt="roampal-core MCP server"></a>
-</p>
-
-<p align="center">
   <strong>Two commands. Your AI coding assistant gets outcome-based memory.</strong><br>
   Works with <strong>Claude Code</strong> and <strong>OpenCode</strong>.
 </p>
 
 ---
 
-## Why?
-
-AI coding assistants forget everything between sessions. You explain your architecture, your preferences, your conventions — again. When they give bad advice, there's no mechanism to learn from it.
-
-Roampal is an MCP server that gives your AI persistent, outcome-based memory across every session. Good advice gets promoted. Bad advice gets demoted. Your AI learns what works and what doesn't — automatically, with zero workflow changes.
-
-### Benchmarks
+## Benchmarks
 
 **85.8% on LoCoMo** (non-adversarial, end-to-end answer accuracy) — validated on 1,986 questions across 10 conversations with dual grading.
 
@@ -138,7 +128,40 @@ roampal sidecar setup       # Configure scoring model (OpenCode)
 roampal sidecar test        # Test scoring model response format (OpenCode)
 roampal retag               # Re-extract tags on memories using sidecar LLM
 roampal sidecar disable     # Remove scoring model configuration (OpenCode)
+
+# Named memory profiles (v0.5.1) — isolate memory per project, per client, etc.
+roampal profile list                         # List registered profiles
+roampal profile show                         # Show active profile and its path
+roampal profile create <name>                # Create auto-located profile
+roampal profile register <name> --path <dir> # Register an existing directory
+roampal profile use <name>                   # Persist as user-global default
+roampal profile unuse                        # Clear persistence
+roampal profile switch <name>                # Persist + kill running server
+roampal profile delete <name>                # Remove from registry
+roampal start --profile <name>               # One-off launch on a profile
 ```
+
+## Named Memory Profiles (v0.5.1)
+
+Run separate memory stores for different contexts — per project, per client (Claude Code vs OpenCode), work vs home. Profiles are managed entirely through the CLI; no config files to hand-edit.
+
+```bash
+roampal profile create work          # auto-located at <appdata>/Roampal/data/work/
+roampal profile switch work          # persist + kill running server
+# next MCP tool call spawns a fresh server on 'work'
+```
+
+Register an existing directory as a profile (no data migration):
+
+```bash
+roampal profile register project-a --path /existing/custom/path
+```
+
+**Precedence** (highest wins):
+1. `--profile <name>` flag
+2. `ROAMPAL_PROFILE=<name>` env var (set per-project in `opencode.json` or `.claude.json` `env: {}`)
+3. `roampal profile use <name>` persisted default
+4. `"default"` fallback
 
 ## MCP Tools
 
@@ -253,6 +276,10 @@ Roampal Core is completely free and open source.
 - Feature ideas & feedback: [Discord](https://discord.com/invite/F87za86R3v)
 - Bug reports: [GitHub Issues](https://github.com/roampal-ai/roampal-core/issues)
 - Need help with AI memory? Reach out: **roampal@protonmail.com** | [LinkedIn](https://www.linkedin.com/in/logan-teague-6909901a5/)
+
+<p align="center">
+  <a href="https://glama.ai/mcp/servers/roampal-ai/roampal-core"><img src="https://glama.ai/mcp/servers/roampal-ai/roampal-core/badges/card.svg" alt="roampal-core MCP server"></a>
+</p>
 
 ## License
 
