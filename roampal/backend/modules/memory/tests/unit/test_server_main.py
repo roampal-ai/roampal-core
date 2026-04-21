@@ -352,6 +352,68 @@ class TestQueryStrings:
                             f"PII '{name}' in query string in {filepath}"
 
 
+class TestV052StartServerBanner:
+    """v0.5.2: banner must resolve actual data path and show profile line."""
+
+    def _capture_banner(self, tmp_path, env_patch, profile_name=None):
+        """Stub uvicorn + create_app, capture banner output."""
+        from unittest.mock import patch
+        import roampal.server.main as srv
+
+        if profile_name:
+            from roampal.profile_manager import ProfileRegistry
+            # Patch home BEFORE building registry so the registry writes to tmp
+            with patch("roampal.profile_manager.Path.home", return_value=tmp_path):
+                reg = ProfileRegistry()
+                if not reg.exists(profile_name):
+                    reg.create(profile_name)
+
+        printed = []
+
+        def capture(*args, **kwargs):
+            if args:
+                printed.append(" ".join(str(a) for a in args))
+
+        with patch("roampal.profile_manager.Path.home", return_value=tmp_path), \
+             patch.object(srv.uvicorn, "run", lambda *a, **kw: None), \
+             patch.object(srv, "create_app", lambda: None), \
+             patch("builtins.print", side_effect=capture), \
+             patch.dict(os.environ, env_patch, clear=False):
+            srv.start_server(host="127.0.0.1", port=27182, dev=False)
+
+        return "\n".join(printed)
+
+    def test_start_banner_shows_resolved_path_default(self, tmp_path, monkeypatch):
+        """Default profile: banner shows the real system path, no Profile line."""
+        for k in ("ROAMPAL_PROFILE", "ROAMPAL_DEV", "ROAMPAL_DATA_PATH"):
+            monkeypatch.delenv(k, raising=False)
+
+        output = self._capture_banner(tmp_path, env_patch={})
+
+        assert "ROAMPAL SERVER - PROD MODE" in output
+        assert "Port: 27182" in output
+        assert "%APPDATA%" not in output  # no unexpanded literal
+        assert "Profile:" not in output    # default -> no profile line
+        # Resolved path is absolute (starts with drive letter on win, / on unix)
+        assert "Data:" in output
+
+    def test_start_banner_shows_profile_line_when_active(self, tmp_path, monkeypatch):
+        """Active non-default profile: banner shows Profile: name (source)."""
+        for k in ("ROAMPAL_DEV", "ROAMPAL_DATA_PATH"):
+            monkeypatch.delenv(k, raising=False)
+
+        output = self._capture_banner(
+            tmp_path,
+            env_patch={"ROAMPAL_PROFILE": "research"},
+            profile_name="research",
+        )
+
+        assert "ROAMPAL SERVER - PROD MODE" in output
+        assert "Profile: research (env)" in output
+        # Data path should include the profile slug, not raw %APPDATA%.
+        assert "%APPDATA%" not in output
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

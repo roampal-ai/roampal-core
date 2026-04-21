@@ -290,5 +290,67 @@ class TestCleanupOldWorkingMemory:
         service.collections["working"].delete_vectors.assert_called()
 
 
+class TestDeletionAgeGateCreatedAtFallback:
+    """
+    v0.5.2: _handle_deletion (line ~298) previously read metadata["timestamp"]
+    without falling back to metadata["created_at"]. Core's store_working writes
+    created_at, not timestamp, so age_days stayed 0 for every core-written
+    memory — routing all of them to the lenient new_item_deletion_threshold
+    (0.1) regardless of true age. Older items that should have hit the strict
+    0.2 threshold were silently shielded indefinitely.
+    """
+
+    @pytest.fixture
+    def service(self):
+        from roampal.backend.modules.memory.promotion_service import PromotionService
+
+        working = MagicMock()
+        working.get_fragment.return_value = {
+            "content": "old memory",
+            "metadata": {"text": "old memory"},
+        }
+        working.delete_vectors = MagicMock()
+
+        collections = {"working": working, "history": MagicMock(), "patterns": MagicMock()}
+        embed_fn = AsyncMock(return_value=[0.1] * 768)
+
+        return PromotionService(collections=collections, embed_fn=embed_fn)
+
+    @pytest.mark.asyncio
+    async def test_deletion_threshold_ages_core_written_memory(self, service):
+        """Core-written memory (created_at only, 14 days old) with score
+        between thresholds must be deleted by the strict 0.2 threshold."""
+        await service.handle_promotion(
+            doc_id="working_core_old",
+            collection="working",
+            score=0.15,  # Between 0.1 lenient and 0.2 strict
+            uses=1,
+            metadata={
+                "text": "old",
+                # created_at only — simulates roampal-core's own store_working
+                "created_at": (datetime.now() - timedelta(days=14)).isoformat(),
+            },
+        )
+
+        service.collections["working"].delete_vectors.assert_called_once_with(["working_core_old"])
+
+    @pytest.mark.asyncio
+    async def test_deletion_threshold_still_ages_timestamp_memory(self, service):
+        """Regression: desktop-written memory (timestamp only, 14 days old)
+        still hits the strict threshold after the fallback change."""
+        await service.handle_promotion(
+            doc_id="working_desktop_old",
+            collection="working",
+            score=0.15,
+            uses=1,
+            metadata={
+                "text": "old",
+                "timestamp": (datetime.now() - timedelta(days=14)).isoformat(),
+            },
+        )
+
+        service.collections["working"].delete_vectors.assert_called_once_with(["working_desktop_old"])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

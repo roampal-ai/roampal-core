@@ -299,7 +299,11 @@ class SearchService:
         all_results = self.scoring_service.apply_scoring_to_results(all_results)
 
         # v0.4.5 TagCascade: CE reranks pool, raw CE score is final ranking
-        all_results = self._rerank_with_ce(processed_query, all_results, top_k=limit)
+        # v0.5.2: offload to threadpool so ONNX inference doesn't block the
+        # event loop (MCP heartbeats, concurrent tool calls, server timeouts).
+        all_results = await asyncio.to_thread(
+            self._rerank_with_ce, processed_query, all_results, limit
+        )
 
         # Track and paginate
         paginated_results = all_results[offset:offset + limit]

@@ -1504,6 +1504,23 @@ def cmd_doctor(args):
     mode_str = f"{YELLOW}DEV{RESET}" if is_dev else f"{GREEN}PROD{RESET}"
     print(f"Mode: {mode_str}\n")
 
+    # v0.5.2: honor --profile flag and ROAMPAL_PROFILE env. Propagate --dev via
+    # env so profile path resolution targets the Roampal_DEV base.
+    if is_dev:
+        os.environ["ROAMPAL_DEV"] = "1"
+    profile_flag = getattr(args, "profile", None)
+    if profile_flag:
+        os.environ["ROAMPAL_PROFILE"] = profile_flag
+    from roampal.profile_manager import (
+        DEFAULT_PROFILE,
+        ProfileNotFoundError,
+        active_profile_name,
+        active_profile_source,
+        resolve_data_path,
+    )
+    profile_name = active_profile_name()
+    profile_source = active_profile_source()
+
     checks_passed = 0
     checks_failed = 0
     checks_warned = 0
@@ -1642,17 +1659,30 @@ def cmd_doctor(args):
             )
 
     # 4. Check data directory
+    # v0.5.2: resolve via profile_manager so --profile / ROAMPAL_PROFILE /
+    # active_profile file all influence the reported path. Falls back to the
+    # system default when profile is 'default'.
     print(f"\n{BOLD}Data Directory:{RESET}")
-    data_dir = get_data_dir(dev=is_dev)
-    if data_dir.exists():
-        check_pass(f"Data directory exists: {data_dir}")
-        chromadb_path = data_dir / "chromadb"
-        if chromadb_path.exists():
-            check_pass("ChromaDB directory exists")
+    try:
+        data_dir = Path(resolve_data_path(profile_name))
+        if profile_name != DEFAULT_PROFILE:
+            check_pass(f"Profile: {profile_name} (source: {profile_source})")
+    except ProfileNotFoundError:
+        check_fail(
+            f"Profile {profile_name!r} is not registered (source: {profile_source})"
+        )
+        data_dir = None
+
+    if data_dir is not None:
+        if data_dir.exists():
+            check_pass(f"Data directory exists: {data_dir}")
+            chromadb_path = data_dir / "chromadb"
+            if chromadb_path.exists():
+                check_pass("ChromaDB directory exists")
+            else:
+                check_warn("ChromaDB not initialized yet (first use will create it)")
         else:
-            check_warn("ChromaDB not initialized yet (first use will create it)")
-    else:
-        check_warn(f"Data directory not created: {data_dir}")
+            check_warn(f"Data directory not created: {data_dir}")
 
     # 5. Check MCP server can start and list tools
     print(f"\n{BOLD}MCP Server:{RESET}")
@@ -1679,29 +1709,39 @@ def cmd_doctor(args):
         check_fail(f"MCP server import failed: {e}")
 
     # 6. Check memory system initialization
+    # v0.5.2: pass the same profile-resolved data path + profile name used by
+    # the Data Directory check so doctor exercises the user's configured store.
     print(f"\n{BOLD}Memory System:{RESET}")
-    try:
+    if data_dir is None:
+        check_warn("Skipping memory system init (unresolved data directory)")
+    else:
+        try:
 
-        async def test_memory():
-            from roampal.backend.modules.memory import UnifiedMemorySystem
+            async def test_memory():
+                from roampal.backend.modules.memory import UnifiedMemorySystem
 
-            data_path = str(get_data_dir(dev=is_dev)) if is_dev else None
-            mem = UnifiedMemorySystem(data_path=data_path)
-            await mem.initialize()
-            return mem
+                data_path = str(data_dir)
+                profile_for_mem = (
+                    profile_name if profile_name != DEFAULT_PROFILE else None
+                )
+                mem = UnifiedMemorySystem(
+                    data_path=data_path, profile_name=profile_for_mem
+                )
+                await mem.initialize()
+                return mem
 
-        mem = asyncio.run(test_memory())
-        check_pass("Memory system initializes")
+            mem = asyncio.run(test_memory())
+            check_pass("Memory system initializes")
 
-        # Check collections
-        if hasattr(mem, "collections") and mem.collections:
-            collection_names = list(mem.collections.keys())
-            check_pass(f"Collections: {', '.join(collection_names)}")
-        else:
-            check_warn("No collections found")
+            # Check collections
+            if hasattr(mem, "collections") and mem.collections:
+                collection_names = list(mem.collections.keys())
+                check_pass(f"Collections: {', '.join(collection_names)}")
+            else:
+                check_warn("No collections found")
 
-    except Exception as e:
-        check_fail(f"Memory system failed: {e}")
+        except Exception as e:
+            check_fail(f"Memory system failed: {e}")
 
     # 7. Check dependencies
     print(f"\n{BOLD}Dependencies:{RESET}")

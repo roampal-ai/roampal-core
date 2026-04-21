@@ -333,3 +333,45 @@ class TestCollectionBoost:
         }
         search_service._apply_collection_boost(result, "memory_bank", "query")
         assert result["distance"] == 1.0
+
+
+class TestV052CERerankOffload:
+    """v0.5.2: _rerank_with_ce must be invoked via asyncio.to_thread."""
+
+    @pytest.mark.asyncio
+    async def test_ce_rerank_offloaded_to_executor(self, search_service):
+        """search() must hand _rerank_with_ce off to a thread so ONNX inference
+        does not block the event loop."""
+        import asyncio
+
+        captured = []
+        original_to_thread = asyncio.to_thread
+
+        async def spy_to_thread(fn, /, *args, **kwargs):
+            captured.append((getattr(fn, "__name__", repr(fn)), args))
+            return await original_to_thread(fn, *args, **kwargs)
+
+        # Bypass the heavy pool path — feed search() a result set directly by
+        # mocking the pool builder to return one item, then run CE rerank.
+        search_service._build_search_pool = AsyncMock(return_value=[{
+            "id": "d1",
+            "text": "hello",
+            "content": "hello",
+            "metadata": {"score": 0.5, "uses": 0, "success_count": 0.0},
+            "distance": 0.2,
+            "collection": "working",
+        }])
+
+        # Force the CE path to be invoked even without a real model loaded.
+        rerank_stub = MagicMock(side_effect=lambda q, r, top_k: r)
+        rerank_stub.__name__ = "_rerank_with_ce"
+        search_service._rerank_with_ce = rerank_stub
+
+        with patch("asyncio.to_thread", side_effect=spy_to_thread):
+            await search_service.search(query="hello", limit=4)
+
+        rerank_calls = [c for c in captured if c[0] == "_rerank_with_ce"]
+        assert rerank_calls, (
+            f"_rerank_with_ce never went through asyncio.to_thread; "
+            f"captured calls: {captured}"
+        )

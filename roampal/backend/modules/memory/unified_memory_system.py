@@ -554,6 +554,23 @@ class UnifiedMemorySystem:
         self.initialized = True
         logger.info("UnifiedMemorySystem initialized successfully")
 
+        # v0.5.2: Warm ONNX models in background so the first MCP tool call
+        # doesn't pay the 2-4s cold-load penalty. Fire-and-forget — if a call
+        # arrives before warm-up finishes, the lazy-load fallback runs instead.
+        # Stored as tasks (vs bare create_task) so tests / shutdown can await them.
+        async def _warm_ce():
+            try:
+                await asyncio.to_thread(self._search_service._load_ce)
+            except Exception as e:
+                logger.debug(f"CE warm-up failed (will lazy-load on demand): {e}")
+
+        self._warmup_tasks = [
+            asyncio.create_task(_warm_ce(), name="warmup_ce"),
+            asyncio.create_task(
+                self._embedding_service.prewarm(), name="warmup_embedding"
+            ),
+        ]
+
         # Startup cleanup: delete garbage memories (score < 0.2)
         await self._startup_cleanup()
 
@@ -1039,22 +1056,24 @@ class UnifiedMemorySystem:
         # v0.4.5: Two-lane retrieval matching benchmark (4 summaries + 4 facts = 8)
         all_collections = ["working", "patterns", "history", "memory_bank"]
 
-        # Lane 1: summaries/context (4 slots)
-        # memory_bank items included (no memory_type field, $ne "fact" includes them)
-        summary_results = await self.search(
-            query=query,
-            limit=4,
-            collections=all_collections,
-            metadata_filters={"memory_type": {"$ne": "fact"}},
-        )
-
-        # Lane 2: facts (4 slots)
-        # memory_bank excluded naturally (no items have memory_type: "fact")
-        fact_results = await self.search(
-            query=query,
-            limit=4,
-            collections=all_collections,
-            metadata_filters={"memory_type": "fact"},
+        # v0.5.2: Run both lanes concurrently. search() reads self.embed_fn
+        # (stateless) and read-only ChromaDB — lanes share no mutable state.
+        # Saves ~500-1000ms per MCP tool call (no more back-to-back blocking).
+        # Lane 1: summaries/context (4 slots) — memory_bank included ($ne "fact")
+        # Lane 2: facts (4 slots) — memory_bank excluded (no items are "fact")
+        summary_results, fact_results = await asyncio.gather(
+            self.search(
+                query=query,
+                limit=4,
+                collections=all_collections,
+                metadata_filters={"memory_type": {"$ne": "fact"}},
+            ),
+            self.search(
+                query=query,
+                limit=4,
+                collections=all_collections,
+                metadata_filters={"memory_type": "fact"},
+            ),
         )
 
         # Merge: 4 summaries + 4 facts

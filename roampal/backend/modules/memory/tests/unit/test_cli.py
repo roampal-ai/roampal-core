@@ -599,5 +599,83 @@ class TestCmdInit:
         assert "No AI coding tools detected" in printed
 
 
+class TestV052CmdDoctorProfile:
+    """v0.5.2: cmd_doctor must honor --profile and ROAMPAL_PROFILE."""
+
+    def _patched_env(self, tmp_path):
+        """Shared patches that keep doctor off real configs / ChromaDB / PyPI."""
+        from contextlib import ExitStack
+        stack = ExitStack()
+        stack.enter_context(
+            patch("roampal.cli.Path.home", return_value=tmp_path)
+        )
+        stack.enter_context(
+            patch("roampal.profile_manager.Path.home", return_value=tmp_path)
+        )
+        # Register profile 'research' so resolve_data_path succeeds for it.
+        from roampal.profile_manager import ProfileRegistry
+        reg = ProfileRegistry()
+        if not reg.exists("research"):
+            reg.create("research")
+        # Skip real MCP import + Memory System init to keep test <1s.
+        # asyncio is imported inside cmd_doctor, so patch at the module root.
+        stack.enter_context(
+            patch("asyncio.run", return_value=MagicMock())
+        )
+        return stack
+
+    def test_doctor_respects_profile_flag(self, tmp_path):
+        """--profile research must resolve via profile_manager, not get_data_dir."""
+        from roampal.cli import cmd_doctor
+        args = MagicMock()
+        args.dev = False
+        args.profile = "research"
+
+        with self._patched_env(tmp_path), \
+             patch.dict(os.environ, {}, clear=False), \
+             patch("builtins.print") as mock_print:
+            os.environ.pop("ROAMPAL_PROFILE", None)
+            os.environ.pop("ROAMPAL_DEV", None)
+            cmd_doctor(args)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "Profile: research" in printed
+        assert "source: env" in printed  # --profile was set via env
+
+    def test_doctor_respects_profile_env(self, tmp_path):
+        """ROAMPAL_PROFILE env var alone (no --profile flag) must be honored."""
+        from roampal.cli import cmd_doctor
+        args = MagicMock()
+        args.dev = False
+        args.profile = None
+
+        with self._patched_env(tmp_path), \
+             patch.dict(os.environ, {"ROAMPAL_PROFILE": "research"}, clear=False), \
+             patch("builtins.print") as mock_print:
+            cmd_doctor(args)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "Profile: research" in printed
+        assert "source: env" in printed
+
+    def test_doctor_unregistered_profile(self, tmp_path):
+        """Unknown --profile must FAIL cleanly and skip memory init."""
+        from roampal.cli import cmd_doctor
+        args = MagicMock()
+        args.dev = False
+        args.profile = "ghost"
+
+        with self._patched_env(tmp_path), \
+             patch.dict(os.environ, {}, clear=False), \
+             patch("builtins.print") as mock_print:
+            os.environ.pop("ROAMPAL_PROFILE", None)
+            os.environ.pop("ROAMPAL_DEV", None)
+            cmd_doctor(args)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "'ghost' is not registered" in printed
+        assert "Skipping memory system init" in printed
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

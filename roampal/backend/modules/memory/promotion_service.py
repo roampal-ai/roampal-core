@@ -293,11 +293,15 @@ class PromotionService:
             logger.debug(f"[PROMOTION] Skipping deletion for {collection} (permanent collection)")
             return
 
-        # Calculate age
+        # Calculate age. Core writes `created_at`; desktop writes `timestamp`.
+        # When both tools share a ChromaDB, either field may be present —
+        # reading only one makes the other side's memories look ageless and
+        # always hit the lenient new-item deletion threshold.
         age_days = 0
-        if metadata.get("timestamp"):
+        ts_str = metadata.get("timestamp") or metadata.get("created_at")
+        if ts_str:
             try:
-                age_days = (datetime.now() - datetime.fromisoformat(metadata["timestamp"])).days
+                age_days = (datetime.now() - datetime.fromisoformat(ts_str)).days
             except Exception:
                 pass
 

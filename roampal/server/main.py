@@ -1929,16 +1929,38 @@ def start_server(host: str = "127.0.0.1", port: int = None, dev: bool = False):
     if port is None:
         port = DEV_PORT if dev_mode else PROD_PORT
 
+    # v0.5.2: Resolve the actual data path for the banner so it reflects the
+    # active profile + any ROAMPAL_DATA_PATH override. Previous versions printed
+    # an unexpanded %APPDATA%/Roampal/data literal that was wrong under named
+    # profiles.
+    from roampal.profile_manager import (
+        DEFAULT_PROFILE,
+        ProfileNotFoundError,
+        active_profile_name,
+        active_profile_source,
+        resolve_data_path,
+    )
+
+    profile_name = active_profile_name()
+    try:
+        resolved_path = resolve_data_path(profile_name)
+    except ProfileNotFoundError:
+        resolved_path = f"<profile {profile_name!r} not registered>"
+
     # Startup banner (ASCII-safe for Windows cp1252)
     mode_str = "DEV" if dev_mode else "PROD"
-    data_hint = "Roampal_DEV" if dev_mode else "Roampal"
-    print(f"""
-===================================================
-  ROAMPAL SERVER - {mode_str} MODE
-  Port: {port}
-  Data: %APPDATA%/{data_hint}/data
-===================================================
-""")
+    banner_lines = [
+        "===================================================",
+        f"  ROAMPAL SERVER - {mode_str} MODE",
+        f"  Port: {port}",
+        f"  Data: {resolved_path}",
+    ]
+    if profile_name != DEFAULT_PROFILE:
+        banner_lines.append(
+            f"  Profile: {profile_name} ({active_profile_source()})"
+        )
+    banner_lines.append("===================================================")
+    print("\n" + "\n".join(banner_lines) + "\n")
 
     app = create_app()
     uvicorn.run(app, host=host, port=port)

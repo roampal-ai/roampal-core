@@ -874,5 +874,59 @@ class TestCrossEncoderWiring:
             assert "reranker" not in call_kwargs
 
 
+class TestV052PerformanceFixes:
+    """v0.5.2: parallel retrieval lanes + background ONNX warm-up."""
+
+    @pytest.mark.asyncio
+    async def test_get_context_for_injection_parallelizes_lanes(self, tmp_path):
+        """Both two-lane search() calls must run concurrently (asyncio.gather)."""
+        import asyncio as _asyncio
+        import time
+
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        ums.initialized = True
+        ums._memory_bank_service = MagicMock()
+        ums._memory_bank_service.get_always_inject.return_value = []
+        ums._memory_bank_service.list_all.return_value = []
+
+        call_windows = []
+
+        async def fake_search(*args, **kwargs):
+            start = time.perf_counter()
+            await _asyncio.sleep(0.05)
+            end = time.perf_counter()
+            call_windows.append((start, end))
+            return []
+
+        ums.search = fake_search  # type: ignore[assignment]
+
+        await ums.get_context_for_injection(query="hello")
+
+        assert len(call_windows) == 2, "Both lanes should fire"
+        first_start, first_end = call_windows[0]
+        second_start, second_end = call_windows[1]
+        # Parallel: second call must start BEFORE first call finishes.
+        assert second_start < first_end, (
+            f"Lanes ran serially (second_start={second_start} >= "
+            f"first_end={first_end}); expected asyncio.gather overlap."
+        )
+
+    @pytest.mark.asyncio
+    async def test_onnx_models_warm_at_init(self, tmp_path):
+        """initialize() must schedule CE + embedding warm-up tasks."""
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        assert hasattr(ums, "_warmup_tasks"), "No warm-up tasks stored"
+        assert len(ums._warmup_tasks) == 2, "Expected 2 warm-up tasks (CE + embedding)"
+        task_names = {t.get_name() for t in ums._warmup_tasks}
+        assert "warmup_ce" in task_names
+        assert "warmup_embedding" in task_names
+
+        # Let tasks finish so pytest doesn't warn about pending tasks
+        import asyncio as _asyncio
+        await _asyncio.gather(*ums._warmup_tasks, return_exceptions=True)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
