@@ -3,6 +3,7 @@
 <p align="center">
   <a href="https://github.com/roampal-ai/roampal-core/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/roampal-ai/roampal-core/tests.yml?branch=main&style=flat-square&label=tests" alt="Tests"></a>
   <a href="https://pypi.org/project/roampal/"><img src="https://img.shields.io/pypi/v/roampal?color=blue&style=flat-square" alt="PyPI"></a>
+  <a href="https://github.com/roampal-ai/roampal-core/releases/latest"><img src="https://img.shields.io/github/v/release/roampal-ai/roampal-core?label=latest&color=blue&style=flat-square" alt="Latest release"></a>
   <a href="https://pypi.org/project/roampal/"><img src="https://img.shields.io/pypi/dm/roampal?color=blue&style=flat-square" alt="Downloads"></a>
   <a href="https://github.com/roampal-ai/roampal-core/stargazers"><img src="https://img.shields.io/github/stars/roampal-ai/roampal-core?color=blue&style=flat-square" alt="Stars"></a>
   <a href="https://github.com/roampal-ai/roampal-core/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
