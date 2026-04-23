@@ -665,8 +665,10 @@ ${memoryInstructions}`
 
         try {
           // All targets use OpenAI-compatible /chat/completions
-          // max_tokens 2000: reasoning models (qwen3, glm) burn 500-1000 tokens thinking
-          // before producing the JSON answer. 800 was too low — model ran out of tokens.
+          // max_tokens 4000 (v0.5.3.1): reasoning models (qwen3, qwen3.6, glm)
+          // burn 500-2000 tokens thinking before producing JSON answer. 2000
+          // was too low for verbose summaries on qwen3.6 — output got truncated
+          // mid-string with no closing brace, causing parse failures.
           const headers: Record<string, string> = { "Content-Type": "application/json" }
           if (target.key) headers["Authorization"] = `Bearer ${target.key}`
 
@@ -685,7 +687,7 @@ ${memoryInstructions}`
                 { role: "system", content: "/no_think\nYou are part of a memory system. Return ONLY valid JSON with summary, outcome, and memory_scores fields. No other text. Be concise." },
                 { role: "user", content: "/no_think\n" + scoringPrompt }
               ],
-              max_tokens: 2000,
+              max_tokens: 4000,
               temperature: 0,
             }),
             signal: AbortSignal.timeout(requestTimeout)
@@ -733,23 +735,40 @@ ${memoryInstructions}`
           const contentText = msg.content || ""
           const reasoningText = msg.reasoning_content || msg.reasoning || ""
 
-          // Try content first (most models), then reasoning (thinking models)
-          let jsonMatch = contentText.match(/\{[\s\S]*\}/)
-          if (!jsonMatch && reasoningText) {
-            // Reasoning models: JSON may be at the end of chain-of-thought.
-            // Use last JSON object to skip thinking artifacts.
-            const allMatches = [...reasoningText.matchAll(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g)]
-            if (allMatches.length > 0) {
-              jsonMatch = allMatches[allMatches.length - 1]  // last JSON object
-              debugLog(`scoreExchange: extracted JSON from reasoning field (${allMatches.length} candidates)`)
+          // Robust JSON extraction:
+          //   1. Strip markdown code fences
+          //   2. Try parsing the whole stripped text directly (handles nested
+          //      objects like memory_scores, and strings containing { or })
+          //   3. Fallback to greedy match (whole outer object even with nesting)
+          //   4. Fallback to non-greedy multi-match validated last-to-first
+          // Tries contentText first (standard models), then reasoningText
+          // (thinking models). v0.5.3.1: was non-greedy single-match, which
+          // broke on responses containing nested objects (memory_scores) or
+          // strings with literal `}` — JSON.parse would fail with Expected '}'.
+          function extractJson(raw: string): unknown | null {
+            if (!raw) return null
+            const stripped = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim()
+            try { return JSON.parse(stripped) } catch { /* fall through */ }
+            const greedy = stripped.match(/\{[\s\S]*\}/)
+            if (greedy) {
+              try { return JSON.parse(greedy[0]) } catch { /* fall through */ }
             }
+            const all = [...stripped.matchAll(/\{[\s\S]*?\}/g)]
+            for (let i = all.length - 1; i >= 0; i--) {
+              try { return JSON.parse(all[i][0]) } catch { /* try next */ }
+            }
+            return null
           }
-          if (!jsonMatch) {
+
+          let result: any = extractJson(contentText)
+          if (!result && reasoningText) {
+            result = extractJson(reasoningText)
+            if (result) debugLog(`scoreExchange: extracted JSON from reasoning field`)
+          }
+          if (!result) {
             debugLog(`scoreExchange no JSON from ${target.label}: content=${contentText.slice(0, 80)} reasoning=${reasoningText.slice(0, 80)}`)
             break  // bad output — try next model
           }
-
-          const result = JSON.parse(jsonMatch[0])
           const outcome = result.outcome
           if (!["worked", "failed", "partial", "unknown"].includes(outcome)) {
             debugLog(`scoreExchange invalid outcome from ${target.label}: ${outcome}`)
@@ -938,19 +957,23 @@ If no useful facts, return: {"facts": []}`
                   { role: "system", content: "/no_think\nExtract key facts. Return ONLY valid JSON with a facts array. No other text." },
                   { role: "user", content: "/no_think\n" + factsPrompt }
                 ],
-                max_tokens: 1000,
+                max_tokens: 2000,
                 temperature: 0,
               }),
               signal: AbortSignal.timeout(30000)
             })
 
-            if (factsResp.ok) {
-              const factsData = await factsResp.json()
-              const factsMsg = factsData.choices?.[0]?.message || {}
-              const factsContent = factsMsg.content || factsMsg.reasoning_content || factsMsg.reasoning || ""
-              const factsJsonMatch = factsContent.match(/\{[\s\S]*\}/)
-              if (factsJsonMatch) {
-                const factsResult = JSON.parse(factsJsonMatch[0])
+              if (factsResp.ok) {
+                const factsData = await factsResp.json()
+                const factsMsg = factsData.choices?.[0]?.message || {}
+                const factsContent = factsMsg.content || factsMsg.reasoning_content || factsMsg.reasoning || ""
+                // v0.5.3.1: Use the same robust extractJson helper as the
+                // scoring path. Handles backtick fences, nested objects, and
+                // strings containing literal { or }. Was a non-greedy single
+                // match that broke on any complex output (Unrecognized token,
+                // Expected '}', Unexpected token errors).
+                const factsResult: any = extractJson(factsContent)
+                if (factsResult) {
                 const extractedFacts = Array.isArray(factsResult.facts)
                   ? factsResult.facts.filter((f: unknown) => typeof f === "string" && (f as string).length > 10)
                   : []
