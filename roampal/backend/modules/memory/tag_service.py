@@ -14,6 +14,7 @@ Query matching uses simple word matching (zero latency in search path).
 import json
 import logging
 import re
+import threading
 from typing import Callable, List, Optional, Set
 
 logger = logging.getLogger(__name__)
@@ -510,6 +511,7 @@ class TagService:
         """
         self._llm_extract_fn = llm_extract_fn
         self._known_tags: Set[str] = set()
+        self._tags_lock = threading.Lock()
 
     # --- Extraction ---
 
@@ -520,18 +522,29 @@ class TagService:
 
         Returns: List of lowercase tag strings, max 8.
         """
+        import inspect
+
         if not self._llm_extract_fn:
             logger.debug("No LLM extract function available, returning []")
+            return []
+
+        if inspect.iscoroutinefunction(self._llm_extract_fn):
+            logger.warning(
+                "TagService.extract_tags() called with an async llm_extract_fn — "
+                "sync path can't await it. Use extract_tags_async() instead. "
+                "Returning []."
+            )
             return []
 
         try:
             tags = self._llm_extract_fn(text)
             if tags:
                 tags = self._normalize_llm_tags(tags)
-                self._known_tags.update(tags)
+                with self._tags_lock:
+                    self._known_tags.update(tags)
                 return tags
         except Exception as e:
-            logger.debug(f"LLM tag extraction failed: {e}")
+            logger.warning(f"LLM tag extraction failed: {e}")
 
         return []
 
@@ -589,43 +602,45 @@ class TagService:
 
         Called once during initialization. Fast — reads metadata only.
         """
-        self._known_tags.clear()
-        total = 0
+        with self._tags_lock:
+            self._known_tags.clear()
+            total = 0
 
-        for coll_name, adapter in collections.items():
-            try:
-                collection_obj = adapter.collection
-                if not collection_obj:
-                    continue
-                items = collection_obj.get(limit=10000, include=["metadatas"])
-                for meta in items.get("metadatas", []):
-                    if not meta:
+            for coll_name, adapter in collections.items():
+                try:
+                    collection_obj = adapter.collection
+                    if not collection_obj:
                         continue
-                    noun_tags_raw = meta.get("noun_tags", "")
-                    if not noun_tags_raw:
-                        continue
-                    try:
-                        if isinstance(noun_tags_raw, str):
-                            tags = json.loads(noun_tags_raw)
-                        else:
-                            tags = noun_tags_raw
-                        if isinstance(tags, list):
-                            self._known_tags.update(
-                                t for t in tags if isinstance(t, str)
-                            )
-                            total += len(tags)
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-            except Exception as e:
-                logger.warning(f"Failed to scan {coll_name} for tags: {e}")
+                    items = collection_obj.get(limit=10000, include=["metadatas"])
+                    for meta in items.get("metadatas", []):
+                        if not meta:
+                            continue
+                        noun_tags_raw = meta.get("noun_tags", "")
+                        if not noun_tags_raw:
+                            continue
+                        try:
+                            if isinstance(noun_tags_raw, str):
+                                tags = json.loads(noun_tags_raw)
+                            else:
+                                tags = noun_tags_raw
+                            if isinstance(tags, list):
+                                self._known_tags.update(
+                                    t for t in tags if isinstance(t, str)
+                                )
+                                total += len(tags)
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                except Exception as e:
+                    logger.warning(f"Failed to scan {coll_name} for tags: {e}")
 
-        logger.info(
+            logger.info(
             f"Rebuilt known tag index: {len(self._known_tags)} unique tags from {total} total"
         )
 
     def add_known_tags(self, tags: List[str]):
         """Add tags to the known index (called after storing a new memory)."""
-        self._known_tags.update(tags)
+        with self._tags_lock:
+            self._known_tags.update(tags)
 
     @property
     def known_tags(self) -> Set[str]:

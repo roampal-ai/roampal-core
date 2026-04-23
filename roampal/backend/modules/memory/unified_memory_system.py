@@ -8,6 +8,7 @@ Kept: Core search, outcome tracking, memory bank operations.
 
 import asyncio
 import logging
+import math
 import json
 import sys
 import uuid
@@ -363,6 +364,23 @@ class UnifiedMemorySystem:
         self.collections: Dict[str, ChromaDBAdapter] = {}
         self.initialized = False
 
+        # v0.5.3: Pre-store fact dedup constants (ported from Desktop v0.3.2)
+        # L2² = 2 − 2·cos_sim ⇒ L2 = √(2 − 2·cos_sim)
+        # cos_sim > 0.95 ⇒ L2 < √0.1 ≈ 0.316. Using 0.32 matches desktop.
+        self.FACT_DEDUP_DISTANCE_THRESHOLD = 0.32
+        self.FACT_DEDUP_TIERS = ("working", "history", "patterns", "memory_bank")
+
+        # Per-tier filter. working/history/patterns hold mixed memory types
+        # (exchanges, summaries, facts) so scan only facts. memory_bank is
+        # fact-shaped by construction and doesn't tag rows with memory_type,
+        # so scan unfiltered.
+        self.FACT_DEDUP_FILTERS = {
+            "working": {"memory_type": "fact"},
+            "history": {"memory_type": "fact"},
+            "patterns": {"memory_type": "fact"},
+            "memory_bank": None,
+        }
+
         # v0.4.5: KG removed. Tag service handles routing now.
 
         # Ghost Registry - tracks deleted book IDs without modifying ChromaDB
@@ -460,6 +478,39 @@ class UnifiedMemorySystem:
             logger.warning(f"ChromaDB schema migration failed (non-fatal): {e}")
             # Don't raise - let ChromaDB try to initialize anyway
             # Worst case: original error surfaces with better context
+
+    async def _find_duplicate_fact(
+        self,
+        embedding: List[float],
+        tiers: Optional[tuple] = None,
+    ) -> Optional[str]:
+        """Return existing doc_id if a near-dup fact is already stored.
+
+        Scans the given tiers (default: all of FACT_DEDUP_TIERS) with
+        per-tier filters (see FACT_DEDUP_FILTERS) and a cosine-distance
+        threshold of 0.32 (~95% similarity). Returns the first match;
+        None if no duplicate exists. Best-effort: exceptions are
+        swallowed and logged — dedup must never block a store.
+
+        Tier-scope is asymmetric by write persistence — see call sites.
+        """
+        scan_tiers = tiers if tiers is not None else self.FACT_DEDUP_TIERS
+        for tier in scan_tiers:
+            col = self.collections.get(tier)
+            if col is None:
+                continue
+            try:
+                hits = await col.query_vectors(
+                    query_vector=embedding,
+                    top_k=1,
+                    filters=self.FACT_DEDUP_FILTERS.get(tier),
+                )
+            except Exception as e:
+                logger.debug(f"[DEDUP] query_vectors failed on tier={tier}: {e}")
+                continue
+            if hits and hits[0].get("distance", 2.0) < self.FACT_DEDUP_DISTANCE_THRESHOLD:
+                return hits[0].get("id")
+        return None
 
     async def initialize(self):
         """Initialize collections and services."""
@@ -822,6 +873,14 @@ class UnifiedMemorySystem:
                 **(metadata or {}),
             }
             embedding = await self._embedding_service.embed_text(text)
+
+            # v0.5.3: Pre-store dedup for fact-type writes (all 4 tiers).
+            if metadata and metadata.get("memory_type") == "fact":
+                dup_id = await self._find_duplicate_fact(embedding)
+                if dup_id is not None:
+                    logger.debug(f"[DEDUP] {collection} fact duplicate found: {dup_id}, skipping write")
+                    return dup_id
+
             await self.collections[collection].upsert_vectors(
                 ids=[doc_id], vectors=[embedding], metadatas=[final_metadata]
             )
@@ -862,12 +921,21 @@ class UnifiedMemorySystem:
         if not self.initialized:
             await self.initialize()
 
+        # v0.5.3: Pre-store dedup — memory_bank scans only within its own tier.
+        # A permanent write must NEVER be blocked by an ephemeral working-tier copy.
+        embedding = await self._embedding_service.embed_text(text)
+        dup_id = await self._find_duplicate_fact(embedding, tiers=("memory_bank",))
+        if dup_id is not None:
+            logger.debug(f"[DEDUP] memory_bank duplicate found: {dup_id}, skipping write")
+            return dup_id
+
         doc_id = await self._memory_bank_service.store(
             text=text,
             tags=tags or [],
             importance=importance,
             confidence=confidence,
             always_inject=always_inject,
+            embedding=embedding,
         )
 
         # v0.4.5: noun_tags for TagCascade retrieval
@@ -1548,6 +1616,13 @@ class UnifiedMemorySystem:
 
         doc_id = f"working_{uuid.uuid4().hex[:8]}"
         embedding = await self._embedding_service.embed_text(content)
+
+        # v0.5.3: Pre-store dedup for fact-type writes (all 4 tiers).
+        if metadata and metadata.get("memory_type") == "fact":
+            dup_id = await self._find_duplicate_fact(embedding)
+            if dup_id is not None:
+                logger.debug(f"[DEDUP] working fact duplicate found: {dup_id}, skipping write")
+                return dup_id
 
         meta = {
             "content": content,

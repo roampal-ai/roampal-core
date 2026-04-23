@@ -585,28 +585,12 @@ Separately, record_response(key_takeaway="...") is OPTIONAL - only for significa
     def _save_completion_state(self, state: Dict[str, Any]) -> None:
         """Save completion state to file.
 
-        v0.4.1: Atomic write via temp file + rename to prevent corruption
-        from concurrent get-context and stop_hook races.
+        v0.5.3 Section 10: Refactored to use write_json_atomic() from
+        roampal.utils.atomic_json — single code path for all atomic JSON writes.
         """
         try:
-            import tempfile
-            # Write to temp file in same directory, then rename (atomic on Linux)
-            fd, tmp_path = tempfile.mkstemp(
-                dir=str(self._state_file.parent),
-                suffix=".tmp"
-            )
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(state, f)
-                # os.replace is atomic on both Linux and Windows
-                os.replace(tmp_path, str(self._state_file))
-            except Exception:
-                # Clean up temp file on failure
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
+            from roampal.utils.atomic_json import write_json_atomic
+            write_json_atomic(self._state_file, state, indent=None)
         except Exception as e:
             logger.error(f"Error saving completion state: {e}")
 

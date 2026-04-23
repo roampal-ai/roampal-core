@@ -34,7 +34,7 @@ roampal init --opencode   # Or configure explicitly
   OpenCode MCP         hook subprocesses   TypeScript plugin
 ```
 
-**Architecture (v0.4.9):** MCP servers are thin HTTP clients — no ChromaDB or heavy ML frameworks in the MCP process. Embeddings use pure ONNX Runtime (no PyTorch). All access is serialized through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running. Sidecar LLM handles tag extraction (OpenCode only — Claude Code uses the main LLM via MCP tools). Tag extraction uses LLM only, no regex fallback.
+**Architecture (v0.5.3):** MCP servers are thin HTTP clients — no ChromaDB or heavy ML frameworks in the MCP process. Embeddings use pure ONNX Runtime (no PyTorch). All access is serialized through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running. Sidecar LLM handles tag extraction (OpenCode only — Claude Code uses the main LLM via MCP tools). Tag extraction uses LLM only, no regex fallback. Server-side noun_tags extraction fallback ensures summaries and facts always have tags when stored. Pre-store fact dedup prevents near-duplicate storage across tiers with tier-scoped checks. Sidecar scoring requires explicit configuration (no automatic Zen/localhost fallback); bare JSON arrays from small local models are handled via server-side shape tolerance.
 
 `roampal start` is available for standalone use (e.g., OpenCode-only setups where no MCP auto-starts the server).
 
@@ -276,6 +276,10 @@ working → history → patterns
 | `/api/health` | GET | Health check |
 | `/api/stats` | GET | Memory statistics |
 
+### Multi-Key Filter Wrapping (v0.5.3)
+
+Memory bank searches with multiple metadata keys now use `$and`-wrapped filters in ChromaDB queries. Previously, multi-key filters were applied as independent conditions which could produce incorrect results when combined. The `$and` wrapper ensures all conditions must match simultaneously for a memory to be returned.
+
 ---
 
 ## MCP Tools
@@ -436,6 +440,16 @@ score_delta = base_delta * time_weight
 - Embeddings: `paraphrase-multilingual-mpnet-base-v2` via ONNX Runtime (768-dim)
 - Collections: `roampal_books`, `roampal_working`, `roampal_history`, `roampal_patterns`, `roampal_memory_bank` (matches Desktop)
 
+### Pre-Store Fact Dedup (v0.5.3)
+
+Ported from Roampal Desktop v0.3.2. Before storing a new fact, the system checks for cosine similarity > 0.9 using L2 distance on embeddings (threshold ≈ 0.32). If a match exists, returns existing ID instead of creating a duplicate — **no wasted storage, no stale copies**.
+
+**Tier scope:**
+- `working`, `history`, `patterns` fact writes → scan all 4 tiers (`working` + `history` + `patterns` + `memory_bank`) with per-tier filters (`memory_type=fact` for working/history/patterns, unfiltered for memory_bank)
+- `memory_bank` writes → scans within its own tier only
+
+This prevents ephemeral working-tier noise from blocking permanent memory_bank writes, while still catching cross-tier duplicates. No second copies are ever created — if a match exists in the scanned scope, the new fact is simply not stored.
+
 ### Session Files (JSONL)
 - Location: `<resolved_data_path>/mcp_sessions/`
 - Format: One exchange per pair of lines
@@ -500,7 +514,11 @@ Tags-first cascade retrieval replaces the knowledge graph. Validated on LoCoMo b
 
 **Two-lane retrieval:** 4 summaries + 4 facts = 8 memories per context injection.
 
-**Tag extraction:** LLM extracts `noun_tags` via MCP tool params (Claude Code: main LLM, OpenCode: sidecar).
+**Tag extraction:** LLM extracts `noun_tags` via MCP tool params (Claude Code: main LLM, OpenCode: sidecar). Server-side noun_tags extraction fallback ensures summaries and facts always have tags when stored — fixes the gap where client-side extraction could be skipped.
+
+### TagCascade `$contains` Fix (v0.5.3)
+
+Tag prefiltering now correctly uses `$contains` operator for tag matching in ChromaDB queries. Previously, tag-based prefiltering was not applied during retrieval, causing irrelevant memories to enter the candidate pool and dilute ranking quality.
 
 ---
 
@@ -531,7 +549,36 @@ roampal summarize           # Summarize long memories
 # Scoring (OpenCode)
 roampal sidecar status      # Check scoring model configuration
 roampal sidecar setup       # Configure scoring model
+roampal sidecar test        # Test scoring model response format
 roampal sidecar disable     # Remove scoring model configuration
+
+# Sidecar scope flags (v0.5.3+) — OpenCode merges project-local over user-global config:
+roampal sidecar setup --scope user       # Write only to user-global config (~/.config/opencode/)
+roampal sidecar setup --scope project    # Write only to project-local opencode.json in cwd ancestry
+roampal sidecar setup                    # Auto-detects: uses project-local if shadow exists, otherwise user-global
+
+# Sidecar scope flags for disable (v0.5.3+):
+roampal sidecar disable --scope user       # Clear only from user-global config
+roampal sidecar disable --scope project    # Clear only from project-local opencode.json
+roampal sidecar disable                    # Auto-detects scope same as setup
+
+# Advanced:
+roampal score             # Score the last exchange (manual/testing)
+roampal context           # Output recent exchange context
+
+# Named memory profiles (v0.5.1) — isolate memory per project, per client, etc.
+roampal profile list                         # List registered profiles
+roampal profile show                         # Show active profile and its path
+roampal profile create <name>                # Create auto-located profile
+roampal profile register <name> --path <dir> # Register an existing directory
+roampal profile use <name>                   # Persist as user-global default
+roampal profile unuse                        # Clear persistence
+roampal profile switch <name>                # Persist + kill running server
+roampal profile delete <name>                # Remove from registry
+roampal start --profile <name>               # One-off launch on a profile
+
+# Retag memories using sidecar LLM (v0.5.3+)
+roampal retag                                # Re-extract noun_tags on all memories
 ```
 
 ### CLI Design
@@ -622,7 +669,7 @@ Automatically detects and configures installed tools. Use `--claude-code` or `--
 2. Creates `~/.claude/.mcp.json` with roampal-core MCP server
 
 **OpenCode** (`~/.config/opencode/` detected):
-1. Creates `opencode.json` with roampal-core MCP server + `PYTHONPATH` env
+1. Creates `opencode.json` with roampal-core MCP server + `PYTHONPATH` env (atomic write — parse errors abort, `.bak` backup preserved)
 2. Installs TypeScript plugin to `~/.config/opencode/plugin/roampal.ts`
 3. Plugin handles context injection (via `chat.message` + `system.transform` hooks) and exchange capture (via `event` hook)
 
@@ -729,9 +776,29 @@ Note: OpenCode passes MCP env vars to MCP server subprocesses but NOT to plugins
 | `ROAMPAL_SIDECAR_MODEL` | Model name (e.g. `qwen3:30b-a3b`) |
 | `ROAMPAL_SIDECAR_DISABLED` | `true` to disable all sidecar scoring |
 
-**Scoring chain:** User's chosen model (25s budget) → Zen free models (15s budget, **skipped** when user configured a model).
+**Scoring chain (v0.5.3+):** Scoring requires explicit configuration via `roampal sidecar setup`. No automatic fallback to Zen or localhost — if the sidecar is unavailable, scoring is paused and a warning prompts the user to configure it.
 
-When user configures a model via `roampal sidecar setup`, Zen is skipped entirely — the user chose that model for a reason, and Zen routes through OpenCode's proxy which may log data. The plugin never scans the full provider config — only the specific model written by sidecar setup is used. No surprise API charges.
+When configured, only the user's chosen model is used for scoring. The plugin never scans the full provider config — only the specific model written by `sidecar setup` is used. No surprise API charges. Zen free models are available as an explicit opt-in choice during setup (for users who don't have a local model or API key), but they route through OpenCode's proxy which may log data.
+
+### Sidecar Configuration Changes (v0.5.3)
+
+**Explicit configuration required:** Scoring no longer falls back to Zen or localhost automatically. Users must explicitly configure a scoring model via `roampal sidecar setup`. If the sidecar is unavailable, scoring is paused and a warning prompts the user to run `roampal sidecar setup`.
+
+**JSON-shape tolerance:** Small local models (qwen2.5:3b, etc.) that return bare JSON arrays instead of OpenAI-shaped responses are handled transparently by the server-side scoring client. No model changes needed — the server normalizes the response format before processing.
+
+**Scope-aware CLI:** `roampal sidecar setup` and `roampal sidecar disable` now support `--scope user|project|both`:
+- `--scope user` → writes only to user-global config (`~/.config/opencode/opencode.json`)
+- `--scope project` → writes only to project-local `opencode.json` in cwd ancestry
+- No flag (default) → auto-detects: uses project-local if shadow exists, otherwise user-global
+
+**Atomic writes:** Config file updates use atomic write with backup. If the config has a JSON parse error, the operation aborts without writing — no corruption risk. A `.bak` backup is preserved for recovery.
+
+### Sidecar Status Output (v0.5.3)
+
+The `roampal sidecar status` command now reports both user-global and project-local scopes when both exist:
+- Shows effective resolution line indicating which config takes precedence
+- Flags "OVERRIDES" when project-local shadows user-global settings
+- Reports each scope's model, URL, and disabled state independently
 
 ---
 
@@ -760,12 +827,14 @@ When user configures a model via `roampal sidecar setup`, Zen is skipped entirel
 
 Memories earn their way to permanent storage through proven usefulness.
 
-### 4. No Local LLM
+### 4. No Local LLM (Main Inference)
 
-Unlike Roampal Desktop, roampal-core uses NO local LLM. The connected external LLM (Claude, GPT) IS the brain. This removes:
+Unlike Roampal Desktop, roampal-core uses NO local LLM for main inference. The connected external LLM (Claude, GPT) IS the brain. This removes:
 - Ollama dependency
 - Model download/management
 - Local compute requirements
+
+**Exception:** OpenCode's sidecar scoring optionally uses a local or API model to independently score exchanges. This is configurable via `roampal sidecar setup` and can be disabled entirely with `roampal sidecar disable`. The sidecar model does not affect main inference — it only reviews past exchanges as a third party.
 
 ### 5. No Truncation
 

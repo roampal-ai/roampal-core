@@ -26,9 +26,8 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-# User-configurable sidecar (env vars override defaults)
-# Set ROAMPAL_SIDECAR_URL + ROAMPAL_SIDECAR_KEY + ROAMPAL_SIDECAR_MODEL
-# to use any OpenAI-compatible endpoint (Groq, Together, OpenRouter, etc.)
+# v0.5.3 Section 12: No default sidecar config — empty strings mean disabled until user explicitly opts in via ROAMPAL_SIDECAR_URL / ROAMPAL_SIDECAR_MODEL env vars or `roampal sidecar setup`.
+
 _raw_custom_url = os.environ.get("ROAMPAL_SIDECAR_URL", "")
 CUSTOM_KEY = os.environ.get("ROAMPAL_SIDECAR_KEY", "")
 CUSTOM_MODEL = os.environ.get("ROAMPAL_SIDECAR_MODEL", "")
@@ -197,7 +196,7 @@ def _call_custom(prompt: str, timeout: int = 15) -> Optional[Dict[str, Any]]:
                 },
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 800,
+            "max_tokens": 8000,
         }
     ).encode("utf-8")
 
@@ -246,7 +245,7 @@ def _call_haiku(prompt: str, timeout: int = 15) -> Optional[Dict[str, Any]]:
     data = json.dumps(
         {
             "model": HAIKU_MODEL,
-            "max_tokens": 800,
+            "max_tokens": 8000,
             "messages": [{"role": "user", "content": prompt}],
         }
     ).encode("utf-8")
@@ -300,7 +299,7 @@ def _call_zen(prompt: str, timeout: int = 10) -> Optional[Dict[str, Any]]:
                         },
                         {"role": "user", "content": prompt},
                     ],
-                    "max_tokens": 800,
+                    "max_tokens": 8000,
                 }
             ).encode("utf-8")
 
@@ -459,7 +458,7 @@ def _call_lmstudio(prompt: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
                     },
                     {"role": "user", "content": prompt},
                 ],
-                "max_tokens": 800,
+                "max_tokens": 8000,
             }
         ).encode("utf-8")
 
@@ -534,9 +533,13 @@ def _call_llm(prompt: str, timeout: int = 15) -> Optional[Dict[str, Any]]:
         # Parse comma-separated list: "zen,ollama,lmstudio"
         priority_order = [p.strip() for p in priority_env.split(",")]
     else:
-        # v0.4.9: Default for users without custom config
-        # zen → ollama → lmstudio (haiku excluded - requires explicit config)
-        priority_order = ["zen", "ollama", "lmstudio"]
+        # v0.5.3: No default cascade. If the user hasn't configured a sidecar
+        # via ROAMPAL_SIDECAR_URL or ROAMPAL_SIDECAR_PRIORITY, scoring is
+        # disabled — no network calls, no localhost probing. Previous
+        # versions silently sent exchange text to opencode.ai Zen and to
+        # localhost Ollama/LM Studio without opt-in. Users opt in explicitly
+        # by running `roampal sidecar setup` or setting the env vars.
+        priority_order = []
 
     # Filter to healthy backends first
     healthy_backends = []
@@ -807,7 +810,7 @@ def _call_anthropic_model(
     data = json.dumps(
         {
             "model": model,
-            "max_tokens": 800,
+            "max_tokens": 8000,
             "messages": [{"role": "user", "content": prompt}],
         }
     ).encode("utf-8")
@@ -866,14 +869,17 @@ Respond with ONLY a JSON object:
             f"Using ROAMPAL_SUMMARIZE_MODEL={SUMMARIZE_MODEL} for summarization"
         )
         result = _call_anthropic_model(prompt, SUMMARIZE_MODEL)
-        if result:
+        if isinstance(result, dict):
             return result.get("summary")
         logger.warning(
             f"ROAMPAL_SUMMARIZE_MODEL ({SUMMARIZE_MODEL}) failed, falling back to sidecar chain"
         )
 
+    # v0.5.3: Type guard — _call_llm returns whatever _extract_json parses,
+    # which can be a list/string from a 3B-class model that ignores the
+    # {"summary": "..."} schema. Without the guard, .get() crashes.
     result = _call_llm(prompt, timeout=30)
-    return result.get("summary") if result else None
+    return result.get("summary") if isinstance(result, dict) else None
 
 
 def extract_tags(text: str, timeout: int = 20) -> Optional[List[str]]:
@@ -898,14 +904,14 @@ def extract_tags(text: str, timeout: int = 20) -> Optional[List[str]]:
         "response, question, topic, context, information, correction, update, memory\n"
         "- Skip generic verbs/actions: said, told, mentioned, discussed, talked, asked\n"
         "- Focus on WHO and WHAT the text is about, not how it was communicated\n"
-        f'- Maximum 8 tags\n\nText: "{text[:500]}"'
+        f'- Maximum 8 tags\n\nText: "{text[:2000]}"'
     )
 
     result = _call_llm(prompt)
     if not result:
         return None
 
-    tags = result.get("tags")
+    tags = result if isinstance(result, list) else result.get("tags")
     if not isinstance(tags, list):
         return None
 
@@ -958,14 +964,14 @@ def extract_facts(text: str, timeout: int = 30) -> Optional[List[str]]:
         "\n"
         'Return ONLY a JSON object: {"facts": ["fact 1", "fact 2"]}\n'
         'If no useful facts, return: {"facts": []}\n'
-        f'\nText: "{text[:800]}"'
+        f'\nText: "{text[:8000]}"'
     )
 
     result = _call_llm(prompt, timeout=timeout)
     if not result:
         return None
 
-    facts = result.get("facts")
+    facts = result if isinstance(result, list) else result.get("facts")
     if not isinstance(facts, list):
         return None
 
@@ -1010,6 +1016,17 @@ FACTS: Key facts worth remembering — WHO/WHAT, specifics, max 150 chars each."
     if result is None:
         return {"passed": False, "fields": {}, "error": "All backends failed"}
 
+    # v0.5.3 Section 3: 3B-class models sometimes return a bare list
+    # instead of the schema-wrapped object. The full scoring schema
+    # (summary/outcome/noun_tags/facts) can't be validated from a list,
+    # so report a clear error rather than crashing on result.get(...).
+    if isinstance(result, list):
+        return {
+            "passed": False,
+            "fields": {},
+            "error": "Sidecar returned a bare JSON array; expected an object with summary/outcome/noun_tags/facts. Try a larger model.",
+        }
+
     # Validate summary
     summary = result.get("summary", "")
     fields["summary"] = {
@@ -1031,7 +1048,7 @@ FACTS: Key facts worth remembering — WHO/WHAT, specifics, max 150 chars each."
         "value": noun_tags if isinstance(noun_tags, list) else "(missing)",
     }
 
-    # Validate facts
+    # Validate facts (bare-list case handled by early-return above)
     facts = result.get("facts", [])
     fields["facts"] = {
         "ok": isinstance(facts, list) and len(facts) > 0,

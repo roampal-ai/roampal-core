@@ -62,7 +62,8 @@ class MemoryBankService:
         tags: List[str],
         importance: float = 0.7,
         confidence: float = 0.7,
-        always_inject: bool = False
+        always_inject: bool = False,
+        embedding: Optional[List[float]] = None
     ) -> str:
         """
         Store user memory in memory_bank collection.
@@ -94,8 +95,9 @@ class MemoryBankService:
 
         doc_id = f"memory_bank_{uuid.uuid4().hex[:8]}"
 
-        # Generate embedding
-        embedding = await self.embed_fn(text)
+        # Generate embedding (use caller-provided if available to avoid double-embed)
+        if embedding is None:
+            embedding = await self.embed_fn(text)
 
         # Build metadata
         metadata = {

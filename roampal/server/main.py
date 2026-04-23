@@ -912,11 +912,27 @@ def create_app() -> FastAPI:
                     if request.metadata:
                         store_metadata.update(request.metadata)
 
+                    # v0.5.3 Section 11: Extract tags from summary when plugin doesn't provide noun_tags
+                    extracted_tags = None
+                    if not request.noun_tags and store_metadata.get("memory_type") == "exchange_summary":
+                        try:
+                            from roampal.sidecar_service import extract_tags as sidecar_extract_tags
+
+                            extracted_tags = sidecar_extract_tags(assistant_msg)
+                            if extracted_tags:
+                                logger.info(
+                                    f"Extracted {len(extracted_tags)} tags from exchange via sidecar"
+                                )
+                        except Exception as tag_err:
+                            logger.warning(f"Failed to extract tags from exchange (non-fatal): {tag_err}")
+
+                    effective_noun_tags = request.noun_tags or extracted_tags
+
                     doc_id = await _memory.store_working(
                         content=content,
                         conversation_id=conversation_id,
                         metadata=store_metadata,
-                        noun_tags=request.noun_tags,
+                        noun_tags=effective_noun_tags,
                     )
 
                     await _session_manager.store_exchange(
@@ -1493,9 +1509,26 @@ def create_app() -> FastAPI:
             # v0.3.6: Store exchange summary
             # Claude Code: main LLM stores summary directly (no prior exchange to replace)
             # OpenCode: replace the full exchange stored by stop hook with summary
+            # v0.5.3: Extract tags from content when plugin doesn't provide noun_tags
             summary_stored = False
             if request.exchange_summary and _memory:
                 try:
+                    # v0.5.3: Extract tags from summary if not provided by plugin
+                    extracted_tags = None
+                    if not request.noun_tags:
+                        try:
+                            from roampal.sidecar_service import extract_tags as sidecar_extract_tags
+
+                            extracted_tags = sidecar_extract_tags(request.exchange_summary)
+                            if extracted_tags:
+                                logger.info(
+                                    f"Extracted {len(extracted_tags)} tags from exchange summary via sidecar"
+                                )
+                        except Exception as tag_err:
+                            logger.warning(f"Failed to extract tags from summary (non-fatal): {tag_err}")
+
+                    effective_summary_tags = request.noun_tags or extracted_tags
+
                     if exchange_doc_id:
                         # OpenCode path: replace existing full exchange with summary
                         adapter = _memory.collections.get("working")
@@ -1512,11 +1545,11 @@ def create_app() -> FastAPI:
                                     doc.get("content", "")
                                 )
                                 # v0.4.5: noun_tags for TagCascade retrieval
-                                if request.noun_tags:
+                                if effective_summary_tags:
                                     import json as _json
 
                                     metadata["noun_tags"] = _json.dumps(
-                                        request.noun_tags
+                                        effective_summary_tags
                                     )
 
                                 embedding = await _memory._embedding_service.embed_text(
@@ -1542,7 +1575,7 @@ def create_app() -> FastAPI:
                                 "summarized_at": datetime.now().isoformat(),
                                 "turn_type": "exchange",
                             },
-                            noun_tags=request.noun_tags,
+                            noun_tags=effective_summary_tags,
                         )
                         summary_stored = True
                         logger.info(
@@ -1554,12 +1587,23 @@ def create_app() -> FastAPI:
             # v0.4.5: Store atomic facts as separate working memories
             # v0.4.8: Restore noun_tags on facts — benchmark proves tagged facts
             # improve TagCascade retrieval. Pass exchange-level tags; store_working's
-            # regex fallback provides per-fact extraction if no LLM tags available.
+            # LLM-only extraction provides per-fact tags if no sidecar configured.
+            # v0.5.3: Extract per-fact tags when plugin doesn't provide noun_tags
             if request.facts and _memory:
                 for fact_text in request.facts:
                     if not fact_text or len(fact_text.strip()) < 10:
                         continue
                     try:
+                        # v0.5.3: Extract per-fact tags when no exchange-level tags provided
+                        fact_tags = None
+                        if not request.noun_tags:
+                            try:
+                                from roampal.sidecar_service import extract_tags as sidecar_extract_tags
+
+                                fact_tags = sidecar_extract_tags(fact_text)
+                            except Exception:
+                                pass  # silently skip tag extraction per-fact
+
                         await _memory.store_working(
                             content=fact_text,
                             conversation_id=conversation_id,
@@ -1567,7 +1611,7 @@ def create_app() -> FastAPI:
                                 "memory_type": "fact",
                                 "timestamp": datetime.now().isoformat(),
                             },
-                            noun_tags=request.noun_tags,
+                            noun_tags=request.noun_tags or fact_tags,
                         )
                     except Exception as e:
                         logger.warning(f"Failed to store fact: {e}")

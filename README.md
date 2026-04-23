@@ -59,10 +59,12 @@ The core loop is identical — both platforms inject context, capture exchanges,
 |--|-------------|----------|
 | Context injection | Hooks (stdout) | Plugin (system prompt) |
 | Exchange capture | Stop hook | Plugin `session.idle` event |
-| Scoring | Main LLM via `score_memories` tool | Independent sidecar (your chosen model > Zen free) |
+| Scoring | Main LLM via `score_memories` tool | Independent sidecar (your chosen model, disabled by default until configured) |
 | Self-healing | Hooks auto-restart server on failure | Plugin auto-restarts server on failure |
 
-Claude Code prompts the main LLM to score each exchange via the `score_memories` tool. OpenCode never self-scores — an independent sidecar (a separate API call) reviews each exchange as a third party, removing self-assessment bias. The `score_memories` tool is not registered on OpenCode. During `roampal init` or `roampal sidecar setup`, Roampal detects local models (Ollama, LM Studio, etc.) and lets you choose a scoring model. If configured, these take priority (Zen is skipped for privacy). A cheap or local model works great — scoring doesn't need a powerful model. Defaults to Zen free models (remote, best-effort) if you skip setup.
+Claude Code prompts the main LLM to score each exchange via the `score_memories` tool. OpenCode never self-scores — an independent sidecar (a separate API call) reviews each exchange as a third party, removing self-assessment bias. The `score_memories` tool is not registered on OpenCode. Scoring is disabled by default until you explicitly configure it via `roampal sidecar setup`. During setup, Roampal detects local models (Ollama, LM Studio, etc.) and lets you choose a scoring model. Zen free models are available as an explicit opt-in choice for users without a local model or API key — they route through OpenCode's proxy which may log data. A cheap or local model works great — scoring doesn't need a powerful model.
+
+> **v0.5.3:** Sidecar scoring now requires explicit configuration — no automatic fallback to Zen or localhost. Small local models (qwen2.5:3b, etc.) that return bare JSON arrays instead of OpenAI-shaped responses are handled transparently via server-side shape tolerance.
 </details>
 
 ## How It Works
@@ -128,7 +130,17 @@ roampal sidecar status      # Check scoring model configuration (OpenCode)
 roampal sidecar setup       # Configure scoring model (OpenCode)
 roampal sidecar test        # Test scoring model response format (OpenCode)
 roampal retag               # Re-extract tags on memories using sidecar LLM
-roampal sidecar disable     # Remove scoring model configuration (OpenCode)
+roampal sidecar disable     # Disable scoring (removes config, retrieval still works)
+
+# Sidecar scope flags (v0.5.3+) — OpenCode merges project-local over user-global config:
+roampal sidecar setup --scope user       # Write only to user-global config (~/.config/opencode/)
+roampal sidecar setup --scope project    # Write only to project-local opencode.json in cwd ancestry
+roampal sidecar setup                    # Auto-detects: uses project-local if shadow exists, otherwise user-global
+
+# Sidecar scope flags for disable (v0.5.3+):
+roampal sidecar disable --scope user       # Clear only from user-global config
+roampal sidecar disable --scope project    # Clear only from project-local opencode.json
+roampal sidecar disable                    # Auto-detects scope same as setup
 
 # Named memory profiles (v0.5.1) — isolate memory per project, per client, etc.
 roampal profile list                         # List registered profiles

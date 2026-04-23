@@ -232,10 +232,10 @@ class ProfileRegistry:
         self._profiles = profiles
 
     def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        from roampal.utils.atomic_json import write_json_atomic
+
         payload = {name: profile.path for name, profile in self._profiles.items()}
-        with open(self._path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+        write_json_atomic(self._path, payload)
 
     # --- Queries ---
 

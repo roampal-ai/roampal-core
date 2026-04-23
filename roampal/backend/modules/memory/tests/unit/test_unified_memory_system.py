@@ -104,7 +104,7 @@ class TestStoreWorking:
 
         # Mock embedding
         ums._embedding_service = MagicMock()
-        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 384)
+        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 768)
 
         return ums
 
@@ -135,7 +135,7 @@ class TestSearch:
 
         # Mock embedding
         ums._embedding_service = MagicMock()
-        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 384)
+        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 768)
 
         # Mock scoring
         ums._scoring_service = MagicMock()
@@ -237,6 +237,10 @@ class TestMemoryBankAPI:
         ums._memory_bank_service.archive = AsyncMock(return_value=True)
         ums._memory_bank_service.search = AsyncMock(return_value=[])
 
+        # Mock embedding service (v0.5.3 dedup calls embed_text before store)
+        ums._embedding_service = MagicMock()
+        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 768)
+
         return ums
 
     @pytest.mark.asyncio
@@ -278,7 +282,7 @@ class TestContextAPI:
 
         # Mock embedding
         ums._embedding_service = MagicMock()
-        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 384)
+        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 768)
 
         # Mock collections
         mock_collection = MagicMock()
@@ -402,8 +406,8 @@ class TestStoreBook:
 
         # Mock embedding - v0.2.0: Use embed_texts for batch embedding
         ums._embedding_service = MagicMock()
-        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 384)
-        ums._embedding_service.embed_texts = AsyncMock(side_effect=lambda texts: [[0.1] * 384 for _ in texts])
+        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 768)
+        ums._embedding_service.embed_texts = AsyncMock(side_effect=lambda texts: [[0.1] * 768 for _ in texts])
 
         return ums
 
@@ -486,7 +490,7 @@ class TestMemoryBankWilsonBlend:
 
         # Mock embedding
         ums._embedding_service = MagicMock()
-        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 384)
+        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 768)
 
         # Real ScoringService for Wilson scoring (v0.3.2)
         ums._scoring_service = ScoringService(config=ums.config)
@@ -658,7 +662,7 @@ class TestSearchWilsonScoring:
 
         # Mock embedding
         ums._embedding_service = MagicMock()
-        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 384)
+        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 768)
 
         # Real ScoringService for Wilson scoring
         ums._scoring_service = ScoringService(config=ums.config)
@@ -790,7 +794,7 @@ class TestCrossEncoderWiring:
 
         # Mock embedding
         ums._embedding_service = MagicMock()
-        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 384)
+        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 768)
 
         # Mock SearchService
         mock_search_service = MagicMock()
@@ -829,7 +833,7 @@ class TestCrossEncoderWiring:
 
         # Mock embedding
         ums._embedding_service = MagicMock()
-        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 384)
+        ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 768)
 
         # Real scoring for inline fallback
         ums._scoring_service = ScoringService(config=ums.config)
@@ -926,6 +930,334 @@ class TestV052PerformanceFixes:
         # Let tasks finish so pytest doesn't warn about pending tasks
         import asyncio as _asyncio
         await _asyncio.gather(*ums._warmup_tasks, return_exceptions=True)
+
+
+# ============================================================================
+# v0.5.3: Pre-Store Fact Dedup Tests (Section 9)
+# ============================================================================
+
+class TestV053FactDedup:
+    """Pre-store fact dedup across all 4 tiers (working, history, patterns, memory_bank)."""
+
+    def _make_ums(self, tmp_path):
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        return ums
+
+    @pytest.mark.asyncio
+    async def test_dedup_blocks_duplicate_working_write(self, tmp_path):
+        """Storing a fact in working should detect existing working-tier duplicate."""
+        import uuid as _uuid
+        from roampal.backend.modules.memory.unified_memory_system import UnifiedMemorySystem
+
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        # Mock embedding service to return consistent vectors for dedup matching
+        mock_embedding = [0.1] * 768
+        original_embed_text = ums._embedding_service.embed_text
+        async def mock_embed(text):
+            return mock_embedding
+        ums._embedding_service.embed_text = mock_embed
+
+        # Pre-populate working with a fact using the same embedding
+        existing_id = f"working_{_uuid.uuid4().hex[:8]}"
+        await ums.collections["working"].upsert_vectors(
+            ids=[existing_id],
+            vectors=[mock_embedding],
+            metadatas=[{
+                "text": "Logan is a data scientist",
+                "content": "Logan is a data scientist",
+                "score": 0.5,
+                "uses": 0,
+                "created_at": datetime.now().isoformat(),
+                "memory_type": "fact",
+            }]
+        )
+
+        # Store same fact again — should return existing ID via dedup
+        result_id = await ums.store(
+            text="Logan is a data scientist",
+            collection="working",
+            metadata={"memory_type": "fact"},
+        )
+
+        assert result_id == existing_id, f"Expected dedup to return {existing_id}, got {result_id}"
+
+    @pytest.mark.asyncio
+    async def test_dedup_blocks_duplicate_patterns_write(self, tmp_path):
+        """Storing a fact in patterns should detect existing patterns-tier duplicate."""
+        import uuid as _uuid
+
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        mock_embedding = [0.1] * 768
+        async def mock_embed(text):
+            return mock_embedding
+        ums._embedding_service.embed_text = mock_embed
+
+        existing_id = f"patterns_{_uuid.uuid4().hex[:8]}"
+        await ums.collections["patterns"].upsert_vectors(
+            ids=[existing_id],
+            vectors=[mock_embedding],
+            metadatas=[{
+                "text": "Logan is a data scientist",
+                "content": "Logan is a data scientist",
+                "score": 0.5,
+                "uses": 0,
+                "created_at": datetime.now().isoformat(),
+                "memory_type": "fact",
+            }]
+        )
+
+        result_id = await ums.store(
+            text="Logan is a data scientist",
+            collection="patterns",
+            metadata={"memory_type": "fact"},
+        )
+
+        assert result_id == existing_id
+
+    @pytest.mark.asyncio
+    async def test_dedup_blocks_duplicate_history_write(self, tmp_path):
+        """Storing a fact in history should detect existing history-tier duplicate."""
+        import uuid as _uuid
+
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        mock_embedding = [0.1] * 768
+        async def mock_embed(text):
+            return mock_embedding
+        ums._embedding_service.embed_text = mock_embed
+
+        existing_id = f"history_{_uuid.uuid4().hex[:8]}"
+        await ums.collections["history"].upsert_vectors(
+            ids=[existing_id],
+            vectors=[mock_embedding],
+            metadatas=[{
+                "text": "Logan is a data scientist",
+                "content": "Logan is a data scientist",
+                "score": 0.5,
+                "uses": 0,
+                "created_at": datetime.now().isoformat(),
+                "memory_type": "fact",
+            }]
+        )
+
+        result_id = await ums.store(
+            text="Logan is a data scientist",
+            collection="history",
+            metadata={"memory_type": "fact"},
+        )
+
+        assert result_id == existing_id
+
+    @pytest.mark.asyncio
+    async def test_dedup_blocks_cross_tier_duplicate(self, tmp_path):
+        """Storing a fact should detect duplicates across ALL 4 tiers."""
+        import uuid as _uuid
+
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        mock_embedding = [0.1] * 768
+        async def mock_embed(text):
+            return mock_embedding
+        ums._embedding_service.embed_text = mock_embed
+
+        # Pre-populate patterns with the fact
+        existing_id = f"patterns_{_uuid.uuid4().hex[:8]}"
+        await ums.collections["patterns"].upsert_vectors(
+            ids=[existing_id],
+            vectors=[mock_embedding],
+            metadatas=[{
+                "text": "Logan is a data scientist",
+                "content": "Logan is a data scientist",
+                "score": 0.5,
+                "uses": 0,
+                "created_at": datetime.now().isoformat(),
+                "memory_type": "fact",
+            }]
+        )
+
+        # Store same fact in working — should detect cross-tier duplicate
+        result_id = await ums.store(
+            text="Logan is a data scientist",
+            collection="working",
+            metadata={"memory_type": "fact"},
+        )
+
+        assert result_id == existing_id, f"Cross-tier dedup failed: expected {existing_id}, got {result_id}"
+
+    @pytest.mark.asyncio
+    async def test_dedup_allows_non_fact_write(self, tmp_path):
+        """Non-fact writes should NOT trigger dedup — always creates new entry."""
+        import uuid as _uuid
+
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        # Pre-populate working with a non-fact
+        existing_id = f"working_{_uuid.uuid4().hex[:8]}"
+        embedding = [0.1] * 768
+        await ums.collections["working"].upsert_vectors(
+            ids=[existing_id],
+            vectors=[embedding],
+            metadatas=[{
+                "text": "Some summary content",
+                "content": "Some summary content",
+                "score": 0.5,
+                "uses": 0,
+                "created_at": datetime.now().isoformat(),
+                # No memory_type = "fact" — this is a summary or other type
+            }]
+        )
+
+        # Store same text as non-fact — should NOT dedup
+        result_id = await ums.store(
+            text="Some summary content",
+            collection="working",
+            metadata={},  # No memory_type
+        )
+
+        assert result_id != existing_id, "Non-fact writes should not trigger dedup"
+
+    @pytest.mark.asyncio
+    async def test_dedup_allows_similar_but_different(self, tmp_path):
+        """Similar but not identical facts should NOT be blocked."""
+        import uuid as _uuid
+
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        existing_id = f"working_{_uuid.uuid4().hex[:8]}"
+        embedding = [0.1] * 768
+        await ums.collections["working"].upsert_vectors(
+            ids=[existing_id],
+            vectors=[embedding],
+            metadatas=[{
+                "text": "Logan is a data scientist",
+                "content": "Logan is a data scientist",
+                "score": 0.5,
+                "uses": 0,
+                "created_at": datetime.now().isoformat(),
+                "memory_type": "fact",
+            }]
+        )
+
+        # Store similar but different fact — should NOT dedup (different embedding)
+        result_id = await ums.store(
+            text="Logan is a software engineer",  # Different content → different embedding
+            collection="working",
+            metadata={"memory_type": "fact"},
+        )
+
+        assert result_id != existing_id, "Similar but not identical facts should not dedup"
+
+
+class TestV053MemoryBankDedup:
+    """Section 9: memory_bank tier-isolated dedup — never blocked by ephemeral copies."""
+
+    def _make_ums(self, tmp_path):
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        return ums
+
+    @pytest.mark.asyncio
+    async def test_memory_bank_not_blocked_by_working_copy(self, tmp_path):
+        """Storing in memory_bank should NOT be blocked by working-tier duplicate."""
+        import uuid as _uuid
+
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        # Pre-populate working with the same fact
+        existing_id = f"working_{_uuid.uuid4().hex[:8]}"
+        embedding = [0.1] * 768
+        await ums.collections["working"].upsert_vectors(
+            ids=[existing_id],
+            vectors=[embedding],
+            metadatas=[{
+                "text": "Logan is a data scientist",
+                "content": "Logan is a data scientist",
+                "score": 0.5,
+                "uses": 0,
+                "created_at": datetime.now().isoformat(),
+                "memory_type": "fact",
+            }]
+        )
+
+        # Store same fact in memory_bank — should NOT be blocked by working copy
+        result_id = await ums.store_memory_bank(
+            text="Logan is a data scientist",
+            tags=["identity"],
+            noun_tags=["logan", "data science"],
+        )
+
+        assert result_id.startswith("memory_bank_"), f"Expected memory_bank ID, got {result_id}"
+        assert not result_id.startswith("working_"), "Should NOT return working-tier ID"
+
+    @pytest.mark.asyncio
+    async def test_memory_bank_dedup_within_tier(self, tmp_path):
+        """Storing in memory_bank should detect existing memory_bank duplicate."""
+        import uuid as _uuid
+
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        mock_embedding = [0.1] * 768
+        async def mock_embed(text):
+            return mock_embedding
+        ums._embedding_service.embed_text = mock_embed
+
+        existing_id = f"memory_bank_{_uuid.uuid4().hex[:8]}"
+
+        # Pre-populate memory_bank with the fact using matching embedding
+        await ums.collections["memory_bank"].upsert_vectors(
+            ids=[existing_id],
+            vectors=[mock_embedding],
+            metadatas=[{
+                "text": "Logan is a data scientist",
+                "content": "Logan is a data scientist",
+                "score": 0.5,
+                "uses": 0,
+                "created_at": datetime.now().isoformat(),
+                "memory_type": "fact",
+            }]
+        )
+
+        # Mock memory_bank_service.store to return the existing_id (simulating dedup)
+        async def fake_store(text, tags, importance=0.7, confidence=0.7, always_inject=False, embedding=None):
+            return existing_id
+
+        ums._memory_bank_service.store = fake_store
+
+        result_id = await ums.store_memory_bank(
+            text="Logan is a data scientist",
+            tags=["identity"],
+            noun_tags=["logan", "data science"],
+        )
+
+        assert result_id == existing_id, f"memory_bank dedup failed: expected {existing_id}, got {result_id}"
+
+    @pytest.mark.asyncio
+    async def test_memory_bank_allows_new_fact(self, tmp_path):
+        """Storing a new fact in memory_bank should create entry (no duplicate)."""
+        import uuid as _uuid
+
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        result_id = await ums.store_memory_bank(
+            text="Logan is a data scientist",
+            tags=["identity"],
+            noun_tags=["logan", "data science"],
+        )
+
+        assert result_id.startswith("memory_bank_")
+        # Verify it was actually stored
+        results = ums.collections["memory_bank"].collection.get(ids=[result_id])
+        assert results is not None
 
 
 if __name__ == "__main__":

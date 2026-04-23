@@ -310,6 +310,148 @@ class TestConfigureOpencode:
             assert plugin_dest.read_text(encoding="utf-8") == plugin_source.read_text(encoding="utf-8")
 
 # ============================================================================
+# configure_opencode() Parse Failure & Atomic Write Tests (v0.5.3 Section 8)
+# ============================================================================
+
+class TestConfigureOpencodeParseFailure:
+    """Section 8: parse-failure guard + atomic write for opencode.json."""
+
+    def test_invalid_json_aborts_without_write(self, tmp_path):
+        """opencode.json with invalid JSON → configure_opencode should NOT overwrite it.
+
+        v0.5.3 Section 8: When reading existing config fails due to parse error,
+        the function must not attempt to write (preserves user hand-authored content).
+        """
+        from roampal.cli import configure_opencode
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "opencode.json"
+
+        # Write invalid JSON
+        config_file.write_text("{ this is not valid json {{{")
+
+        original_content = config_file.read_text()
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("builtins.print"), \
+             patch("roampal.cli.logger.warning") as mock_warn:
+            if sys.platform == "win32":
+                with patch.object(Path, "home", return_value=tmp_path):
+                    configure_opencode(is_dev=False, force=True)
+            else:
+                configure_opencode(is_dev=False, force=True)
+
+        # File should be unchanged (not overwritten)
+        assert config_file.read_text() == original_content
+        # Should have logged a warning about parse failure
+        warn_calls = [c[0][0] for c in mock_warn.call_args_list]
+        assert any("parse" in str(w).lower() or "Failed to parse" in str(w) for w in warn_calls)
+
+    def test_existing_mcp_servers_preserved_on_merge(self, tmp_path):
+        """Other MCP servers in existing config should be preserved after merge."""
+        from roampal.cli import configure_opencode
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "opencode.json"
+
+        # Pre-existing config with another MCP server
+        existing_config = {
+            "mcp": {
+                "other-server": {
+                    "type": "local",
+                    "command": ["node", "./other.js"],
+                }
+            }
+        }
+        config_file.write_text(json.dumps(existing_config))
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("builtins.print"):
+            if sys.platform == "win32":
+                with patch.object(Path, "home", return_value=tmp_path):
+                    configure_opencode(is_dev=False, force=True)
+            else:
+                configure_opencode(is_dev=False, force=True)
+
+        result = json.loads(config_file.read_text())
+        assert "mcp" in result
+        assert "other-server" in result["mcp"]
+        assert result["mcp"]["other-server"]["command"] == ["node", "./other.js"]
+        assert "roampal-core" in result["mcp"]
+
+    def test_existing_providers_preserved_on_merge(self, tmp_path):
+        """Top-level 'providers' section should be preserved after merge."""
+        from roampal.cli import configure_opencode
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "opencode.json"
+
+        # Pre-existing config with providers
+        existing_config = {
+            "providers": {
+                "anthropic": {"api_key": "sk-test-123"}
+            },
+            "mcp": {}
+        }
+        config_file.write_text(json.dumps(existing_config))
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("builtins.print"):
+            if sys.platform == "win32":
+                with patch.object(Path, "home", return_value=tmp_path):
+                    configure_opencode(is_dev=False, force=True)
+            else:
+                configure_opencode(is_dev=False, force=True)
+
+        result = json.loads(config_file.read_text())
+        assert "providers" in result
+        assert "anthropic" in result["providers"]
+        assert result["providers"]["anthropic"]["api_key"] == "sk-test-123"
+
+    def test_atomic_write_leaves_no_tmp(self, tmp_path):
+        """After successful configure_opencode, no *.tmp files remain."""
+        from roampal.cli import configure_opencode
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("builtins.print"):
+            if sys.platform == "win32":
+                with patch.object(Path, "home", return_value=tmp_path):
+                    configure_opencode(is_dev=False, force=True)
+            else:
+                configure_opencode(is_dev=False, force=True)
+
+        tmp_files = list(tmp_path.glob("**/*.tmp"))
+        assert len(tmp_files) == 0, f"Found leftover tmp files: {tmp_files}"
+
+    def test_backup_created_when_file_exists(self, tmp_path):
+        """_safe_write_opencode_config creates timestamped backup before overwrite."""
+        from roampal.cli import _safe_write_opencode_config
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "opencode.json"
+
+        # Write initial content
+        config_file.write_text(json.dumps({"initial": "data"}))
+
+        _safe_write_opencode_config(config_file, {"updated": "content"})
+
+        # Backup should exist with .bak-YYYYMMDDHHmmSS suffix
+        backups = list(config_dir.glob("opencode.json.bak-*"))
+        assert len(backups) == 1, f"Expected 1 backup, found: {backups}"
+
+        # Backup content should match original
+        backup_content = json.loads(backups[0].read_text())
+        assert backup_content == {"initial": "data"}
+
+
+# ============================================================================
 # configure_claude_code() Tests
 # ============================================================================
 
@@ -612,7 +754,23 @@ class TestV052CmdDoctorProfile:
         stack.enter_context(
             patch("roampal.profile_manager.Path.home", return_value=tmp_path)
         )
+        # Isolate from real user config on every platform. profile_manager's
+        # _config_dir() reads os.environ["APPDATA"] on Windows directly — not
+        # Path.home() — so without this patch the test reads the real user's
+        # profiles.json and can collide with their registered profiles.
+        stack.enter_context(
+            patch.dict(
+                os.environ,
+                {
+                    "APPDATA": str(tmp_path / "appdata"),
+                    "LOCALAPPDATA": str(tmp_path / "localappdata"),
+                    "XDG_CONFIG_HOME": str(tmp_path / ".config"),
+                },
+                clear=False,
+            )
+        )
         # Register profile 'research' so resolve_data_path succeeds for it.
+        # Must come AFTER env patch so the registry writes to tmp_path.
         from roampal.profile_manager import ProfileRegistry
         reg = ProfileRegistry()
         if not reg.exists("research"):
@@ -675,6 +833,732 @@ class TestV052CmdDoctorProfile:
         printed = " ".join(str(c) for c in mock_print.call_args_list)
         assert "'ghost' is not registered" in printed
         assert "Skipping memory system init" in printed
+
+
+# ============================================================================
+# v0.5.3 Section 9: Scope-aware sidecar commands tests
+# ============================================================================
+
+class TestScopeAwareSidecar:
+    """v0.5.3 Section 9: --scope flag for sidecar status/setup/disable."""
+
+    def _make_args(self, scope=None):
+        args = MagicMock()
+        args.sidecar_command = "status"
+        args.scope = scope
+        return args
+
+    # --- Path resolution helpers ---
+
+    def test_scope_user_uses_global_config(self, tmp_path):
+        """--scope user must resolve to ~/.config/opencode/opencode.json."""
+        from roampal.cli import _get_opencode_config_path
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "opencode.json"
+        config_file.write_text(json.dumps({"mcp": {"roampal-core": {}}}))
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path):
+            result = _get_opencode_config_path()
+            assert result == config_file
+
+    def test_scope_project_uses_local_config(self, tmp_path):
+        """--scope project must resolve to local opencode.json if it exists."""
+        from roampal.cli import _find_project_opencode_config
+
+        local_config = tmp_path / "opencode.json"
+        local_config.write_text(json.dumps({"mcp": {"roampal-core": {}}}))
+
+        with patch("roampal.cli.Path.cwd", return_value=tmp_path):
+            result = _find_project_opencode_config()
+            assert result == local_config
+
+    def test_scope_project_falls_back_to_global(self, tmp_path):
+        """--scope project without local config falls back to global."""
+        from roampal.cli import _get_scope_config_path
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "opencode.json"
+        config_file.write_text(json.dumps({"mcp": {"roampal-core": {}}}))
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path):
+            result = _get_scope_config_path()
+            assert result == config_file
+
+    def test_find_project_walks_up_tree(self, tmp_path):
+        """_find_project_opencode_config walks up from subdirectory to find opencode.json."""
+        from roampal.cli import _find_project_opencode_config
+
+        # Create opencode.json at root of tmp_path
+        root_config = tmp_path / "opencode.json"
+        root_config.write_text(json.dumps({"mcp": {"roampal-core": {}}}))
+
+        # Create a subdirectory deeper in the tree
+        deep_dir = tmp_path / "a" / "b" / "c"
+        deep_dir.mkdir(parents=True)
+
+        with patch("roampal.cli.Path.cwd", return_value=deep_dir):
+            result = _find_project_opencode_config()
+            assert result == root_config
+
+    def test_find_project_stops_at_home(self, tmp_path):
+        """_find_project_opencode_config stops walking at home directory."""
+        from roampal.cli import _find_project_opencode_config
+
+        # Create opencode.json in the "home" dir (simulated)
+        home_config = tmp_path / ".config" / "opencode" / "opencode.json"
+        home_config.parent.mkdir(parents=True)
+        home_config.write_text(json.dumps({"mcp": {"roampal-core": {}}}))
+
+        # Create a subdirectory under tmp_path (which is the simulated home)
+        subdir = tmp_path / "project" / "src"
+        subdir.mkdir(parents=True)
+
+        with patch("roampal.cli.Path.cwd", return_value=subdir):
+            result = _find_project_opencode_config()
+            # Should NOT find the config in home — stops at home
+            assert result is None
+
+    def test_get_scope_returns_project_when_exists(self, tmp_path):
+        """_get_scope_config_path returns project-local if it exists and differs from global."""
+        from roampal.cli import _get_scope_config_path
+
+        # Create both local and global configs
+        local_config = tmp_path / "opencode.json"
+        local_config.write_text(json.dumps({"mcp": {"roampal-core": {}}}))
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        global_config = config_dir / "opencode.json"
+        global_config.write_text(json.dumps({"mcp": {"roampal-core": {}}}))
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path):
+            result = _get_scope_config_path()
+            assert result == local_config
+
+    # --- _apply_sidecar_env_and_write tests ---
+
+    def test_apply_sidecar_sets_env_vars(self, tmp_path):
+        """_apply_sidecar_env_and_write sets sidecar env vars correctly."""
+        from roampal.cli import _apply_sidecar_env_and_write
+
+        config_file = tmp_path / "opencode.json"
+        config_file.write_text(json.dumps({
+            "mcp": {
+                "roampal-core": {
+                    "environment": {}
+                }
+            }
+        }))
+
+        env_updates = {
+            "ROAMPAL_SIDECAR_URL": "http://localhost:1234",
+            "ROAMPAL_SIDECAR_MODEL": "qwen3:8b",
+            "ROAMPAL_SIDECAR_KEY": "sk-test-key",
+            "ROAMPAL_SIDECAR_FALLBACK": "true",
+        }
+
+        changed = _apply_sidecar_env_and_write(config_file, env_updates)
+        assert changed is True
+
+        result = json.loads(config_file.read_text())
+        env = result["mcp"]["roampal-core"]["environment"]
+        assert env["ROAMPAL_SIDECAR_URL"] == "http://localhost:1234"
+        assert env["ROAMPAL_SIDECAR_MODEL"] == "qwen3:8b"
+        assert env["ROAMPAL_SIDECAR_KEY"] == "sk-test-key"
+        assert env["ROAMPAL_SIDECAR_FALLBACK"] == "true"
+
+    def test_apply_sidecar_removes_keys_on_disable(self, tmp_path):
+        """_apply_sidecar_env_and_write with empty dict removes all sidecar keys."""
+        from roampal.cli import _apply_sidecar_env_and_write
+
+        config_file = tmp_path / "opencode.json"
+        config_file.write_text(json.dumps({
+            "mcp": {
+                "roampal-core": {
+                    "environment": {
+                        "ROAMPAL_SIDECAR_URL": "http://localhost:1234",
+                        "ROAMPAL_SIDECAR_MODEL": "qwen3:8b",
+                        "OTHER_VAR": "keep-me",
+                    }
+                }
+            }
+        }))
+
+        changed = _apply_sidecar_env_and_write(config_file, {})
+        assert changed is True
+
+        result = json.loads(config_file.read_text())
+        env = result["mcp"]["roampal-core"]["environment"]
+        assert "ROAMPAL_SIDECAR_URL" not in env
+        assert "ROAMPAL_SIDECAR_MODEL" not in env
+        assert "OTHER_VAR" in env  # non-sidecar vars preserved
+
+    def test_apply_sidecar_returns_false_no_mcp_section(self, tmp_path):
+        """_apply_sidecar_env_and_write returns False when no mcp section exists."""
+        from roampal.cli import _apply_sidecar_env_and_write
+
+        config_file = tmp_path / "opencode.json"
+        config_file.write_text(json.dumps({"other": "data"}))
+
+        changed = _apply_sidecar_env_and_write(config_file, {"ROAMPAL_SIDECAR_URL": "http://x"})
+        assert changed is False
+
+    def test_apply_sidecar_returns_false_on_invalid_json(self, tmp_path):
+        """_apply_sidecar_env_and_write returns False on invalid JSON."""
+        from roampal.cli import _apply_sidecar_env_and_write
+
+        config_file = tmp_path / "opencode.json"
+        config_file.write_text("{ invalid json {{{")
+
+        changed = _apply_sidecar_env_and_write(config_file, {"ROAMPAL_SIDECAR_URL": "http://x"})
+        assert changed is False
+
+    def test_apply_sidecar_no_change_returns_false(self, tmp_path):
+        """_apply_sidecar_env_and_write returns False when values already match."""
+        from roampal.cli import _apply_sidecar_env_and_write
+
+        config_file = tmp_path / "opencode.json"
+        config_file.write_text(json.dumps({
+            "mcp": {
+                "roampal-core": {
+                    "environment": {
+                        "ROAMPAL_SIDECAR_URL": "http://localhost:1234",
+                        "ROAMPAL_SIDECAR_MODEL": "qwen3:8b",
+                    }
+                }
+            }
+        }))
+
+        changed = _apply_sidecar_env_and_write(config_file, {
+            "ROAMPAL_SIDECAR_URL": "http://localhost:1234",
+            "ROAMPAL_SIDECAR_MODEL": "qwen3:8b",
+        })
+        assert changed is False
+
+    # --- _cmd_sidecar_status tests ---
+
+    def test_cmd_sidecar_status_shows_model(self, tmp_path):
+        """_cmd_sidecar_status displays model info when configured."""
+        from roampal.cli import _cmd_sidecar_status
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "opencode.json"
+        config_file.write_text(json.dumps({
+            "mcp": {
+                "roampal-core": {
+                    "environment": {
+                        "ROAMPAL_SIDECAR_URL": "http://localhost:1234",
+                        "ROAMPAL_SIDECAR_MODEL": "qwen3:8b",
+                        "ROAMPAL_SIDECAR_KEY": "sk-test-key",
+                    }
+                }
+            }
+        }))
+
+        args = MagicMock()
+        args.scope = None
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path), \
+             patch("builtins.print") as mock_print:
+            _cmd_sidecar_status(args)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "Sidecar scoring configuration" in printed
+        assert "qwen3:8b" in printed
+        assert "localhost:1234" in printed
+        assert "Effective in cwd" in printed
+
+    def test_cmd_sidecar_status_no_config(self, tmp_path):
+        """_cmd_sidecar_status shows 'no sidecar' message when not configured."""
+        from roampal.cli import _cmd_sidecar_status
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "opencode.json"
+        config_file.write_text(json.dumps({
+            "mcp": {
+                "roampal-core": {
+                    "environment": {}
+                }
+            }
+        }))
+
+        args = MagicMock()
+        args.scope = None
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path), \
+             patch("builtins.print") as mock_print:
+            _cmd_sidecar_status(args)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        # v0.5.3: No silent Zen fallback — message reflects §12 behavior
+        assert "no sidecar configured" in printed.lower()
+        assert "disabled" in printed.lower() or "scoring" in printed.lower()
+
+    def test_cmd_sidecar_disable_removes_keys(self, tmp_path):
+        """_cmd_sidecar_disable removes all sidecar keys from config."""
+        from roampal.cli import _cmd_sidecar_disable
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "opencode.json"
+        config_file.write_text(json.dumps({
+            "mcp": {
+                "roampal-core": {
+                    "environment": {
+                        "ROAMPAL_SIDECAR_URL": "http://localhost:1234",
+                        "ROAMPAL_SIDECAR_MODEL": "qwen3:8b",
+                        "OTHER_VAR": "keep-me",
+                    }
+                }
+            }
+        }))
+
+        args = MagicMock()
+        args.scope = None
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path), \
+             patch("builtins.print"):
+            _cmd_sidecar_disable(args)
+
+        result = json.loads(config_file.read_text())
+        env = result["mcp"]["roampal-core"]["environment"]
+        assert "ROAMPAL_SIDECAR_URL" not in env
+        assert "ROAMPAL_SIDECAR_MODEL" not in env
+        assert "OTHER_VAR" in env
+
+    def test_cmd_sidecar_disable_no_config_found(self, tmp_path):
+        """_cmd_sidecar_disable prints warning when no config exists."""
+        from roampal.cli import _cmd_sidecar_disable
+
+        args = MagicMock()
+        args.scope = None
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path), \
+             patch("builtins.print") as mock_print:
+            _cmd_sidecar_disable(args)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "no opencode.json" in printed.lower() or "no sidecar configuration" in printed.lower()
+
+    def test_apply_sidecar_preserves_non_sidecar_env(self, tmp_path):
+        """_apply_sidecar_env_and_write preserves non-sidecar env vars."""
+        from roampal.cli import _apply_sidecar_env_and_write
+
+        config_file = tmp_path / "opencode.json"
+        config_file.write_text(json.dumps({
+            "mcp": {
+                "roampal-core": {
+                    "environment": {
+                        "PYTHONPATH": "/some/path",
+                        "ROAMPAL_SIDECAR_URL": "http://localhost:1234",
+                        "CUSTOM_VAR": "custom-value",
+                    }
+                }
+            }
+        }))
+
+        changed = _apply_sidecar_env_and_write(config_file, {
+            "ROAMPAL_SIDECAR_URL": "http://new-url:5678",
+        })
+        assert changed is True
+
+        result = json.loads(config_file.read_text())
+        env = result["mcp"]["roampal-core"]["environment"]
+        assert env["PYTHONPATH"] == "/some/path"
+        assert env["CUSTOM_VAR"] == "custom-value"
+        assert env["ROAMPAL_SIDECAR_URL"] == "http://new-url:5678"
+
+    def test_scope_project_creates_local_if_missing(self, tmp_path):
+        """scope='project' with no local config creates opencode.json in current dir."""
+        from roampal.cli import _find_project_opencode_config
+
+        # No local opencode.json exists
+        assert not (tmp_path / "opencode.json").exists()
+
+        with patch("roampal.cli.Path.cwd", return_value=tmp_path):
+            result = _find_project_opencode_config()
+            assert result is None
+
+    def test_apply_sidecar_creates_environment_if_missing(self, tmp_path):
+        """_apply_sidecar_env_and_write creates environment dict if it doesn't exist."""
+        from roampal.cli import _apply_sidecar_env_and_write
+
+        config_file = tmp_path / "opencode.json"
+        config_file.write_text(json.dumps({
+            "mcp": {
+                "roampal-core": {}  # no 'environment' key
+            }
+        }))
+
+        changed = _apply_sidecar_env_and_write(config_file, {
+            "ROAMPAL_SIDECAR_URL": "http://localhost:1234",
+            "ROAMPAL_SIDECAR_MODEL": "qwen3:8b",
+        })
+        assert changed is True
+
+        result = json.loads(config_file.read_text())
+        env = result["mcp"]["roampal-core"]["environment"]
+        assert env["ROAMPAL_SIDECAR_URL"] == "http://localhost:1234"
+        assert env["ROAMPAL_SIDECAR_MODEL"] == "qwen3:8b"
+
+    def test_apply_sidecar_missing_roampal_core_returns_false(self, tmp_path):
+        """_apply_sidecar_env_and_write returns False when roampal-core MCP is missing."""
+        from roampal.cli import _apply_sidecar_env_and_write
+
+        config_file = tmp_path / "opencode.json"
+        config_file.write_text(json.dumps({
+            "mcp": {
+                "other-server": {"command": ["node", "./server.js"]}
+            }
+        }))
+
+        changed = _apply_sidecar_env_and_write(config_file, {
+            "ROAMPAL_SIDECAR_URL": "http://localhost:1234",
+        })
+        assert changed is False
+
+
+class TestPromptSmartOnboardingScope:
+    """v0.5.3 Section 9: _prompt_smart_onboarding scope parameter."""
+
+    def test_user_scope_uses_global(self, tmp_path):
+        """scope='user' must use global config path."""
+        from roampal.cli import _get_opencode_config_path
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "opencode.json"
+        config_file.write_text(json.dumps({"mcp": {"roampal-core": {}}}))
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path):
+            result = _get_opencode_config_path()
+            assert result == config_file
+
+    def test_project_scope_uses_local(self, tmp_path):
+        """scope='project' must use local opencode.json if it exists."""
+        from roampal.cli import _find_project_opencode_config
+
+        local_config = tmp_path / "opencode.json"
+        local_config.write_text(json.dumps({"mcp": {"roampal-core": {}}}))
+
+        with patch("roampal.cli.Path.cwd", return_value=tmp_path):
+            result = _find_project_opencode_config()
+            assert result == local_config
+
+
+class TestScopeAwareSidecarStatus:
+    """v0.5.3 Section 9: _cmd_sidecar_status with explicit --scope values."""
+
+    def test_status_scope_user_only(self, tmp_path):
+        """--scope user shows only user-global config, hides project-local."""
+        from roampal.cli import _cmd_sidecar_status
+
+        local_config = tmp_path / "opencode.json"
+        local_config.write_text(json.dumps({
+            "mcp": {"roampal-core": {"environment": {
+                "ROAMPAL_SIDECAR_URL": "http://local:1234",
+                "ROAMPAL_SIDECAR_MODEL": "qwen3:8b",
+            }}}
+        }))
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        global_config = config_dir / "opencode.json"
+        global_config.write_text(json.dumps({
+            "mcp": {"roampal-core": {"environment": {
+                "ROAMPAL_SIDECAR_URL": "http://global:5678",
+                "ROAMPAL_SIDECAR_MODEL": "llama3:8b",
+            }}}
+        }))
+
+        args = MagicMock()
+        args.scope = "user"
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path), \
+             patch("builtins.print") as mock_print:
+            _cmd_sidecar_status(args)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "User-global" in printed
+        assert "llama3:8b" in printed
+        # Project-local should NOT appear when scope=user
+        assert "Project-local" not in printed
+
+    def test_status_scope_project_only(self, tmp_path):
+        """--scope project shows only project-local config."""
+        from roampal.cli import _cmd_sidecar_status
+
+        local_config = tmp_path / "opencode.json"
+        local_config.write_text(json.dumps({
+            "mcp": {"roampal-core": {"environment": {
+                "ROAMPAL_SIDECAR_URL": "http://local:1234",
+                "ROAMPAL_SIDECAR_MODEL": "qwen3:8b",
+            }}}
+        }))
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        global_config = config_dir / "opencode.json"
+        global_config.write_text(json.dumps({
+            "mcp": {"roampal-core": {"environment": {
+                "ROAMPAL_SIDECAR_URL": "http://global:5678",
+                "ROAMPAL_SIDECAR_MODEL": "llama3:8b",
+            }}}
+        }))
+
+        args = MagicMock()
+        args.scope = "project"
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path), \
+             patch("builtins.print") as mock_print:
+            _cmd_sidecar_status(args)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "Project-local" in printed
+        assert "qwen3:8b" in printed
+        # User-global should NOT appear when scope=project
+        assert "User-global" not in printed
+
+    def test_status_scope_project_no_local(self, tmp_path):
+        """--scope project with no local config prints warning."""
+        from roampal.cli import _cmd_sidecar_status
+
+        args = MagicMock()
+        args.scope = "project"
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path), \
+             patch("builtins.print") as mock_print:
+            _cmd_sidecar_status(args)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "no project-local" in printed.lower() or "not found" in printed.lower()
+
+
+class TestScopeAwareSidecarDisable:
+    """v0.5.3 Section 9: _cmd_sidecar_disable with explicit --scope values."""
+
+    def test_disable_scope_user_only(self, tmp_path):
+        """--scope user removes sidecar keys from global config only."""
+        from roampal.cli import _cmd_sidecar_disable
+
+        local_config = tmp_path / "opencode.json"
+        local_config.write_text(json.dumps({
+            "mcp": {"roampal-core": {"environment": {
+                "ROAMPAL_SIDECAR_URL": "http://local:1234",
+                "OTHER_VAR": "keep-me",
+            }}}
+        }))
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        global_config = config_dir / "opencode.json"
+        global_config.write_text(json.dumps({
+            "mcp": {"roampal-core": {"environment": {
+                "ROAMPAL_SIDECAR_URL": "http://global:5678",
+                "OTHER_VAR": "keep-me-too",
+            }}}
+        }))
+
+        args = MagicMock()
+        args.scope = "user"
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path):
+            _cmd_sidecar_disable(args)
+
+        # Global config should have sidecar keys removed
+        result_global = json.loads(global_config.read_text())
+        env_global = result_global["mcp"]["roampal-core"]["environment"]
+        assert "ROAMPAL_SIDECAR_URL" not in env_global
+        assert "OTHER_VAR" in env_global  # non-sidecar preserved
+
+        # Local config should be untouched
+        result_local = json.loads(local_config.read_text())
+        env_local = result_local["mcp"]["roampal-core"]["environment"]
+        assert env_local["ROAMPAL_SIDECAR_URL"] == "http://local:1234"
+        assert "OTHER_VAR" in env_local
+
+    def test_disable_scope_project_only(self, tmp_path):
+        """--scope project removes sidecar keys from local config only."""
+        from roampal.cli import _cmd_sidecar_disable
+
+        local_config = tmp_path / "opencode.json"
+        local_config.write_text(json.dumps({
+            "mcp": {"roampal-core": {"environment": {
+                "ROAMPAL_SIDECAR_URL": "http://local:1234",
+                "OTHER_VAR": "keep-me",
+            }}}
+        }))
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        global_config = config_dir / "opencode.json"
+        global_config.write_text(json.dumps({
+            "mcp": {"roampal-core": {"environment": {
+                "ROAMPAL_SIDECAR_URL": "http://global:5678",
+                "OTHER_VAR": "keep-me-too",
+            }}}
+        }))
+
+        args = MagicMock()
+        args.scope = "project"
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path):
+            _cmd_sidecar_disable(args)
+
+        # Local config should have sidecar keys removed
+        result_local = json.loads(local_config.read_text())
+        env_local = result_local["mcp"]["roampal-core"]["environment"]
+        assert "ROAMPAL_SIDECAR_URL" not in env_local
+        assert "OTHER_VAR" in env_local
+
+        # Global config should be untouched
+        result_global = json.loads(global_config.read_text())
+        env_global = result_global["mcp"]["roampal-core"]["environment"]
+        assert env_global["ROAMPAL_SIDECAR_URL"] == "http://global:5678"
+        assert "OTHER_VAR" in env_global
+
+    def test_disable_scope_project_no_local(self, tmp_path):
+        """--scope project with no local config prints warning."""
+        from roampal.cli import _cmd_sidecar_disable
+
+        args = MagicMock()
+        args.scope = "project"
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path), \
+             patch("builtins.print") as mock_print:
+            _cmd_sidecar_disable(args)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "no project-local" in printed.lower() or "not found" in printed.lower()
+
+
+class TestScopeAwareSidecarSetup:
+    """v0.5.3 Section 9: _cmd_sidecar_setup with explicit --scope values."""
+
+    def test_setup_scope_user_only(self, tmp_path):
+        """--scope user targets only global config path."""
+        from roampal.cli import _cmd_sidecar_setup, _apply_sidecar_env_and_write
+
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        global_config = config_dir / "opencode.json"
+        global_config.write_text(json.dumps({
+            "mcp": {"roampal-core": {}}
+        }))
+
+        # Create a local config that should NOT be touched
+        local_config = tmp_path / "opencode.json"
+        local_config.write_text(json.dumps({
+            "mcp": {"roampal-core": {"environment": {
+                "ROAMPAL_SIDECAR_URL": "http://should-not-change:9999",
+            }}}
+        }))
+
+        args = MagicMock()
+        args.scope = "user"
+
+        def fake_picker(path, defer_write=False):
+            env_updates = {
+                "ROAMPAL_SIDECAR_URL": "http://test:1234",
+                "ROAMPAL_SIDECAR_MODEL": "qwen3:8b",
+                "ROAMPAL_SIDECAR_KEY": "sk-test-key",
+            }
+            _apply_sidecar_env_and_write(path, env_updates)
+            return True
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path), \
+             patch("roampal.cli._sidecar_model_picker", side_effect=fake_picker):
+            _cmd_sidecar_setup(args)
+
+        # Global config should have been modified by the picker
+        result_global = json.loads(global_config.read_text())
+        env_global = result_global["mcp"]["roampal-core"].get("environment", {})
+        assert env_global["ROAMPAL_SIDECAR_URL"] == "http://test:1234"
+        assert env_global["ROAMPAL_SIDECAR_MODEL"] == "qwen3:8b"
+
+        # Local config should be untouched
+        result_local = json.loads(local_config.read_text())
+        env_local = result_local["mcp"]["roampal-core"].get("environment", {})
+        assert env_local["ROAMPAL_SIDECAR_URL"] == "http://should-not-change:9999"
+
+    def test_setup_scope_project_only(self, tmp_path):
+        """--scope project targets only local config path."""
+        from roampal.cli import _cmd_sidecar_setup, _apply_sidecar_env_and_write
+
+        # Create a local config
+        local_config = tmp_path / "opencode.json"
+        local_config.write_text(json.dumps({
+            "mcp": {"roampal-core": {}}
+        }))
+
+        # Global config that should NOT be touched
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        global_config = config_dir / "opencode.json"
+        global_config.write_text(json.dumps({
+            "mcp": {"roampal-core": {}}
+        }))
+
+        args = MagicMock()
+        args.scope = "project"
+
+        def fake_picker(path, defer_write=False):
+            env_updates = {
+                "ROAMPAL_SIDECAR_URL": "http://test:5678",
+                "ROAMPAL_SIDECAR_MODEL": "llama3:8b",
+            }
+            _apply_sidecar_env_and_write(path, env_updates)
+            return True
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path), \
+             patch("roampal.cli._sidecar_model_picker", side_effect=fake_picker):
+            _cmd_sidecar_setup(args)
+
+        # Local config should have been modified by the picker
+        result_local = json.loads(local_config.read_text())
+        env_local = result_local["mcp"]["roampal-core"].get("environment", {})
+        assert env_local["ROAMPAL_SIDECAR_URL"] == "http://test:5678"
+        assert env_local["ROAMPAL_SIDECAR_MODEL"] == "llama3:8b"
+
+        # Global config should be untouched
+        result_global = json.loads(global_config.read_text())
+        env_global = result_global["mcp"]["roampal-core"].get("environment", {})
+        assert "ROAMPAL_SIDECAR_URL" not in env_global
+
+    def test_setup_scope_project_no_existing_file(self, tmp_path):
+        """--scope project with no local config prints error (does not auto-create)."""
+        from roampal.cli import _cmd_sidecar_setup
+
+        # No local or global config exists
+        args = MagicMock()
+        args.scope = "project"
+
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.Path.cwd", return_value=tmp_path), \
+             patch("builtins.print") as mock_print:
+            _cmd_sidecar_setup(args)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "no opencode.json" in printed.lower() or "run roampal init" in printed.lower()
 
 
 if __name__ == "__main__":

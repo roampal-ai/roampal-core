@@ -349,23 +349,52 @@ class SearchService:
 
             for tag in matched_tags:
                 try:
-                    # ChromaDB $contains with quoted tag prevents substring matches
-                    tag_filter = {"noun_tags": {"$contains": f'"{tag}"'}}
+                    # v0.5.3: $contains is a where_document operator, not a where operator.
+                    # ChromaDB's where clause only supports $gt/$gte/$lt/$lte/$ne/$eq/$in/$nin.
+                    # Drop the tag filter from the query; over-fetch and filter in Python.
 
-                    # Merge with user metadata filters
+                    # v0.5.3: Fix multi-key filter wrapping for memory_bank.
+                    # ChromaDB's where clause accepts either one single-key operator dict
+                    # or an explicit $and/$or logical wrapper. Multi-key top-level dicts are rejected.
                     mb_filters = metadata_filters
                     if coll_name == "memory_bank":
-                        # Add archived exclusion to metadata filters
-                        mb_filters = dict(metadata_filters) if metadata_filters else {}
-                        mb_filters.setdefault("status", {"$ne": "archived"})
-                    merged = self._merge_filters(tag_filter, mb_filters)
+                        status_filter = {"status": {"$ne": "archived"}}
+                        if mb_filters:
+                            mb_filters = {
+                                "$and": [{k: v} for k, v in mb_filters.items()]
+                                        + [status_filter]
+                            }
+                        else:
+                            mb_filters = status_filter
 
+                    # Over-fetch to compensate for ChromaDB not supporting noun_tags pre-filter.
                     results = await adapter.hybrid_query(
                         query_vector=query_embedding,
                         query_text=processed_query,
-                        top_k=limit * 2,
-                        filters=merged
+                        top_k=limit * 8,
+                        filters=mb_filters if mb_filters else None
                     )
+
+                    # v0.5.3: Python-side tag membership filter against metadata.noun_tags.
+                    # Tolerates both JSON-encoded string (sidecar write path) and already-parsed list.
+                    filtered_results = []
+                    for r in results:
+                        meta = r.get("metadata", {})
+                        raw_tags = meta.get("noun_tags", [])
+                        if isinstance(raw_tags, str):
+                            try:
+                                parsed_tags = json.loads(raw_tags)
+                            except (json.JSONDecodeError, TypeError):
+                                parsed_tags = []
+                        elif isinstance(raw_tags, list):
+                            parsed_tags = raw_tags
+                        else:
+                            parsed_tags = []
+
+                        if tag in parsed_tags:
+                            filtered_results.append(r)
+
+                    results = filtered_results
 
                     for r in results:
                         doc_id = r.get("id", "")
@@ -416,7 +445,7 @@ class SearchService:
                 if len(pool) >= pool_size:
                     break
 
-        # Cosine fill remaining slots from unfiltered search
+        # Cosine fill remaining slots from unfiltered search.
         if len(pool) < pool_size:
             cosine_results = await self._search_collections(
                 query_embedding, processed_query, collections, limit, metadata_filters

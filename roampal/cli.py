@@ -11,13 +11,15 @@ Usage:
 """
 
 import argparse
+import datetime
 import json
 import logging
 import os
 import platform
-import sys
 import shutil
 import subprocess
+import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -437,6 +439,9 @@ def cmd_init(args):
 
     print(f"{GREEN}Configuring: {', '.join(detected)}{RESET}\n")
 
+    # v0.5.3 Section 8: Get scope parameter for config placement
+    init_scope = getattr(args, "scope", None)
+
     # Configure each detected tool
     is_dev = is_dev_mode(args)
     force = getattr(args, "force", False)
@@ -446,11 +451,11 @@ def cmd_init(args):
         elif tool == "cursor":
             configure_cursor(cursor_dir, is_dev=is_dev, force=force)
         elif tool == "opencode":
-            configure_opencode(is_dev=is_dev, force=force)
+            configure_opencode(is_dev=is_dev, force=force, scope=init_scope)
 
-    # Sidecar setup for OpenCode users
+    # Sidecar setup for OpenCode users (v0.5.3: scope-aware config path)
     if "opencode" in detected:
-        _prompt_smart_onboarding(force=force)
+        _prompt_smart_onboarding(force=force, scope=init_scope)
 
     # Create data directory
     data_dir = get_data_dir()
@@ -890,37 +895,35 @@ def configure_cursor(cursor_dir: Path, is_dev: bool = False, force: bool = False
     print(f"  {GREEN}Cursor configured!{RESET}\n")
 
 
-def configure_opencode(is_dev: bool = False, force: bool = False):
+def configure_opencode(is_dev: bool = False, force: bool = False, scope: str | None = None):
     """Configure OpenCode MCP and plugin.
+
+    v0.5.3 Section 8: Scope-aware writes + atomic config updates.
 
     Args:
         is_dev: If True, adds ROAMPAL_DEV=1 to env section
         force: If True, overwrite existing config even if different
+        scope: 'user' = user-global only, 'project' = project-local only, None = auto-detect
     """
     print(f"{BOLD}Configuring OpenCode...{RESET}")
 
     # OpenCode config locations (XDG Base Directory spec)
     if sys.platform == "win32":
-        config_dir = Path.home() / ".config" / "opencode"
+        user_config_dir = Path.home() / ".config" / "opencode"
     else:
         xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-        config_dir = Path(xdg_config) / "opencode"
+        user_config_dir = Path(xdg_config) / "opencode"
 
-    config_file = config_dir / "opencode.json"
-    plugin_dir = config_dir / "plugins"
+    user_config_file = user_config_dir / "opencode.json"
+    plugin_dir = user_config_dir / "plugins"
 
     # Create directories if they don't exist
-    config_dir.mkdir(parents=True, exist_ok=True)
+    user_config_dir.mkdir(parents=True, exist_ok=True)
     plugin_dir.mkdir(parents=True, exist_ok=True)
 
     # =========================================================================
-    # 1. Configure MCP server in opencode.json
+    # 1. Configure MCP server in opencode.json (scope-aware)
     # =========================================================================
-    # Both Claude Code and OpenCode share the same server (27182/27183)
-    # ChromaDB doesn't support concurrent access, so no port isolation
-    # Conversation IDs provide session isolation instead
-    # Ensure PYTHONPATH includes roampal's parent dir so the module is found
-    # regardless of OpenCode's cwd (which may differ from the install location)
     roampal_root = str(Path(__file__).parent.parent.resolve())
     expected_env = {"PYTHONPATH": roampal_root, "ROAMPAL_PLATFORM": "opencode"}
     if is_dev:
@@ -933,13 +936,34 @@ def configure_opencode(is_dev: bool = False, force: bool = False):
     if expected_env:
         roampal_mcp_config["environment"] = expected_env
 
+    # Scope-aware config selection (v0.5.3 Section 8)
+    project_config = _find_project_opencode_config()
+
+    if scope == "user":
+        config_path = user_config_file
+    elif scope == "project":
+        if project_config and project_config != user_config_file:
+            config_path = project_config
+        else:
+            # No project-local config exists — create one in current directory
+            config_path = Path("opencode.json")
+    else:
+        # Auto-detect (default)
+        if force or not user_config_file.exists():
+            config_path = user_config_file
+        elif project_config and project_config != user_config_file:
+            config_path = project_config
+        else:
+            config_path = user_config_file
+
     # Load existing config or create new
     config = {}
     mcp_needs_write = True
+    parse_failed = False
 
-    if config_file.exists():
+    if config_path.exists():
         try:
-            config = json.loads(config_file.read_text())
+            config = json.loads(config_path.read_text())
             existing_mcp = config.get("mcp", {}).get("roampal-core", {})
 
             if existing_mcp:
@@ -957,8 +981,22 @@ def configure_opencode(is_dev: bool = False, force: bool = False):
                     )
                     mcp_needs_write = False
                 # else: mcp_needs_write stays True, update applied below
-        except Exception as e:
+        except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse existing opencode.json: {e}")
+            parse_failed = True
+            parse_error = e
+        except Exception as e:
+            logger.warning(f"Failed to read existing opencode.json: {e}")
+            parse_failed = True
+            parse_error = e
+
+    if parse_failed:
+        print(f"  {RED}[ERROR] Cannot parse existing opencode.json:{RESET}")
+        print(f"    {config_path}")
+        print(f"    {parse_error}")
+        print(f"    Fix the JSON or back up + delete to regenerate.")
+        print(f"  {YELLOW}Skipping MCP write — file left untouched.{RESET}")
+        mcp_needs_write = False
 
     if mcp_needs_write:
         if "mcp" not in config:
@@ -970,11 +1008,11 @@ def configure_opencode(is_dev: bool = False, force: bool = False):
         merged_env = {**existing_mcp_env, **expected_env}
         roampal_mcp_config["environment"] = merged_env
         config["mcp"]["roampal-core"] = roampal_mcp_config
-        config_file.write_text(json.dumps(config, indent=2))
-        print(f"  {GREEN}Created MCP config: {config_file}{RESET}")
+        _safe_write_opencode_config(config_path, config)
+        print(f"  {GREEN}Created MCP config: {config_path}{RESET}")
 
     # =========================================================================
-    # 2. Install TypeScript plugin
+    # 2. Install TypeScript plugin (user-global only — never project-local)
     # =========================================================================
     plugin_file = plugin_dir / "roampal.ts"
     plugin_source = Path(__file__).parent / "plugins" / "opencode" / "roampal.ts"
@@ -2706,6 +2744,134 @@ def _check_sidecar_configured() -> bool:
     return False
 
 
+# ============================================================================
+# Section 8 & 9 helpers — atomic writes, scope-awareness, backup
+# ============================================================================
+
+def _safe_write_opencode_config(path: Path, config: dict) -> None:
+    """Write opencode.json atomically with timestamped backup.
+
+    v0.5.3 Section 8/9: All writes to opencode.json route through this helper.
+    Replaces inline `config_path.write_text(json.dumps(config, indent=2))`
+    everywhere in cli.py.
+
+    Atomic via temp-file + os.replace (crash-safe). Backup before overwrite
+    preserves user hand-authored content on reset.
+    """
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+
+    # Backup before overwrite if file exists
+    if path.exists():
+        ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        backup_path = path.parent / f"{path.name}.bak-{ts}"
+        shutil.copy2(str(path), str(backup_path))
+
+    fd, tmp_name = tempfile.mkstemp(dir=str(parent), suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+        os.replace(tmp_path, path)  # atomic on POSIX and NTFS
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _find_project_opencode_config(cwd: Path | None = None) -> Path | None:
+    """Walk up from `cwd` to find the first opencode.json in ancestry.
+
+    v0.5.3 Section 9: Scope-aware sidecar commands need to know whether a
+    project-local config exists before deciding where to write.
+
+    Returns the path if found, or None (never returns user-global).
+    Walks up to root but stops at home directory for user-global.
+    """
+    if cwd is None:
+        cwd = Path.cwd()
+
+    current = cwd.resolve()
+    # Stop walking when we reach the home directory — that's where user-global lives
+    home = Path.home().resolve()
+
+    while True:
+        candidate = current / "opencode.json"
+        if candidate.exists():
+            return candidate
+        if current == home or current.parent == current:
+            break
+        current = current.parent
+
+    return None
+
+
+def _apply_sidecar_env_and_write(
+    path: Path, env_updates: dict[str, str | None]
+) -> bool:
+    """Apply sidecar environment updates to a config file and write atomically.
+
+    v0.5.3 Section 9: Shared helper for setup (env_updates has values) and
+    disable (env_updates is empty = clear keys).
+
+    Args:
+        path: opencode.json path to modify
+        env_updates: dict of {key: value} — set value, or None to remove key
+
+    Returns True if any change was made.
+    """
+    sidecar_keys = [
+        "ROAMPAL_SIDECAR_FALLBACK",
+        "ROAMPAL_SIDECAR_URL",
+        "ROAMPAL_SIDECAR_KEY",
+        "ROAMPAL_SIDECAR_MODEL",
+        "ROAMPAL_SIDECAR_PRIORITY",
+    ]
+
+    try:
+        config = json.loads(path.read_text())
+    except FileNotFoundError:
+        return False
+    except json.JSONDecodeError as e:
+        print(f"  {RED}[ERROR] Cannot parse {path}:{RESET} {e}")
+        print(f"    Fix the JSON or back up + delete to regenerate.")
+        return False
+
+    if "mcp" not in config or "roampal-core" not in config["mcp"]:
+        return False
+
+    mcp_env = config.setdefault("mcp", {}).setdefault("roampal-core", {}).setdefault(
+        "environment", {}
+    )
+
+    changed = False
+    for key, value in env_updates.items():
+        if value is None:
+            # Remove the key (disable path)
+            if key in mcp_env:
+                mcp_env.pop(key)
+                changed = True
+        else:
+            # Set the key (setup path)
+            if mcp_env.get(key) != value:
+                mcp_env[key] = value
+                changed = True
+
+    if not env_updates and sidecar_keys:
+        # Disable: clear all sidecar keys even if updates dict is empty
+        for key in sidecar_keys:
+            if key in mcp_env:
+                mcp_env.pop(key)
+                changed = True
+
+    if changed:
+        _safe_write_opencode_config(path, config)
+
+    return changed
+
+
 def _detect_ollama_models() -> list:
     """Check if Ollama is running and return available models."""
     try:
@@ -2873,11 +3039,45 @@ def _detect_api_models(config: dict) -> list:
     return models
 
 
-def _prompt_custom_endpoint(config: dict, config_path: Path):
+def _build_sidecar_env_updates(chosen: dict) -> dict[str, str | None]:
+    """Build env updates dict from a chosen model.
+
+    v0.5.3 Section 9: Returns {key: value} pairs for _apply_sidecar_env_and_write().
+    """
+    source = chosen.get("source", "")
+    model_name = chosen.get("name", "")
+    updates: dict[str, str | None] = {}
+
+    if source == "ollama":
+        updates["ROAMPAL_SIDECAR_URL"] = "http://localhost:11434/v1"
+        updates["ROAMPAL_SIDECAR_MODEL"] = model_name
+        updates["ROAMPAL_SIDECAR_KEY"] = None  # remove key
+    elif source == "local":
+        port = chosen.get("port", 8080)
+        updates["ROAMPAL_SIDECAR_URL"] = f"http://localhost:{port}/v1"
+        updates["ROAMPAL_SIDECAR_MODEL"] = model_name
+        updates["ROAMPAL_SIDECAR_KEY"] = None  # remove key
+    elif source == "api":
+        base_url = chosen.get("base_url", "")
+        api_key = chosen.get("api_key", "")
+        updates["ROAMPAL_SIDECAR_URL"] = base_url
+        updates["ROAMPAL_SIDECAR_MODEL"] = model_name
+        if api_key:
+            updates["ROAMPAL_SIDECAR_KEY"] = api_key
+        else:
+            updates["ROAMPAL_SIDECAR_KEY"] = None  # remove key
+    else:
+        return {}
+
+    # Clean up legacy flag — URL/MODEL is all the plugin needs
+    updates["ROAMPAL_SIDECAR_FALLBACK"] = None  # remove legacy
+    return updates
+
+
+def _prompt_custom_endpoint(config_path: Path) -> bool:
     """Interactive prompt for custom sidecar API endpoint.
 
-    Collects URL, API key, and model name, then writes them to
-    opencode.json MCP environment variables.
+    v0.5.3 Section 9: Uses _apply_sidecar_env_and_write() instead of direct write.
     """
     print(f"\n{BOLD}Custom scoring endpoint{RESET}")
     print(f"  Any OpenAI-compatible /chat/completions endpoint works.")
@@ -2903,23 +3103,20 @@ def _prompt_custom_endpoint(config: dict, config_path: Path):
         print(f"\n  {YELLOW}Cancelled.{RESET}")
         return False
 
-    # Write env vars to opencode.json MCP environment
-    if "mcp" not in config:
-        config["mcp"] = {}
-    if "roampal-core" not in config["mcp"]:
+    # Build env updates and write atomically via shared helper
+    updates = {
+        "ROAMPAL_SIDECAR_URL": url,
+        "ROAMPAL_SIDECAR_MODEL": model,
+        "ROAMPAL_SIDECAR_KEY": api_key if api_key else None,
+        "ROAMPAL_SIDECAR_FALLBACK": None,  # remove legacy
+    }
+
+    changed = _apply_sidecar_env_and_write(config_path, updates)
+    if not changed:
         print(
             f"  {RED}roampal-core MCP not configured. Run {BLUE}roampal init --opencode{RESET} first.{RESET}"
         )
         return False
-    if "environment" not in config["mcp"]["roampal-core"]:
-        config["mcp"]["roampal-core"]["environment"] = {}
-
-    env = config["mcp"]["roampal-core"]["environment"]
-    env["ROAMPAL_SIDECAR_URL"] = url
-    if api_key:
-        env["ROAMPAL_SIDECAR_KEY"] = api_key
-    env["ROAMPAL_SIDECAR_MODEL"] = model
-    config_path.write_text(json.dumps(config, indent=2))
 
     print(f"\n  {GREEN}Custom sidecar configured!{RESET}")
     print(f"    URL:   {url}")
@@ -2929,12 +3126,24 @@ def _prompt_custom_endpoint(config: dict, config_path: Path):
     return True
 
 
-def _sidecar_model_picker(config: dict, config_path: Path) -> bool:
+def _sidecar_model_picker(
+    config_path: Path, defer_write: bool = False
+) -> dict | None:
     """Unified sidecar model selection — used by both init and sidecar setup.
 
-    v0.4.9: One step. Auto-detect everything, show numbered list, user picks.
-    No preamble menu, no "smart scan" option. Hardware scan only if nothing found.
+    v0.5.3 Section 9: `defer_write=True` skips writing to disk; caller handles
+    scope-aware writes via _apply_sidecar_env_and_write().
+
+    Args:
+        config_path: path to the opencode.json file
+        defer_write: if True, return model info without modifying the file
     """
+    try:
+        config = json.loads(config_path.read_text())
+    except (json.JSONDecodeError, FileNotFoundError):
+        print(f"\n{RED}Cannot read {config_path}{RESET}")
+        return None
+
     print(f"\n{BOLD}Scanning for available models...{RESET}")
 
     # Detect everything
@@ -2968,11 +3177,6 @@ def _sidecar_model_picker(config: dict, config_path: Path) -> bool:
         if m.get("has_key"):
             options.append((f"{m.get('display', '?')} (API, costs money)", m))
 
-    # Get recommendation (smallest local model)
-    all_models = ollama_models + local_models + api_models
-    rec_model = _recommend_model(all_models).get("model", {})
-    rec_name = rec_model.get("name", "") if isinstance(rec_model, dict) else ""
-
     if not options:
         # Nothing detected — show install guidance
         print(f"\n  {YELLOW}No local models or API keys detected.{RESET}")
@@ -2983,35 +3187,87 @@ def _sidecar_model_picker(config: dict, config_path: Path) -> bool:
         print(f"    Then run:   roampal sidecar setup\n")
 
         print(f"  {BOLD}[1]{RESET} Configure custom API (Groq, DeepSeek, etc.)")
-        print(f"  {BOLD}[2]{RESET} Use free community models (may be rate-limited)")
-        print(f"  {BOLD}[3]{RESET} Cancel")
+        print(
+            f"  {BOLD}[2]{RESET} Use free Zen cloud models {YELLOW}(rate-limited, may be flaky — data sent to opencode.ai){RESET}"
+        )
+        print(
+            f"  {BOLD}[3]{RESET} Skip — no scoring, no summaries, no fact extraction (retrieval still works)"
+        )
 
         try:
             choice = input(f"\nChoose [1-3]: ").strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{YELLOW}Cancelled.{RESET}")
-            return False
+            return None
 
         if choice == "1":
-            return _prompt_custom_endpoint(config, config_path)
+            result = _prompt_custom_endpoint(config_path)
+            if defer_write and result:
+                # Custom endpoint was set — return it for deferred write
+                try:
+                    cfg = json.loads(config_path.read_text())
+                    env = cfg.get("mcp", {}).get("roampal-core", {}).get(
+                        "environment", {}
+                    )
+                    if env.get("ROAMPAL_SIDECAR_URL"):
+                        return {
+                            "url": env["ROAMPAL_SIDECAR_URL"],
+                            "model": env.get("ROAMPAL_SIDECAR_MODEL", ""),
+                        }
+                except Exception:
+                    pass
+            return result
+
         elif choice == "2":
-            print(f"\n{YELLOW}Using free community models.{RESET}")
-            return False
-        else:
+            # v0.5.3: Explicit Zen opt-in — writes ROAMPAL_SIDECAR_PRIORITY=zen
+            # so the user has clearly chosen the cloud fallback. Previously
+            # this path wrote no config and relied on a hidden default cascade.
+            print(f"\n{YELLOW}Using free Zen cloud models.{RESET}")
             print(
-                f"\n{YELLOW}Cancelled. Run 'roampal sidecar setup' when ready.{RESET}"
+                f"  {BOLD}Note:{RESET} Zen is rate-limited and occasionally unreachable."
             )
+            print(
+                f"  Exchange data is sent to opencode.ai/zen for scoring."
+            )
+            print(
+                f"  If Zen fails, OpenCode exchanges will {BOLD}NOT{RESET} be stored or scored"
+            )
+            print(
+                f"  until you configure a dedicated model via {BLUE}roampal sidecar setup{RESET}."
+            )
+            if defer_write:
+                return {"url": "zen", "model": "zen"}
+            else:
+                updates = {
+                    "ROAMPAL_SIDECAR_URL": None,
+                    "ROAMPAL_SIDECAR_KEY": None,
+                    "ROAMPAL_SIDECAR_MODEL": None,
+                    "ROAMPAL_SIDECAR_FALLBACK": None,
+                    "ROAMPAL_SIDECAR_PRIORITY": "zen",
+                }
+                _apply_sidecar_env_and_write(config_path, updates)
             return False
+
+        else:
+            # Skip — explicitly disable scoring.
+            print(
+                f"\n{YELLOW}Skipping sidecar setup. Scoring, summaries, and fact"
+                f" extraction are disabled.{RESET}"
+            )
+            print(
+                f"  Retrieval from existing memories still works."
+            )
+            print(
+                f"  Run {BLUE}roampal sidecar setup{RESET} when you're ready to enable scoring."
+            )
+            return None
 
     # --- Models found: show numbered list ---
     print(f"\n{BOLD}Available scoring models:{RESET}")
     print(f"  (Sidecar only needs a small model for JSON summaries)\n")
 
     for i, (label, _model) in enumerate(options, 1):
-        model_name = _model.get("name", "") if _model else ""
-        is_rec = model_name == rec_name
-        marker = f" {GREEN}<-- recommended{RESET}" if is_rec else ""
-        print(f"  {BOLD}[{i}]{RESET} {label}{marker}")
+        print(f"  {BOLD}[{i}]{RESET} {label}")
 
     custom_idx = len(options) + 1
     free_idx = len(options) + 2
@@ -3020,114 +3276,126 @@ def _sidecar_model_picker(config: dict, config_path: Path) -> bool:
     print(f"")
     print(f"  {BOLD}[{custom_idx}]{RESET} Configure custom API endpoint")
     print(
-        f"  {BOLD}[{free_idx}]{RESET} Use free community models (may be rate-limited)"
+        f"  {BOLD}[{free_idx}]{RESET} Use free Zen cloud models {YELLOW}(rate-limited, may be flaky — data sent to opencode.ai){RESET}"
     )
-    print(f"  {BOLD}[{cancel_idx}]{RESET} Cancel")
+    print(
+        f"  {BOLD}[{cancel_idx}]{RESET} Skip — no scoring, no summaries, no fact extraction (retrieval still works)"
+    )
 
     try:
         choice = input(f"\nChoose [1-{cancel_idx}]: ").strip()
         choice_num = int(choice)
     except (ValueError, EOFError, KeyboardInterrupt):
-        print(f"\n{YELLOW}Using free community models as fallback.{RESET}")
-        return False
+        # v0.5.3: No silent fallback. Invalid or no input = cancel.
+        print(
+            f"\n{YELLOW}Cancelled. Run 'roampal sidecar setup' when ready.{RESET}"
+        )
+        return None
 
     if 1 <= choice_num <= len(options):
         label, chosen = options[choice_num - 1]
         print(f"\n{GREEN}Configuring: {label}{RESET}")
-        result = _write_sidecar_model(config, config_path, chosen)
-        if result:
+
+        env_updates = _build_sidecar_env_updates(chosen)
+
+        if defer_write:
+            return {"url": env_updates.get("ROAMPAL_SIDECAR_URL"), "model": chosen.get("name")}
+
+        changed = _apply_sidecar_env_and_write(config_path, env_updates)
+        if changed:
             print(f"{YELLOW}Restart OpenCode to activate.{RESET}")
-        return result
+        return changed
 
     elif choice_num == custom_idx:
-        result = _prompt_custom_endpoint(config, config_path)
-        if result:
-            print(f"\n{YELLOW}Restart OpenCode to activate.{RESET}")
+        result = _prompt_custom_endpoint(config_path)
+        if defer_write and result:
+            try:
+                cfg = json.loads(config_path.read_text())
+                env = cfg.get("mcp", {}).get("roampal-core", {}).get(
+                    "environment", {}
+                )
+                if env.get("ROAMPAL_SIDECAR_URL"):
+                    return {
+                        "url": env["ROAMPAL_SIDECAR_URL"],
+                        "model": env.get("ROAMPAL_SIDECAR_MODEL", ""),
+                    }
+            except Exception:
+                pass
         return result
 
     elif choice_num == free_idx:
-        print(f"\n{YELLOW}Using free community models.{RESET}")
-        mcp_env = config.get("mcp", {}).get("roampal-core", {}).get("environment", {})
-        for key in [
-            "ROAMPAL_SIDECAR_URL",
-            "ROAMPAL_SIDECAR_KEY",
-            "ROAMPAL_SIDECAR_MODEL",
-        ]:
-            mcp_env.pop(key, None)
-        config_path.write_text(json.dumps(config, indent=2))
+        # v0.5.3: Explicit Zen opt-in — writes ROAMPAL_SIDECAR_PRIORITY=zen.
+        print(f"\n{YELLOW}Using free Zen cloud models.{RESET}")
+        print(
+            f"  {BOLD}Note:{RESET} Zen is rate-limited and occasionally unreachable."
+        )
+        print(
+            f"  Exchange data is sent to opencode.ai/zen for scoring."
+        )
+        print(
+            f"  If Zen fails, OpenCode exchanges will {BOLD}NOT{RESET} be stored or scored"
+        )
+        print(
+            f"  until you configure a dedicated model via {BLUE}roampal sidecar setup{RESET}."
+        )
+        if defer_write:
+            return {"url": "zen", "model": "zen"}
+        else:
+            updates = {
+                "ROAMPAL_SIDECAR_URL": None,
+                "ROAMPAL_SIDECAR_KEY": None,
+                "ROAMPAL_SIDECAR_MODEL": None,
+                "ROAMPAL_SIDECAR_FALLBACK": None,
+                "ROAMPAL_SIDECAR_PRIORITY": "zen",
+            }
+            _apply_sidecar_env_and_write(config_path, updates)
         return False
 
     elif choice_num == cancel_idx:
-        print(f"\n{YELLOW}Cancelled. Run 'roampal sidecar setup' when ready.{RESET}")
-        return False
+        print(
+            f"\n{YELLOW}Skipping sidecar setup. Scoring, summaries, and fact"
+            f" extraction are disabled.{RESET}"
+        )
+        print(f"  Retrieval from existing memories still works.")
+        print(
+            f"  Run {BLUE}roampal sidecar setup{RESET} when you're ready to enable scoring."
+        )
+        return None
 
     else:
-        print(f"\n{YELLOW}Invalid choice.{RESET}")
-        return False
+        print(f"\n{YELLOW}Invalid choice. Run 'roampal sidecar setup' to try again.{RESET}")
+        return None
 
 
-def _write_sidecar_model(config: dict, config_path: Path, chosen: dict) -> bool:
-    """Write sidecar URL/KEY/MODEL to opencode.json for the chosen model.
+def _prompt_smart_onboarding(force: bool = False, scope: str | None = None):
+    """Sidecar model selection during init. Delegates to unified picker.
 
-    Determines the OpenAI-compatible endpoint URL from the model's source:
-    - Ollama: http://localhost:11434/v1
-    - Local server: http://localhost:{port}/v1
-    - API: base_url from provider config
-
-    Removes ROAMPAL_SIDECAR_FALLBACK (legacy) — URL/MODEL is all the plugin needs.
+    v0.5.3 Section 9: Uses scope-aware config path.
     """
-    if "mcp" not in config:
-        config["mcp"] = {}
-    if "roampal-core" not in config["mcp"]:
-        return False
-    if "environment" not in config["mcp"]["roampal-core"]:
-        config["mcp"]["roampal-core"]["environment"] = {}
-
-    env = config["mcp"]["roampal-core"]["environment"]
-    source = chosen.get("source", "")
-    model_name = chosen.get("name", "")
-
-    if source == "ollama":
-        env["ROAMPAL_SIDECAR_URL"] = "http://localhost:11434/v1"
-        env["ROAMPAL_SIDECAR_MODEL"] = model_name
-        env.pop("ROAMPAL_SIDECAR_KEY", None)
-    elif source == "local":
-        port = chosen.get("port", 8080)
-        env["ROAMPAL_SIDECAR_URL"] = f"http://localhost:{port}/v1"
-        env["ROAMPAL_SIDECAR_MODEL"] = model_name
-        env.pop("ROAMPAL_SIDECAR_KEY", None)
-    elif source == "api":
-        env["ROAMPAL_SIDECAR_URL"] = chosen.get("base_url", "")
-        env["ROAMPAL_SIDECAR_MODEL"] = model_name
-        api_key = chosen.get("api_key", "")
-        if api_key:
-            env["ROAMPAL_SIDECAR_KEY"] = api_key
+    if scope == "user":
+        config_path = _get_opencode_config_path()
+    elif scope == "project":
+        project_config = _find_project_opencode_config()
+        if not project_config or project_config == _get_opencode_config_path():
+            # No project-local config — create one in current directory
+            config_path = Path("opencode.json")
         else:
-            env.pop("ROAMPAL_SIDECAR_KEY", None)
+            config_path = project_config
     else:
-        return False
+        config_path = _get_scope_config_path()
 
-    # Clean up legacy flag — URL/MODEL is all the plugin needs
-    env.pop("ROAMPAL_SIDECAR_FALLBACK", None)
-
-    config_path.write_text(json.dumps(config, indent=2))
-    return True
-
-
-def _prompt_smart_onboarding(force: bool = False):
-    """Sidecar model selection during init. Delegates to unified picker."""
-    config_path = _get_opencode_config_path()
     if not config_path.exists():
         print(f"{RED}No opencode.json found{RESET}")
         return
-
-    config = json.loads(config_path.read_text())
 
     print(f"\n{BOLD}Memory scoring setup:{RESET}")
     print(f"  Roampal learns what works by scoring exchanges in the background.")
     print(f"  This requires a small AI model — it doesn't need to be smart.")
 
-    _sidecar_model_picker(config, config_path)
+    result = _sidecar_model_picker(config_path, defer_write=False)
+    if isinstance(result, dict):
+        # User selected a model during init — write it now (defer was False above)
+        pass  # Already written by _sidecar_model_picker when defer_write=False
 
 
 def cmd_sidecar(args):
@@ -3151,82 +3419,225 @@ def cmd_sidecar(args):
         print(f"{RED}Unknown sidecar command: {subcommand}{RESET}")
 
 
+def _get_scope_config_path() -> Path | None:
+    """Get the scope-aware config path for sidecar commands.
+
+    v0.5.3 Section 9: Returns project-local if exists, otherwise user-global.
+    """
+    project_config = _find_project_opencode_config()
+    if sys.platform == "win32":
+        user_config_dir = Path.home() / ".config" / "opencode"
+    else:
+        xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+        user_config_dir = Path(xdg_config) / "opencode"
+    user_config_file = user_config_dir / "opencode.json"
+
+    if project_config and project_config != user_config_file:
+        return project_config
+    return user_config_file
+
+
 def _cmd_sidecar_status(args):
-    """Show current sidecar configuration."""
-    config_path = _get_opencode_config_path()
-    if not config_path.exists():
-        print(f"{YELLOW}No opencode.json found at {config_path}{RESET}")
+    """Show current sidecar configuration across user-global + project-local scopes.
+
+    v0.5.3 Section 9.3: Report both scopes, flag shadowing when project
+    overrides user-global, and print the effective resolution for cwd.
+    """
+    scope = getattr(args, "scope", None)
+
+    def _read_sidecar(path: Path | None) -> dict | None:
+        if not path or not path.exists():
+            return None
+        try:
+            cfg = json.loads(path.read_text())
+        except json.JSONDecodeError as e:
+            return {"_parse_error": str(e)}
+        env = cfg.get("mcp", {}).get("roampal-core", {}).get("environment", {})
+        return {
+            "url": env.get("ROAMPAL_SIDECAR_URL", ""),
+            "model": env.get("ROAMPAL_SIDECAR_MODEL", ""),
+            "has_key": bool(env.get("ROAMPAL_SIDECAR_KEY")),
+            "priority": env.get("ROAMPAL_SIDECAR_PRIORITY", ""),
+        }
+
+    user_path = _get_opencode_config_path()
+    project_path = _find_project_opencode_config()
+    # Don't double-report the same file
+    if project_path and project_path.resolve() == user_path.resolve():
+        project_path = None
+
+    # Scope filter lets user narrow the report
+    show_user = scope in (None, "user")
+    show_project = scope in (None, "project")
+    if scope == "project" and not project_path:
+        print(f"{YELLOW}No project-local opencode.json found in cwd ancestry.{RESET}")
         return
 
-    config = json.loads(config_path.read_text())
-    mcp_env = config.get("mcp", {}).get("roampal-core", {}).get("environment", {})
+    user_sc = _read_sidecar(user_path) if show_user else None
+    project_sc = _read_sidecar(project_path) if show_project else None
 
-    custom_url = mcp_env.get("ROAMPAL_SIDECAR_URL", "")
-    custom_model = mcp_env.get("ROAMPAL_SIDECAR_MODEL", "")
+    print(f"{BOLD}Sidecar scoring configuration:{RESET}")
 
-    print(f"{BOLD}Sidecar scoring status:{RESET}")
-    if custom_url:
-        print(f"  {GREEN}Scoring model: {custom_model or 'default model'}{RESET}")
-        print(f"  URL: {custom_url}")
-        if mcp_env.get("ROAMPAL_SIDECAR_KEY"):
-            print(f"  Key: {'*' * 8}...")
-    else:
+    if show_user:
+        if user_sc is None:
+            print(f"  {YELLOW}User-global:   not found{RESET}  ({user_path})")
+        elif "_parse_error" in user_sc:
+            print(f"  {RED}User-global:   JSON parse error — {user_sc['_parse_error']}{RESET}")
+            print(f"                 {user_path}")
+        elif user_sc["url"]:
+            label = user_sc["model"] or "(no model)"
+            print(f"  {GREEN}User-global:   {label} @ {user_sc['url']}{RESET}")
+            print(f"                 {user_path}")
+            if user_sc["has_key"]:
+                print(f"                 Key: {'*' * 8}...")
+        else:
+            print(f"  {YELLOW}User-global:   no sidecar configured{RESET}")
+            print(f"                 {user_path}")
+
+    if show_project:
+        if project_path is None:
+            print(f"  {GREEN}Project-local: none found in cwd ancestry{RESET}")
+        elif project_sc is None or "_parse_error" in (project_sc or {}):
+            msg = project_sc["_parse_error"] if project_sc else "missing"
+            print(f"  {RED}Project-local: JSON parse error — {msg}{RESET}")
+            print(f"                 {project_path}")
+        elif project_sc["url"]:
+            label = project_sc["model"] or "(no model)"
+            override_note = (
+                f"  {YELLOW}⚠ OVERRIDES user-global in this directory{RESET}"
+                if user_sc and user_sc.get("url")
+                else ""
+            )
+            print(f"  {YELLOW}Project-local: {label} @ {project_sc['url']}{RESET}{override_note}")
+            print(f"                 {project_path}")
+        else:
+            print(f"  {GREEN}Project-local: found, no sidecar override{RESET}")
+            print(f"                 {project_path}")
+
+    # Effective-in-cwd resolution (project wins if it sets a url)
+    effective = project_sc if (project_sc and project_sc.get("url")) else user_sc
+    if effective and effective.get("url"):
+        print()
         print(
-            f"  {YELLOW}No sidecar configured - using Zen (free, best-effort) only{RESET}"
+            f"  {BOLD}Effective in cwd:{RESET} "
+            f"{effective.get('model') or '(no model)'} @ {effective['url']}"
+        )
+    else:
+        print()
+        print(
+            f"  {YELLOW}No sidecar configured — scoring, summaries, and fact extraction are disabled.{RESET}"
         )
         print(
-            f"  Run {BLUE}roampal sidecar setup{RESET} to configure a reliable scorer"
+            f"  Retrieval from existing memories still works. Run "
+            f"{BLUE}roampal sidecar setup{RESET} to enable scoring."
         )
 
 
 def _cmd_sidecar_setup(args):
     """Configure sidecar scorer. Delegates to unified model picker.
 
-    v0.4.9: Single code path shared with init onboarding.
+    v0.5.3 Section 9: Scope-aware config path + atomic writes via shared helpers.
+    Supports --scope {user|project|both}.
     """
-    config_path = _get_opencode_config_path()
-    if not config_path or not config_path.exists():
-        print(f"{RED}No sidecar config found.{RESET}")
-        print(f"  Run {BLUE}roampal init --opencode{RESET} to create the config,")
-        print(f"  then run {BLUE}roampal sidecar setup{RESET} again.")
+    scope = getattr(args, "scope", None)
+
+    # Resolve target paths based on scope
+    user_path = _get_opencode_config_path()
+    project_config = _find_project_opencode_config()
+
+    targets: list[Path] = []
+    if scope == "user":
+        targets = [user_path]
+    elif scope == "project":
+        if project_config and project_config != user_path:
+            targets = [project_config]
+        else:
+            # No project-local config — create one in current directory
+            targets = [Path("opencode.json")]
+    elif scope == "both":
+        targets = [user_path]
+        if project_config and project_config != user_path:
+            targets.append(project_config)
+        else:
+            print(
+                f"{YELLOW}--scope both requested but no project-local opencode.json "
+                f"found in cwd ancestry. Writing user-global only.{RESET}"
+            )
+    else:
+        # Auto-detect
+        targets = [_get_scope_config_path()]
+
+    # Run picker once on the primary target (first in list); apply env to all
+    primary = targets[0]
+    if not primary or not primary.exists():
+        print(f"{RED}No opencode.json found at {primary}.{RESET}")
+        print(f"  Run {BLUE}roampal init --opencode{RESET} to create the config.")
         return
 
-    config = json.loads(config_path.read_text())
+    try:
+        config = json.loads(primary.read_text())
+    except json.JSONDecodeError as e:
+        print(
+            f"  {RED}[ERROR] Cannot parse {primary}:{RESET}\n"
+            f"    {e}\n"
+            f"    Fix the JSON or back up + delete to regenerate.\n"
+        )
+        return
 
     if "roampal-core" not in config.get("mcp", {}):
-        print(f"{RED}roampal-core not configured yet.{RESET}")
+        print(f"{RED}roampal-core not configured yet at {primary}.{RESET}")
         print(f"  Run {BLUE}roampal init --opencode{RESET} first.")
         return
 
-    _sidecar_model_picker(config, config_path)
+    if len(targets) == 1:
+        # Single target — picker writes directly
+        _sidecar_model_picker(primary, defer_write=False)
+    else:
+        # Multiple targets (scope=both) — picker returns env, apply to all
+        result = _sidecar_model_picker(primary, defer_write=True)
+        if not isinstance(result, dict):
+            return  # cancelled
+        for target in targets:
+            _apply_sidecar_env_and_write(target, result)
+        print(
+            f"{GREEN}Sidecar updated in user-global AND project-local "
+            f"({len(targets)} files).{RESET}"
+        )
+        print(f"{YELLOW}Restart OpenCode for changes to take effect.{RESET}")
 
 
 def _cmd_sidecar_disable(args):
-    """Remove sidecar fallback configuration."""
-    config_path = _get_opencode_config_path()
-    if not config_path.exists():
+    """Remove sidecar configuration."""
+    scope = getattr(args, "scope", None)
+
+    if scope == "user":
+        config_path = _get_opencode_config_path()
+    elif scope == "project":
+        project_config = _find_project_opencode_config()
+        if not project_config or project_config == _get_opencode_config_path():
+            print(f"{YELLOW}No project-local sidecar configuration found.{RESET}")
+            return
+        config_path = project_config
+    else:
+        config_path = _get_scope_config_path()
+
+    if not config_path or not config_path.exists():
         print(f"{YELLOW}No opencode.json found.{RESET}")
         return
 
-    config = json.loads(config_path.read_text())
-    mcp_env = config.get("mcp", {}).get("roampal-core", {}).get("environment", {})
-
-    sidecar_keys = [
-        "ROAMPAL_SIDECAR_FALLBACK",
-        "ROAMPAL_SIDECAR_URL",
-        "ROAMPAL_SIDECAR_KEY",
-        "ROAMPAL_SIDECAR_MODEL",
-    ]
-    found = any(k in mcp_env for k in sidecar_keys)
-    if not found:
+    # Clear all sidecar keys via shared helper (empty updates dict)
+    changed = _apply_sidecar_env_and_write(config_path, {})
+    if not changed:
         print(f"{YELLOW}No sidecar configuration found.{RESET}")
         return
 
-    for key in sidecar_keys:
-        mcp_env.pop(key, None)
-    config_path.write_text(json.dumps(config, indent=2))
+    print(f"{YELLOW}Sidecar configuration removed.{RESET}")
     print(
-        f"{GREEN}Sidecar configuration removed. Reverted to free community models.{RESET}"
+        f"  Scoring, summaries, and fact extraction are now disabled."
+    )
+    print(f"  Retrieval from existing memories still works.")
+    print(
+        f"  Run {BLUE}roampal sidecar setup{RESET} when you want to re-enable scoring."
     )
     print(f"{YELLOW}Restart OpenCode to take effect.{RESET}")
 
@@ -3576,6 +3987,12 @@ examples:
         action="store_true",
         help="Non-interactive mode (skip all prompts, use defaults)",
     )
+    init_parser.add_argument(
+        "--scope",
+        choices=["user", "project", "both"],
+        default=None,
+        help="Config scope: user (global), project (local), or both. Default: auto-detect.",
+    )
 
     # start command
     start_parser = subparsers.add_parser("start", help="Start the memory server")
@@ -3742,11 +4159,32 @@ examples:
     sidecar_setup.add_argument(
         "--auto", action="store_true", help="Smart hardware-aware recommendations"
     )
-    sidecar_sub.add_parser("status", help="Show current sidecar configuration")
+    sidecar_setup.add_argument(
+        "--scope",
+        choices=["user", "project", "both"],
+        default=None,
+        help="Config scope: user (global), project (local), or both. Default: auto-detect.",
+    )
     sidecar_sub.add_parser("test", help="Test sidecar with sample exchange")
-    sidecar_sub.add_parser("disable", help="Remove sidecar fallback")
+    # status and disable get --scope for scope-aware config reading
+    sidecar_status_cmd = sidecar_sub.add_parser(
+        "status", help="Show current sidecar configuration"
+    )
+    sidecar_status_cmd.add_argument(
+        "--scope",
+        choices=["user", "project", "both"],
+        default=None,
+        help="Config scope: user (global), project (local), or both. Default: auto-detect.",
+    )
+    sidecar_disable = sidecar_sub.add_parser("disable", help="Remove sidecar fallback")
+    sidecar_disable.add_argument(
+        "--scope",
+        choices=["user", "project", "both"],
+        default=None,
+        help="Config scope to clear: user (global), project (local), or both. Default: auto-detect.",
+    )
 
-    # retag command (v0.4.9)
+    # init command — add --scope flag
     retag_parser = subparsers.add_parser(
         "retag", help="Re-extract tags on memories using sidecar LLM"
     )

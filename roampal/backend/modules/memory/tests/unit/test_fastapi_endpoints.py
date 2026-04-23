@@ -345,6 +345,74 @@ class TestStopHookEndpoint:
         assert response.status_code == 200
         mock_sm.set_completed.assert_called_once_with("complete_test")
 
+    @pytest.mark.asyncio
+    async def test_tag_extraction_fallback_exchange_summary(self, async_client):
+        """Stop hook extracts tags from assistant msg when noun_tags not provided for exchange_summary."""
+        ac, mock_mem, _ = async_client
+        with patch('roampal.sidecar_service.extract_tags') as mock_extract:
+            mock_extract.return_value = ["python", "programming"]
+
+            response = await ac.post("/api/hooks/stop", json={
+                "conversation_id": "tag_fallback_test",
+                "user_message": "What is Python?",
+                "assistant_response": "Python is a programming language.",
+                "metadata": {"memory_type": "exchange_summary"}
+            })
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["stored"] is True
+
+            # Verify sidecar_extract_tags was called with assistant message
+            mock_extract.assert_called_once_with("Python is a programming language.")
+
+            # Verify store_working was called with extracted tags as noun_tags
+            call_kwargs = mock_mem.store_working.call_args
+            assert call_kwargs.kwargs.get("noun_tags") == ["python", "programming"]
+
+    @pytest.mark.asyncio
+    async def test_no_tag_extraction_when_noun_tags_provided(self, async_client):
+        """Stop hook skips sidecar extraction when plugin already provides noun_tags."""
+        ac, mock_mem, _ = async_client
+        with patch('roampal.sidecar_service.extract_tags') as mock_extract:
+            response = await ac.post("/api/hooks/stop", json={
+                "conversation_id": "tags_provided_test",
+                "user_message": "What is Python?",
+                "assistant_response": "Python is a programming language.",
+                "noun_tags": ["python", "programming"],
+                "metadata": {"memory_type": "exchange_summary"}
+            })
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["stored"] is True
+
+            # sidecar_extract_tags should NOT be called when noun_tags already provided
+            mock_extract.assert_not_called()
+
+            # store_working should use the provided noun_tags
+            call_kwargs = mock_mem.store_working.call_args
+            assert call_kwargs.kwargs.get("noun_tags") == ["python", "programming"]
+
+    @pytest.mark.asyncio
+    async def test_no_tag_extraction_non_exchange_summary(self, async_client):
+        """Stop hook skips sidecar extraction when memory_type is not exchange_summary."""
+        ac, mock_mem, _ = async_client
+        with patch('roampal.sidecar_service.extract_tags') as mock_extract:
+            response = await ac.post("/api/hooks/stop", json={
+                "conversation_id": "no_fallback_test",
+                "user_message": "What is Python?",
+                "assistant_response": "Python is a programming language.",
+                "metadata": {"memory_type": "some_other_type"}
+            })
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["stored"] is True
+
+            # sidecar_extract_tags should NOT be called for non-exchange_summary types
+            mock_extract.assert_not_called()
+
 
 # ============================================================================
 # Search Endpoint

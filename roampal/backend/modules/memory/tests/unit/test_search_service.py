@@ -60,7 +60,7 @@ def tag_service():
 
 @pytest.fixture
 def embed_fn():
-    return AsyncMock(return_value=[0.1] * 384)
+    return AsyncMock(return_value=[0.1] * 768)
 
 
 @pytest.fixture
@@ -88,6 +88,298 @@ def search_service(mock_collections, scoring_service, routing_service, tag_servi
         embed_fn=embed_fn,
         config=config,
     )
+
+
+class TestTagCascadePythonFilter:
+    """v0.5.3: Python-side tag membership filter after over-fetch."""
+
+    @pytest.mark.asyncio
+    async def test_filters_by_tag_membership(self, search_service, mock_collections):
+        """Results without matching tag should be filtered out."""
+        mem_match = _make_result("match", distance=0.2, noun_tags='["calvin"]')
+        mem_no_match = _make_result("no_match", distance=0.1, noun_tags='["boston"]')
+
+        mock_collections["working"].hybrid_query = AsyncMock(
+            return_value=[mem_match.copy(), mem_no_match.copy()]
+        )
+
+        # Mock cosine fill to prevent untagged results from being added back.
+        with patch.object(search_service, '_search_collections', new_callable=AsyncMock) as mock_cosine:
+            mock_cosine.return_value = []
+
+            results = await search_service._tag_routed_search(
+                query_embedding=[0.1] * 768,
+                processed_query="Calvin",
+                collections=["working"],
+                limit=10,
+                matched_tags=["calvin"],
+                metadata_filters=None,
+            )
+
+        ids = [r["id"] for r in results]
+        assert "match" in ids
+        assert "no_match" not in ids
+
+    @pytest.mark.asyncio
+    async def test_json_encoded_noun_tags(self, search_service, mock_collections):
+        """Should parse JSON-encoded noun_tags strings."""
+        mem = _make_result("json_mem", distance=0.2, noun_tags='["calvin"]')
+        mem_no_tag = _make_result("no_tag", distance=0.1)
+
+        mock_collections["working"].hybrid_query = AsyncMock(
+            return_value=[mem.copy(), mem_no_tag.copy()]
+        )
+
+        with patch.object(search_service, '_search_collections', new_callable=AsyncMock) as mock_cosine:
+            mock_cosine.return_value = []
+
+            results = await search_service._tag_routed_search(
+                query_embedding=[0.1] * 768,
+                processed_query="Calvin",
+                collections=["working"],
+                limit=10,
+                matched_tags=["calvin"],
+                metadata_filters=None,
+            )
+
+        ids = [r["id"] for r in results]
+        assert "json_mem" in ids
+        assert "no_tag" not in ids
+
+    @pytest.mark.asyncio
+    async def test_list_noun_tags(self, search_service, mock_collections):
+        """Should handle already-parsed list noun_tags."""
+        mem = _make_result("list_mem", distance=0.2, noun_tags=["calvin"])
+
+        mock_collections["working"].hybrid_query = AsyncMock(
+            return_value=[mem.copy()]
+        )
+
+        results = await search_service._tag_routed_search(
+            query_embedding=[0.1] * 768,
+            processed_query="Calvin",
+            collections=["working"],
+            limit=10,
+            matched_tags=["calvin"],
+            metadata_filters=None,
+        )
+
+        ids = [r["id"] for r in results]
+        assert "list_mem" in ids
+
+    @pytest.mark.asyncio
+    async def test_multiple_tag_queries(self, search_service, mock_collections):
+        """Multiple tag queries should each filter independently."""
+        mem_calvin = _make_result("calvin", distance=0.2, noun_tags='["calvin"]')
+        mem_boston = _make_result("boston", distance=0.3, noun_tags='["boston"]')
+
+        def hybrid_side_effect(query_vector, query_text, top_k, filters=None):
+            if "Calvin" in query_text:
+                return [mem_calvin.copy(), mem_boston.copy()]
+            elif "Boston" in query_text:
+                return [mem_calvin.copy(), mem_boston.copy()]
+            return []
+
+        mock_collections["working"].hybrid_query = AsyncMock(side_effect=hybrid_side_effect)
+
+        results = await search_service._tag_routed_search(
+            query_embedding=[0.1] * 768,
+            processed_query="Calvin",
+            collections=["working"],
+            limit=10,
+            matched_tags=["calvin", "boston"],
+            metadata_filters=None,
+        )
+
+        # Both tags match, so both results should pass through
+        ids = [r["id"] for r in results]
+        assert "calvin" in ids
+        assert "boston" in ids
+
+    @pytest.mark.asyncio
+    async def test_over_fetch_factor(self, search_service, mock_collections):
+        """Should over-fetch by ×8 instead of ×2."""
+        mem = _make_result("mem", distance=0.2, noun_tags='["calvin"]')
+        mock_collections["working"].hybrid_query = AsyncMock(return_value=[mem.copy()])
+
+        await search_service._tag_routed_search(
+            query_embedding=[0.1] * 768,
+            processed_query="Calvin",
+            collections=["working"],
+            limit=5,
+            matched_tags=["calvin"],
+            metadata_filters=None,
+        )
+
+        # v0.5.3: Tag search uses top_k=limit*8; cosine fill may also call with limit*3.
+        # Check that at least one call used the ×8 over-fetch factor.
+        tag_search_top_k = [
+            c[1]["top_k"] for c in mock_collections["working"].hybrid_query.call_args_list
+            if "top_k" in c[1]
+        ]
+        assert 40 in tag_search_top_k, \
+            f"Expected top_k=40 (5×8) in {tag_search_top_k}"
+
+    @pytest.mark.asyncio
+    async def test_no_tag_filter_passed_to_chroma(self, search_service, mock_collections):
+        """Should NOT pass tag filter to ChromaDB."""
+        mem = _make_result("mem", distance=0.2, noun_tags='["calvin"]')
+        mock_collections["working"].hybrid_query = AsyncMock(return_value=[mem.copy()])
+
+        await search_service._tag_routed_search(
+            query_embedding=[0.1] * 768,
+            processed_query="Calvin",
+            collections=["working"],
+            limit=10,
+            matched_tags=["calvin"],
+            metadata_filters=None,
+        )
+
+        call_args = mock_collections["working"].hybrid_query.call_args
+        filters = call_args[1].get("filters") or (call_args[0][3] if len(call_args[0]) > 3 else None)
+        assert not filters or "noun_tags" not in filters, \
+            f"Tag filter should not be passed to ChromaDB: {filters}"
+
+    @pytest.mark.asyncio
+    async def test_empty_tag_list_filters_all(self, search_service, mock_collections):
+        """If no results match the tag after Python filtering, returns empty."""
+        mem = _make_result("mem", distance=0.2, noun_tags='["boston"]')
+
+        mock_collections["working"].hybrid_query = AsyncMock(
+            return_value=[mem.copy()]
+        )
+
+        with patch.object(search_service, '_search_collections', new_callable=AsyncMock) as mock_cosine:
+            mock_cosine.return_value = []
+
+            results = await search_service._tag_routed_search(
+                query_embedding=[0.1] * 768,
+                processed_query="Calvin",
+                collections=["working"],
+                limit=10,
+                matched_tags=["calvin"],
+                metadata_filters=None,
+            )
+
+        assert len(results) == 0
+
+
+class TestMemoryBankFilterWrapping:
+    """v0.5.3: memory_bank filter wrapping with $and for multi-key filters."""
+
+    @pytest.mark.asyncio
+    async def test_archived_exclusion_applied(self, search_service, mock_collections):
+        """memory_bank should exclude archived results via status=$ne filter."""
+        mem = _make_result("mem", distance=0.2, noun_tags='["calvin"]', metadata={"status": "active"})
+
+        captured_filters = {}
+
+        async def capture_hybrid(query_vector, query_text, top_k, filters=None):
+            captured_filters["filters"] = filters
+            return [mem.copy()]
+
+        mock_collections["memory_bank"].hybrid_query = AsyncMock(side_effect=capture_hybrid)
+
+        await search_service._tag_routed_search(
+            query_embedding=[0.1] * 768,
+            processed_query="Calvin",
+            collections=["memory_bank"],
+            limit=10,
+            matched_tags=["calvin"],
+            metadata_filters=None,
+        )
+
+        filters = captured_filters["filters"]
+        assert filters is not None
+        # Should use $and for the status filter
+        if "$and" in filters:
+            status_cond = [c.get("status") for c in filters["$and"] if "status" in c]
+            assert any(s == {"$ne": "archived"} for s in status_cond)
+
+    @pytest.mark.asyncio
+    async def test_user_filters_merged_with_status(self, search_service, mock_collections):
+        """User metadata filters should be merged with archived exclusion."""
+        mem = _make_result("mem", distance=0.2, noun_tags='["calvin"]', metadata={})
+
+        captured_filters = {}
+
+        async def capture_hybrid(query_vector, query_text, top_k, filters=None):
+            captured_filters["filters"] = filters
+            return [mem.copy()]
+
+        mock_collections["memory_bank"].hybrid_query = AsyncMock(side_effect=capture_hybrid)
+
+        user_filters = {"importance": {"$gte": 0.7}}
+
+        await search_service._tag_routed_search(
+            query_embedding=[0.1] * 768,
+            processed_query="Calvin",
+            collections=["memory_bank"],
+            limit=10,
+            matched_tags=["calvin"],
+            metadata_filters=user_filters,
+        )
+
+        filters = captured_filters["filters"]
+        assert filters is not None
+        # Should have both user filter and status exclusion in $and
+        if "$and" in filters:
+            keys_in_and = []
+            for cond in filters["$and"]:
+                keys_in_and.extend(cond.keys())
+            assert "status" in keys_in_and
+            assert "importance" in keys_in_and
+
+    @pytest.mark.asyncio
+    async def test_non_memory_bank_no_status_filter(self, search_service, mock_collections):
+        """Non-memory_bank collections should NOT get status filter."""
+        mem = _make_result("mem", distance=0.2, noun_tags='["calvin"]', metadata={})
+
+        captured_filters = {}
+
+        async def capture_hybrid(query_vector, query_text, top_k, filters=None):
+            captured_filters["filters"] = filters
+            return [mem.copy()]
+
+        mock_collections["working"].hybrid_query = AsyncMock(side_effect=capture_hybrid)
+
+        await search_service._tag_routed_search(
+            query_embedding=[0.1] * 768,
+            processed_query="Calvin",
+            collections=["working"],
+            limit=10,
+            matched_tags=["calvin"],
+            metadata_filters=None,
+        )
+
+        filters = captured_filters["filters"]
+        assert not filters or "status" not in str(filters), \
+            f"Non-memory_bank should not get status filter: {filters}"
+
+    @pytest.mark.asyncio
+    async def test_memory_bank_no_user_filters(self, search_service, mock_collections):
+        """memory_bank with no user filters should only have archived exclusion."""
+        mem = _make_result("mem", distance=0.2, noun_tags='["calvin"]', metadata={})
+
+        captured_filters = {}
+
+        async def capture_hybrid(query_vector, query_text, top_k, filters=None):
+            captured_filters["filters"] = filters
+            return [mem.copy()]
+
+        mock_collections["memory_bank"].hybrid_query = AsyncMock(side_effect=capture_hybrid)
+
+        await search_service._tag_routed_search(
+            query_embedding=[0.1] * 768,
+            processed_query="Calvin",
+            collections=["memory_bank"],
+            limit=10,
+            matched_tags=["calvin"],
+            metadata_filters=None,
+        )
+
+        filters = captured_filters["filters"]
+        assert filters is not None
 
 
 class TestSearchServiceInit:
@@ -128,20 +420,13 @@ class TestTagRoutedSearch:
         # Memory matching 1 tag (calvin only) but closer cosine
         mem_1tag = _make_result("mem_1", distance=0.2, noun_tags='["calvin"]')
 
-        # Setup: "calvin" query returns both, "boston" returns only mem_2
-        def hybrid_side_effect(query_vector, query_text, top_k, filters=None):
-            if filters and "noun_tags" in filters:
-                tag_filter = filters["noun_tags"]["$contains"]
-                if '"calvin"' in tag_filter:
-                    return [mem_2tags.copy(), mem_1tag.copy()]
-                elif '"boston"' in tag_filter:
-                    return [mem_2tags.copy()]
-            return []
-
-        mock_collections["working"].hybrid_query = AsyncMock(side_effect=hybrid_side_effect)
+        # v0.5.3: No tag filter passed to ChromaDB — returns all results for Python-side filtering
+        mock_collections["working"].hybrid_query = AsyncMock(
+            return_value=[mem_2tags.copy(), mem_1tag.copy()]
+        )
 
         results = await search_service._tag_routed_search(
-            query_embedding=[0.1] * 384,
+            query_embedding=[0.1] * 768,
             processed_query="What did Calvin do in Boston?",
             collections=["working"],
             limit=10,
@@ -164,7 +449,7 @@ class TestTagRoutedSearch:
         )
 
         results = await search_service._tag_routed_search(
-            query_embedding=[0.1] * 384,
+            query_embedding=[0.1] * 768,
             processed_query="Tell me about Calvin",
             collections=["working"],
             limit=10,
@@ -189,7 +474,7 @@ class TestTagRoutedSearch:
             mock_cosine.return_value = [untagged.copy()]
 
             results = await search_service._tag_routed_search(
-                query_embedding=[0.1] * 384,
+                query_embedding=[0.1] * 768,
                 processed_query="Calvin",
                 collections=["working"],
                 limit=10,
@@ -213,7 +498,7 @@ class TestTagRoutedSearch:
         mock_collections["working"].hybrid_query = AsyncMock(return_value=many_results)
 
         results = await search_service._tag_routed_search(
-            query_embedding=[0.1] * 384,
+            query_embedding=[0.1] * 768,
             processed_query="Calvin",
             collections=["working"],
             limit=10,
@@ -228,15 +513,11 @@ class TestTagRoutedSearch:
         """Results have tag_overlap_count metadata."""
         mem = _make_result("mem", distance=0.3, noun_tags='["calvin", "boston"]')
 
-        def hybrid_side_effect(query_vector, query_text, top_k, filters=None):
-            if filters and "noun_tags" in filters:
-                return [mem.copy()]
-            return []
-
-        mock_collections["working"].hybrid_query = AsyncMock(side_effect=hybrid_side_effect)
+        # v0.5.3: No tag filter — returns all results for Python-side filtering
+        mock_collections["working"].hybrid_query = AsyncMock(return_value=[mem.copy()])
 
         results = await search_service._tag_routed_search(
-            query_embedding=[0.1] * 384,
+            query_embedding=[0.1] * 768,
             processed_query="Calvin in Boston",
             collections=["working"],
             limit=10,
