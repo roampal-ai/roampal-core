@@ -1,9 +1,9 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "maintainers": ["roampal-ai"],
-  "version": "0.5.2",
-  "pinned_commit": "90f31ee",
+  "version": "0.5.3",
+  "pinned_commit": "dc595f7",
   "description": "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)",
   "keywords": ["memory", "mcp", "claude-code", "opencode", "ai", "persistent-memory"],
-  "release_notes": "v0.5.2: Chat-path performance — cut MCP tool-call overhead roughly in half by parallelizing the two retrieval lanes via asyncio.gather, warming ONNX models at server startup (warmup_ce + warmup_embedding background tasks), and offloading the CE rerank to asyncio.to_thread. Plus a lifecycle age-gate fix (promotion_service.py now falls back to created_at when timestamp is absent) and two v0.5.1 profile-resolution fixes (roampal doctor --profile and the start banner both now honor named profiles). Retrieval quality unchanged. 541 tests passing."
+  "release_notes": "v0.5.3: Sidecar privacy (no silent cascade to Zen/localhost — explicit configuration required via roampal sidecar setup). opencode.json safety (configure_opencode no longer silently clobbers user config on JSON parse failure; atomic writes with timestamped backup). Retrieval bug fixes (TagCascade $contains where-clause silently broken — now actually filters; memory_bank multi-key filters $and-wrapped; server-side noun_tags extraction wired into /record-outcome and /api/hooks/stop, closing the gap where summaries and facts stored via OpenCode plugin had empty tags). Sidecar JSON-shape tolerance for 3B-class models (qwen2.5:3b bare-array responses). Pre-store fact dedup ported from Roampal Desktop v0.3.2 — closes the shared-ChromaDB hole where core writes bypassed desktop's existing dedup. Scope-aware sidecar CLI (status/setup/disable now report and target user-global vs project-local opencode.json with --scope user|project|both). Atomic JSON writes for profiles.json and session state. 560 backend unit tests passing."
 }
