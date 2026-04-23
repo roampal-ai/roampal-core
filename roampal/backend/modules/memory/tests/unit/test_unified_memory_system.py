@@ -9,6 +9,7 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', '..')))
 
+import asyncio
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from datetime import datetime
@@ -16,6 +17,32 @@ from datetime import datetime
 from roampal.backend.modules.memory.unified_memory_system import UnifiedMemorySystem
 from roampal.backend.modules.memory.config import MemoryConfig
 from roampal.backend.modules.memory.scoring_service import ScoringService
+
+
+@pytest.fixture(autouse=True)
+async def _cancel_warmup_tasks():
+    """Cancel UnifiedMemorySystem v0.5.2 warmup_ce / warmup_embedding tasks
+    after each test so they don't leak into the next test's event loop.
+
+    Without this, on Linux + Python 3.10 (backports-asyncio-runner), the
+    orphan asyncio.to_thread workers from previous tests' initialize() calls
+    accumulate and the next test's `await ums.initialize()` (or query/store
+    that touches collections) hangs indefinitely. 3.11+ asyncio.Runner
+    cleans up correctly so the issue is invisible there. Production code
+    is fine — it only initialize()s once per process.
+    """
+    yield
+    try:
+        for task in asyncio.all_tasks():
+            if task.get_name() in ("warmup_ce", "warmup_embedding") and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+    except RuntimeError:
+        # No running loop — sync test, nothing to clean up.
+        pass
 
 
 class TestUnifiedMemorySystemInit:

@@ -21,6 +21,20 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', '..')))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_xdg_config_home(monkeypatch):
+    """Unset XDG_CONFIG_HOME so tests that patch Path.home actually
+    redirect _get_opencode_config_path on Linux.
+
+    On non-Windows, cli._get_opencode_config_path reads XDG_CONFIG_HOME
+    before falling back to Path.home() / ".config". Linux CI runners set
+    XDG_CONFIG_HOME=/home/runner/.config, which silently bypassed every
+    test's Path.home(tmp_path) mock and let writes leak to the real HOME.
+    Windows escapes this because that branch never reads XDG_CONFIG_HOME.
+    """
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+
 # ============================================================================
 # Helper Tests
 # ============================================================================
