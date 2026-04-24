@@ -11,6 +11,7 @@ Tag extraction:
 Query matching uses simple word matching (zero latency in search path).
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -507,11 +508,24 @@ class TagService:
         """
         Args:
             llm_extract_fn: Optional callable(text) -> List[str] for LLM extraction.
-                            If None or returns None, falls back to regex.
+                            If None or returns None, returns [].
         """
         self._llm_extract_fn = llm_extract_fn
         self._known_tags: Set[str] = set()
         self._tags_lock = threading.Lock()
+        self._sidecar_lock = asyncio.Lock()
+
+    def set_llm_extract_fn(
+        self, llm_extract_fn: Optional[Callable[[str], Optional[List[str]]]]
+    ):
+        """v0.5.4: Update the LLM extraction function after initialization.
+
+        Mirrors Desktop's TagService.set_llm_extract_fn so the FastAPI lifespan
+        can wire the sidecar-backed extractor at startup, after sidecar config
+        has been hydrated. Without this, callers had to pass `noun_tags`
+        explicitly because the constructor-bound function captured stale state.
+        """
+        self._llm_extract_fn = llm_extract_fn
 
     # --- Extraction ---
 
@@ -545,6 +559,39 @@ class TagService:
                 return tags
         except Exception as e:
             logger.warning(f"LLM tag extraction failed: {e}")
+
+        return []
+
+    async def extract_tags_async(self, text: str) -> List[str]:
+        """v0.5.4: Async tag extraction for callers in async contexts.
+
+        Mirrors Desktop's TagService.extract_tags_async. The wired
+        llm_extract_fn may be sync (Core's sidecar_service.extract_tags is
+        sync), in which case we offload to a thread to avoid blocking the
+        event loop during the LLM round-trip (~10s on local models).
+
+        v0.5.4: Client locking prevents concurrent requests from blasting
+        the sidecar simultaneously, which crashes local models with GPU OOM.
+        Mirrors Desktop's client_lock pattern in execute_with_client_lock.
+        """
+        import inspect
+
+        if not self._llm_extract_fn:
+            return []
+
+        try:
+            async with self._sidecar_lock:
+                if inspect.iscoroutinefunction(self._llm_extract_fn):
+                    tags = await self._llm_extract_fn(text)
+                else:
+                    tags = await asyncio.to_thread(self._llm_extract_fn, text)
+            if tags:
+                tags = self._normalize_llm_tags(tags)
+                with self._tags_lock:
+                    self._known_tags.update(tags)
+                return tags
+        except Exception as e:
+            logger.warning(f"LLM tag extraction failed (async): {e}")
 
         return []
 

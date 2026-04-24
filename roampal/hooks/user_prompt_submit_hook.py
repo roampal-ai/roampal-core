@@ -50,6 +50,22 @@ import urllib.error
 _update_check_cache = {"checked": False, "available": False, "current": "", "latest": ""}
 
 
+def _roampal_headers() -> dict:
+    """v0.5.4: Build headers with X-Roampal-Profile so FastAPI hits the right
+    profile instead of falling back to its own active_profile_name() (which
+    only sees the FastAPI process's startup env, not this hook's per-invocation env).
+    """
+    headers = {"Content-Type": "application/json"}
+    try:
+        from roampal.profile_manager import active_profile_name, DEFAULT_PROFILE
+        profile = active_profile_name()
+        if profile and profile != DEFAULT_PROFILE:
+            headers["X-Roampal-Profile"] = profile
+    except Exception:
+        pass  # best effort — never block the hook on profile resolution
+    return headers
+
+
 def _restart_server(server_url: str, port: int, timeout: float = 15.0) -> bool:
     """
     v0.3.2: Self-healing server restart for hooks.
@@ -204,7 +220,7 @@ def main():
         req = urllib.request.Request(
             f"{server_url}/api/hooks/get-context",
             data=request_data,
-            headers={"Content-Type": "application/json"},
+            headers=_roampal_headers(),
             method="POST"
         )
 
@@ -244,7 +260,7 @@ def main():
                     retry_req = urllib.request.Request(
                         f"{server_url}/api/hooks/get-context",
                         data=request_data,
-                        headers={"Content-Type": "application/json"},
+                        headers=_roampal_headers(),
                         method="POST"
                     )
                     with urllib.request.urlopen(retry_req, timeout=10) as response:

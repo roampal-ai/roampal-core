@@ -283,6 +283,7 @@ class UnifiedMemorySystem:
         data_path: str = None,
         config: Optional[MemoryConfig] = None,
         profile_name: Optional[str] = None,
+        embed_service: Optional["EmbeddingService"] = None,
     ):
         """
         Initialize UnifiedMemorySystem.
@@ -352,6 +353,7 @@ class UnifiedMemorySystem:
         self.profile_name = profile_name or "default"
 
         # Services (lazy initialized)
+        self._embed_service = embed_service  # Shared instance if provided by caller
         self._embedding_service: Optional[EmbeddingService] = None
         self._scoring_service: Optional[ScoringService] = None
         self._promotion_service: Optional[PromotionService] = None
@@ -523,9 +525,12 @@ class UnifiedMemorySystem:
         # Handles upgrades from ChromaDB 0.4.x to 1.x
         self._migrate_chromadb_schema()
 
-        # Initialize embedding service
-        self._embedding_service = EmbeddingService()
-        await self._embedding_service.prewarm()
+        # Initialize embedding service (use shared instance if provided)
+        if self._embed_service is not None:
+            self._embedding_service = self._embed_service
+        else:
+            self._embedding_service = EmbeddingService()
+            await self._embedding_service.prewarm()
 
         # Initialize collections - use roampal_ prefix to match Desktop data
         # Keys are short names (for code), values use roampal_ prefix in chromadb
@@ -1637,10 +1642,22 @@ class UnifiedMemorySystem:
 
         # v0.4.5: noun_tags for TagCascade retrieval
         # v0.4.9: LLM-only tags only. No regex fallback — use `roampal retag` for migration.
-        if noun_tags:
-            meta["noun_tags"] = json.dumps(noun_tags)
+        # v0.5.4: When caller passes no noun_tags, auto-extract via TagService.
+        # Mirrors Desktop's store_memory_bank pattern (unified_memory_system.py:924-925).
+        # Removes the need for every FastAPI handler to call sidecar_extract_tags()
+        # explicitly — the storage layer handles it once.
+        effective_tags = noun_tags
+        if not effective_tags and hasattr(self, "_tag_service") and self._tag_service:
+            try:
+                effective_tags = await self._tag_service.extract_tags_async(content)
+            except Exception as e:
+                logger.warning(f"Auto tag extraction failed for working {doc_id}: {e}")
+                effective_tags = None
+
+        if effective_tags:
+            meta["noun_tags"] = json.dumps(effective_tags)
             if hasattr(self, "_tag_service") and self._tag_service:
-                self._tag_service.add_known_tags(noun_tags)
+                self._tag_service.add_known_tags(effective_tags)
 
         await self.collections["working"].upsert_vectors(
             ids=[doc_id], vectors=[embedding], metadatas=[meta]

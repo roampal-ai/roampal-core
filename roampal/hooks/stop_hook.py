@@ -48,6 +48,22 @@ import os
 import subprocess
 import time
 import urllib.request
+
+
+def _roampal_headers() -> dict:
+    """v0.5.4: Build headers with X-Roampal-Profile so FastAPI hits the right
+    profile instead of falling back to its own active_profile_name() (which
+    only sees the FastAPI process's startup env, not this hook's per-invocation env).
+    """
+    headers = {"Content-Type": "application/json"}
+    try:
+        from roampal.profile_manager import active_profile_name, DEFAULT_PROFILE
+        profile = active_profile_name()
+        if profile and profile != DEFAULT_PROFILE:
+            headers["X-Roampal-Profile"] = profile
+    except Exception:
+        pass  # best effort — never block the hook on profile resolution
+    return headers
 import urllib.error
 
 
@@ -259,7 +275,7 @@ def main():
         req = urllib.request.Request(
             f"{server_url}/api/hooks/stop",
             data=request_data,
-            headers={"Content-Type": "application/json"},
+            headers=_roampal_headers(),
             method="POST"
         )
 
@@ -295,7 +311,7 @@ def main():
                     retry_req = urllib.request.Request(
                         f"{server_url}/api/hooks/stop",
                         data=request_data,
-                        headers={"Content-Type": "application/json"},
+                        headers=_roampal_headers(),
                         method="POST"
                     )
                     with urllib.request.urlopen(retry_req, timeout=5) as response:

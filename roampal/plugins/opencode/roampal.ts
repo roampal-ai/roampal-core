@@ -56,6 +56,52 @@ function debugLog(msg: string) {
   } catch { /* best effort */ }
 }
 
+// v0.5.4: Profile resolution for X-Roampal-Profile header on every FastAPI call.
+// Mirrors MCP server-side _get_mcp_profile_name() so OpenCode hits the right
+// profile instead of defaulting to active_profile_name() on the server.
+function resolveRoampalProfile(): string {
+  // Priority 1: explicit env var (CLI: $env:ROAMPAL_PROFILE = "..."; opencode)
+  const envProfile = process.env.ROAMPAL_PROFILE
+  if (envProfile && envProfile !== "default") return envProfile
+
+  // Priority 2: project opencode.json (Desktop per-project)
+  // Reads mcp.roampal-core.environment.ROAMPAL_PROFILE from the project's
+  // opencode.json, matching the env block Desktop passes to the MCP subprocess.
+  try {
+    const cwdConfig = join(process.cwd(), "opencode.json")
+    statSync(cwdConfig)
+    const config = JSON.parse(readFileSync(cwdConfig, "utf-8"))
+    const projectProfile = config?.mcp?.["roampal-core"]?.environment?.ROAMPAL_PROFILE
+    if (projectProfile && projectProfile !== "default") return projectProfile
+  } catch { /* no project config or unreadable */ }
+
+  // Priority 3: user-global opencode.json
+  try {
+    const home = process.env.USERPROFILE || process.env.HOME || ""
+    const xdgConfig = process.env.XDG_CONFIG_HOME || (home ? join(home, ".config") : "")
+    if (xdgConfig) {
+      const globalConfig = join(xdgConfig, "opencode", "opencode.json")
+      statSync(globalConfig)
+      const config = JSON.parse(readFileSync(globalConfig, "utf-8"))
+      const globalProfile = config?.mcp?.["roampal-core"]?.environment?.ROAMPAL_PROFILE
+      if (globalProfile && globalProfile !== "default") return globalProfile
+    }
+  } catch { /* no global config or unreadable */ }
+
+  return ""
+}
+
+const ROAMPAL_PROFILE = resolveRoampalProfile()
+debugLog(`[v0.5.4] Resolved profile: ${ROAMPAL_PROFILE || "(default — no header)"}`)
+
+function roampalHeaders(): Record<string, string> {
+  const h: Record<string, string> = { "Content-Type": "application/json" }
+  if (ROAMPAL_PROFILE) {
+    h["X-Roampal-Profile"] = ROAMPAL_PROFILE
+  }
+  return h
+}
+
 // ============================================================================
 // Session State Management
 // ============================================================================
@@ -401,7 +447,7 @@ async function getContextFromRoampal(
   try {
     const response = await fetch(`${ROAMPAL_HOOK_URL}/get-context`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: roampalHeaders(),
       body: JSON.stringify({
         query: userPrompt,
         conversation_id: sessionId
@@ -415,7 +461,7 @@ async function getContextFromRoampal(
         if (await restartServer()) {
           const retry = await fetch(`${ROAMPAL_HOOK_URL}/get-context`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: roampalHeaders(),
             body: JSON.stringify({ query: userPrompt, conversation_id: sessionId })
           })
           if (retry.ok) {
@@ -451,7 +497,7 @@ async function getContextFromRoampal(
       try {
         const retry = await fetch(`${ROAMPAL_HOOK_URL}/get-context`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: roampalHeaders(),
           body: JSON.stringify({ query: userPrompt, conversation_id: sessionId })
         })
         if (retry.ok) {
@@ -808,7 +854,7 @@ ${memoryInstructions}`
           if (Object.keys(memoryScores).length > 0) {
             const scoreResp = await fetch(`${ROAMPAL_API_URL}/record-outcome`, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: roampalHeaders(),
               body: JSON.stringify({
                 conversation_id: sessionId,
                 outcome,
@@ -851,7 +897,7 @@ ${memoryInstructions}`
               try {
                 const dedupResp = await fetch(`${ROAMPAL_API_URL}/search`, {
                   method: "POST",
-                  headers: { "Content-Type": "application/json" },
+                  headers: roampalHeaders(),
                   body: JSON.stringify({
                     query: "",
                     collections: ["working"],
@@ -874,7 +920,7 @@ ${memoryInstructions}`
 
               const summaryResp = await fetch(`${ROAMPAL_HOOK_URL}/stop`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: roampalHeaders(),
                 body: JSON.stringify({
                   conversation_id: sessionId,
                   user_message: exchange.user.slice(0, 200),
@@ -888,7 +934,12 @@ ${memoryInstructions}`
                     original_assistant_msg_length: exchange.assistant.length
                   }
                 }),
-                signal: AbortSignal.timeout(5000)
+                // v0.5.4: 5s -> 30s. Server-side tag extraction via sidecar can take
+                // 10-30s on local models (LM Studio + qwen3.6-35b-a3b). The data was
+                // already being stored regardless (FastAPI handler completes despite
+                // client disconnect), but the plugin logged a misleading TimeoutError.
+                // Background task on session.idle, no user-facing impact.
+                signal: AbortSignal.timeout(30000)
               })
 
               if (summaryResp.ok) {
@@ -901,7 +952,7 @@ ${memoryInstructions}`
                   try {
                     await fetch(`${ROAMPAL_API_URL}/record-outcome`, {
                       method: "POST",
-                      headers: { "Content-Type": "application/json" },
+                      headers: roampalHeaders(),
                       body: JSON.stringify({
                         conversation_id: sessionId,
                         outcome,
@@ -926,6 +977,10 @@ ${memoryInstructions}`
 
           // v0.4.8: Call 2 — extract_facts (separate LLM call, 30s timeout).
           // Matches benchmark sidecar_extract_facts(). Tags handled server-side at store time.
+          // v0.5.4: 3-attempt retry loop matches summary path. Earlier the call was
+          // single-shot — the plugin debug log showed "FACTS error (non-fatal):
+          // SyntaxError: JSON Parse error: Unexpected token" and "TimeoutError"
+          // failures going unrecovered. Same backoff family as scoreExchange's loop.
           try {
             const factsPrompt = `Extract key facts worth remembering from this exchange. Rules:
 - Include WHO or WHAT each fact is about — names, projects, topics
@@ -948,22 +1003,42 @@ If no useful facts, return: {"facts": []}`
             const factsHeaders: Record<string, string> = { "Content-Type": "application/json" }
             if (target.key) factsHeaders["Authorization"] = `Bearer ${target.key}`
 
-            const factsResp = await fetch(`${target.url}/chat/completions`, {
-              method: "POST",
-              headers: factsHeaders,
-              body: JSON.stringify({
-                model: target.model,
-                messages: [
-                  { role: "system", content: "/no_think\nExtract key facts. Return ONLY valid JSON with a facts array. No other text." },
-                  { role: "user", content: "/no_think\n" + factsPrompt }
-                ],
-                max_tokens: 2000,
-                temperature: 0,
-              }),
-              signal: AbortSignal.timeout(30000)
-            })
+            // v0.5.4: 3 attempts for fallback (custom sidecar like LM Studio); 1 for Zen.
+            // Matches scoreExchange retry policy. Target health is already verified at
+            // this point (summary call just succeeded), so retries are about transient
+            // response failures, not target failover.
+            const factsMaxAttempts = target.isFallback ? 3 : 1
+            let extractedFacts: string[] | null = null
 
-              if (factsResp.ok) {
+            for (let factsAttempt = 0; factsAttempt < factsMaxAttempts; factsAttempt++) {
+              try {
+                const factsResp = await fetch(`${target.url}/chat/completions`, {
+                  method: "POST",
+                  headers: factsHeaders,
+                  body: JSON.stringify({
+                    model: target.model,
+                    messages: [
+                      { role: "system", content: "/no_think\nExtract key facts. Return ONLY valid JSON with a facts array. No other text." },
+                      { role: "user", content: "/no_think\n" + factsPrompt }
+                    ],
+                    max_tokens: 2000,
+                    temperature: 0,
+                  }),
+                  signal: AbortSignal.timeout(30000)
+                })
+
+                if (!factsResp.ok) {
+                  // 4xx/5xx — retry once after a small delay; same target.
+                  if (factsAttempt < factsMaxAttempts - 1) {
+                    const delay = 1000 * Math.pow(2, factsAttempt)  // 1s, 2s
+                    debugLog(`scoreExchange FACTS HTTP ${factsResp.status} on ${target.label} — retry ${factsAttempt + 1}/${factsMaxAttempts} in ${delay}ms`)
+                    await new Promise(resolve => setTimeout(resolve, delay))
+                    continue
+                  }
+                  debugLog(`scoreExchange FACTS HTTP ${factsResp.status} on ${target.label} — exhausted retries`)
+                  break
+                }
+
                 const factsData = await factsResp.json()
                 const factsMsg = factsData.choices?.[0]?.message || {}
                 const factsContent = factsMsg.content || factsMsg.reasoning_content || factsMsg.reasoning || ""
@@ -973,25 +1048,47 @@ If no useful facts, return: {"facts": []}`
                 // match that broke on any complex output (Unrecognized token,
                 // Expected '}', Unexpected token errors).
                 const factsResult: any = extractJson(factsContent)
-                if (factsResult) {
-                const extractedFacts = Array.isArray(factsResult.facts)
-                  ? factsResult.facts.filter((f: unknown) => typeof f === "string" && (f as string).length > 10)
-                  : []
-                if (extractedFacts.length > 0) {
-                  // Send facts to server (noun_tags handled by store_working at store time)
-                  await fetch(`${ROAMPAL_API_URL}/record-outcome`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      conversation_id: sessionId,
-                      outcome: "unknown",
-                      memory_scores: {},
-                      facts: extractedFacts
-                    })
-                  })
-                  debugLog(`scoreExchange FACTS: ${extractedFacts.length} facts extracted via ${target.label}`)
+
+                if (factsResult && Array.isArray(factsResult.facts)) {
+                  extractedFacts = factsResult.facts.filter(
+                    (f: unknown) => typeof f === "string" && (f as string).length > 10
+                  )
+                  break  // success — exit retry loop
                 }
+
+                // Parse failure — retry. Local models occasionally return malformed JSON.
+                if (factsAttempt < factsMaxAttempts - 1) {
+                  const delay = 1000 * Math.pow(2, factsAttempt)
+                  debugLog(`scoreExchange FACTS parse failure on ${target.label} — retry ${factsAttempt + 1}/${factsMaxAttempts} in ${delay}ms`)
+                  await new Promise(resolve => setTimeout(resolve, delay))
+                  continue
+                }
+                debugLog(`scoreExchange FACTS parse failure on ${target.label} — exhausted retries`)
+              } catch (attemptErr) {
+                // Timeout or fetch exception — retry.
+                if (factsAttempt < factsMaxAttempts - 1) {
+                  const delay = 1000 * Math.pow(2, factsAttempt)
+                  debugLog(`scoreExchange FACTS error on ${target.label} (attempt ${factsAttempt + 1}/${factsMaxAttempts}): ${attemptErr} — retry in ${delay}ms`)
+                  await new Promise(resolve => setTimeout(resolve, delay))
+                  continue
+                }
+                debugLog(`scoreExchange FACTS error on ${target.label} — exhausted retries: ${attemptErr}`)
               }
+            }
+
+            if (extractedFacts && extractedFacts.length > 0) {
+              // Send facts to server (noun_tags handled by store_working at store time)
+              await fetch(`${ROAMPAL_API_URL}/record-outcome`, {
+                method: "POST",
+                headers: roampalHeaders(),
+                body: JSON.stringify({
+                  conversation_id: sessionId,
+                  outcome: "unknown",
+                  memory_scores: {},
+                  facts: extractedFacts
+                })
+              })
+              debugLog(`scoreExchange FACTS: ${extractedFacts.length} facts extracted via ${target.label}`)
             }
           } catch (factsErr) {
             debugLog(`scoreExchange FACTS error (non-fatal): ${factsErr}`)
@@ -1219,7 +1316,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
         try {
           const recentResp = await fetch(`${ROAMPAL_API_URL}/search`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: roampalHeaders(),
             body: JSON.stringify({
               query: "",
               collections: ["working", "history", "patterns"],
@@ -1227,7 +1324,9 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
               sort_by: "recency",
               metadata_filters: { memory_type: "exchange_summary" }
             }),
-            signal: AbortSignal.timeout(5000)
+            // v0.5.4: 5s -> 30s. Background scoreExchange path; same rationale as the
+            // summary store bump above.
+            signal: AbortSignal.timeout(30000)
           })
           if (recentResp.ok) {
             const data = await recentResp.json() as { results: Array<{ id?: string; text?: string; content?: string; collection?: string; wilson_score?: number; uses?: number; metadata: Record<string, any> }> }
@@ -1411,7 +1510,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
         // Search all three collections since summaries can be promoted across tiers.
         const recentResp = await fetch(`${ROAMPAL_API_URL}/search`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: roampalHeaders(),
           body: JSON.stringify({
             query: "",
             collections: ["working", "history", "patterns"],
@@ -1419,7 +1518,8 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
             sort_by: "recency",
             metadata_filters: { memory_type: "exchange_summary" }
           }),
-          signal: AbortSignal.timeout(5000)
+          // v0.5.4: 5s -> 30s. Background scoreExchange path; same rationale as above.
+          signal: AbortSignal.timeout(30000)
         })
         if (recentResp.ok) {
           const data = await recentResp.json() as { results: Array<{ id?: string; text?: string; content?: string; collection?: string; wilson_score?: number; uses?: number; metadata: Record<string, any> }> }
@@ -1616,7 +1716,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
               try {
                 await fetch(`${ROAMPAL_HOOK_URL}/stop`, {
                   method: "POST",
-                  headers: { "Content-Type": "application/json" },
+                  headers: roampalHeaders(),
                   body: JSON.stringify({
                     conversation_id: sid,
                     user_message: ctx.userPrompt,

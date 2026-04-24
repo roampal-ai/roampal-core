@@ -1,4 +1,6 @@
-# Roampal — Outcome-Based Persistent Memory MCP Server
+<h1 align="center">roampal-core</h1>
+
+<p align="center"><strong>Outcome-Based Persistent Memory MCP Server</strong></p>
 
 <p align="center">
   <a href="https://github.com/roampal-ai/roampal-core/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/roampal-ai/roampal-core/tests.yml?branch=main&style=flat-square&label=tests" alt="Tests"></a>
@@ -64,7 +66,9 @@ The core loop is identical — both platforms inject context, capture exchanges,
 
 Claude Code prompts the main LLM to score each exchange via the `score_memories` tool. OpenCode never self-scores — an independent sidecar (a separate API call) reviews each exchange as a third party, removing self-assessment bias. The `score_memories` tool is not registered on OpenCode. Scoring is disabled by default until you explicitly configure it via `roampal sidecar setup`. During setup, Roampal detects local models (Ollama, LM Studio, etc.) and lets you choose a scoring model. Zen free models are available as an explicit opt-in choice for users without a local model or API key — they route through OpenCode's proxy which may log data. A cheap or local model works great — scoring doesn't need a powerful model.
 
-> **v0.5.3:** Sidecar scoring now requires explicit configuration — no automatic fallback to Zen or localhost. Small local models (qwen2.5:3b, etc.) that return bare JSON arrays instead of OpenAI-shaped responses are handled transparently via server-side shape tolerance.
+> **v0.5.4:** Profile binding is now per-request, not per-process. Every client (MCP server, OpenCode plugin, Python hooks for Claude Code / Cursor) sends an `X-Roampal-Profile` header so a single FastAPI server can cleanly serve multiple profiles simultaneously. Fixes issue #7 where OpenCode Desktop's per-project `ROAMPAL_PROFILE` in `opencode.json` was ignored because the singleton FastAPI bound the profile once at startup.
+>
+> **v0.5.3:** Sidecar scoring now requires explicit configuration (no automatic fallback to Zen or localhost). Small local models (qwen2.5:3b, etc.) that return bare JSON arrays instead of OpenAI-shaped responses are handled transparently via server-side shape tolerance.
 </details>
 
 ## How It Works

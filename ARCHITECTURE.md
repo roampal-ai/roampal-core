@@ -34,7 +34,7 @@ roampal init --opencode   # Or configure explicitly
   OpenCode MCP         hook subprocesses   TypeScript plugin
 ```
 
-**Architecture (v0.5.3):** MCP servers are thin HTTP clients — no ChromaDB or heavy ML frameworks in the MCP process. Embeddings use pure ONNX Runtime (no PyTorch). All access is serialized through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running. Sidecar LLM handles tag extraction (OpenCode only — Claude Code uses the main LLM via MCP tools). Tag extraction uses LLM only, no regex fallback. Server-side noun_tags extraction fallback ensures summaries and facts always have tags when stored. Pre-store fact dedup prevents near-duplicate storage across tiers with tier-scoped checks. Sidecar scoring requires explicit configuration (no automatic Zen/localhost fallback); bare JSON arrays from small local models are handled via server-side shape tolerance.
+**Architecture (v0.5.4):** MCP servers are thin HTTP clients - no ChromaDB or heavy ML frameworks in the MCP process. Embeddings use pure ONNX Runtime (no PyTorch). All access routes through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running. **Per-request profile resolution (v0.5.4):** FastAPI holds a per-profile registry (`_memory_by_profile`, `_session_manager_by_profile`) and resolves the active profile on every request via an `X-Roampal-Profile` header sent by the client. Lazy initialization under an async lock, with a shared `EmbeddingService` keeping ONNX model memory flat (~420MB total regardless of profile count). Every client sends the header: MCP server, OpenCode plugin (reads env > project `opencode.json` > global `opencode.json`), Claude Code / Cursor Python hooks (via `active_profile_name()`). Sidecar LLM handles tag extraction (OpenCode only - Claude Code uses the main LLM via MCP tools). Tag extraction uses LLM only, no regex fallback, routed through `TagService.extract_tags_async()` with an `asyncio.Lock` for GPU OOM prevention. `store_working` auto-extracts tags via TagService when caller omits them. Pre-store fact dedup prevents near-duplicate storage across tiers with tier-scoped checks. Sidecar scoring requires explicit configuration (no automatic Zen/localhost fallback); bare JSON arrays from small local models are handled via server-side shape tolerance.
 
 `roampal start` is available for standalone use (e.g., OpenCode-only setups where no MCP auto-starts the server).
 
@@ -484,13 +484,36 @@ There are two precedence chains in play — one for the server picking which pro
 3. `profile_name` argument → `ProfileRegistry.resolve()` (registered custom path or auto-located slug dir)
 4. System default (`%APPDATA%/Roampal/data`, dev-mode-aware)
 
-The server's `lifespan` calls `active_profile_name()` to pick the profile, passes it to `UnifiedMemorySystem(profile_name=...)`, which then runs its own path-resolution chain. Once initialized, the server is bound to that data path for its lifetime. Swapping profiles requires stopping the server — `roampal profile switch <name>` writes the new active profile and kills the server in one step, and the next MCP tool call triggers `_ensure_server_running` which spawns a fresh server bound to the new profile.
+Prior to v0.5.4, the server's `lifespan` called `active_profile_name()` once and bound the whole process to that profile. v0.5.4 removed that binding in favor of per-request resolution (see below) so a single server can cleanly serve multiple profiles simultaneously. `active_profile_name()` is still used at startup for banner logging and as the fallback when a request does not carry an `X-Roampal-Profile` header. `roampal profile switch <name>` still updates the persisted file; killing the server is no longer strictly required for the change to take effect, but it is still what the CLI does for backward compatibility.
+
+### Per-Request Profile Resolution (v0.5.4)
+
+FastAPI holds a per-profile registry - `_memory_by_profile: Dict[str, UnifiedMemorySystem]` and `_session_manager_by_profile: Dict[str, SessionManager]` - rather than a singleton. Each request resolves its profile via `_resolve_profile_name(request)`:
+
+1. `X-Roampal-Profile` header on the request (sent by every client)
+2. Fallback to `active_profile_name()` (env var > persisted file > `"default"`)
+
+Every client layer attaches the header:
+
+- **MCP server** (`roampal/mcp/server.py`): caches the resolved profile at process startup via `_get_mcp_profile_name()` with a sentinel-based cache; attaches on every `_api_call` to FastAPI. Omits the header for the default profile so the FastAPI fallback preserves pre-v0.5.4 CLI behavior.
+- **OpenCode plugin** (`roampal/plugins/opencode/roampal.ts`): `resolveRoampalProfile()` reads `process.env.ROAMPAL_PROFILE` first, then walks to the project's `opencode.json` for `mcp.roampal-core.environment.ROAMPAL_PROFILE`, then to the user-global `opencode.json`. Covers the per-project Desktop scenario where Desktop passes the env block to the spawned MCP subprocess but not to the plugin process.
+- **Python hooks** (`roampal/hooks/user_prompt_submit_hook.py`, `stop_hook.py`): `_roampal_headers()` uses `active_profile_name()` (same precedence as FastAPI's fallback). Used by Claude Code and Cursor.
+
+`get_memory_for_request(request)` performs lazy init under an `asyncio.Lock` with double-check: if the resolved profile is missing from the registry, a fresh `UnifiedMemorySystem` is built for that profile, its `TagService` is wired with the sidecar-backed LLM extractor, and the one-time `cleanup_archived()` migration runs. A shared `EmbeddingService` singleton (`_shared_embed_service`) is reused across every profile so ONNX model memory stays flat (~420MB total) regardless of how many profiles get loaded.
+
+On per-profile init failure (corrupted DB, missing dependency, etc.) the helper raises `HTTPException(503)` for just that request rather than killing the FastAPI process, so one broken profile cannot take down every other client sharing the server.
 
 ### File layout
 
+Per-request resolution (v0.5.4):
+- `roampal/server/main.py` - `_memory_by_profile` / `_session_manager_by_profile` registries, `_resolve_profile_name()`, `get_memory_for_request()`, `get_session_manager_for_request()`, `get_profile_context()` helpers; lazy init under `_init_lock: asyncio.Lock`
+- `roampal/mcp/server.py` - `_MCP_PROFILE_UNRESOLVED` sentinel + `_get_mcp_profile_name()`; header attached in `_api_call()`
+- `roampal/plugins/opencode/roampal.ts` - `resolveRoampalProfile()` + `roampalHeaders()`; attached on all 11 FastAPI fetch sites
+- `roampal/hooks/user_prompt_submit_hook.py` / `stop_hook.py` - `_roampal_headers()` helper; attached on all 4 POST callsites
+
+Named profile registry (v0.5.1):
 - `roampal/profile_manager.py` — `ProfileRegistry`, `profile_slug`, `resolve_data_path`, `active_profile_name`, `active_profile_source`, active-profile file read/write/clear
-- `roampal/backend/modules/memory/unified_memory_system.py` — `__init__(data_path, config, profile_name)` — profile_name arg resolves via ProfileRegistry when no explicit path/env
-- `roampal/server/main.py` — `lifespan()` calls `active_profile_name()` and passes to `UnifiedMemorySystem`
+- `roampal/backend/modules/memory/unified_memory_system.py` — `__init__(data_path, config, profile_name, embed_service)` — profile_name arg resolves via ProfileRegistry when no explicit path/env; `embed_service` (v0.5.4) accepts a shared `EmbeddingService` so multiple per-profile instances share one ONNX model
 - `roampal/cli.py` — `cmd_profile()` dispatcher + `profile` subparser group with `list`/`show`/`create`/`register`/`delete`/`use`/`unuse`/`switch` actions; `--profile` flag added to `start` and `doctor`
 
 ---

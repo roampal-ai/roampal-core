@@ -152,17 +152,12 @@ class TestColdStartQualitySelection:
         mock_memory._data_path.__truediv__ = MagicMock(return_value=MagicMock(exists=MagicMock(return_value=False)))
         mock_memory.search = AsyncMock(return_value=[])
 
-        # Patch the global _memory
-        original_memory = main._memory
-        main._memory = mock_memory
-
-        try:
-            result = await main._build_cold_start_profile()
-            # Should have picked the high importance one
-            assert "High quality" in result or result is None or "high" in str(result).lower(), \
-                f"Expected highest importance fact, got: {result}"
-        finally:
-            main._memory = original_memory
+        # v0.5.4: _build_cold_start_profile now takes mem as a parameter
+        # (singleton _memory was replaced by per-profile registry).
+        result = await main._build_cold_start_profile(mock_memory)
+        # Should have picked the high importance one
+        assert "High quality" in result or result is None or "high" in str(result).lower(), \
+            f"Expected highest importance fact, got: {result}"
 
 
 class TestNoPIIInCodebase:

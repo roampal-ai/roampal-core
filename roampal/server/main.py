@@ -40,7 +40,7 @@ if sys.platform == "win32":
     except (AttributeError, OSError):
         pass  # Ignore if already reconfigured or in test environment
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -61,9 +61,13 @@ from roampal.hooks import SessionManager
 
 logger = logging.getLogger(__name__)
 
-# Global instances
-_memory: Optional[UnifiedMemorySystem] = None
-_session_manager: Optional[SessionManager] = None
+# Per-profile registry (replaces singleton — v0.5.4 profile binding fix)
+_memory_by_profile: Dict[str, UnifiedMemorySystem] = {}
+_session_manager_by_profile: Dict[str, SessionManager] = {}
+_init_lock: asyncio.Lock = asyncio.Lock()
+
+# Shared embedding service — one ONNX model for all profiles (avoids ~420MB x N)
+_shared_embed_service: Any = None
 
 # Search result cache for outcome scoring (session_id -> doc_ids)
 _search_cache: Dict[str, Dict[str, Any]] = {}
@@ -244,7 +248,7 @@ Only mention once per conversation.
     return None
 
 
-async def _build_cold_start_profile() -> Optional[str]:
+async def _build_cold_start_profile(mem: UnifiedMemorySystem) -> Optional[str]:
     """
     Build the cold start user profile injection.
 
@@ -253,15 +257,18 @@ async def _build_cold_start_profile() -> Optional[str]:
     2. One fact per tag category (identity, preference, goal, project, system_mastery, agent_growth)
     3. (Future) Content KG entities - read path exists but entity extraction not yet wired up
 
+    Args:
+        mem: UnifiedMemorySystem for the active profile.
+
     Returns:
-        Formatted user profile string, or None if no facts exist
+        Formatted user profile string, or None if no facts exist.
     """
-    if not _memory:
+    if not mem:
         return None
 
     try:
         # Get all facts from memory_bank, sorted by quality (importance, confidence)
-        all_memory_bank = _memory._memory_bank_service.list_all(include_archived=False)
+        all_memory_bank = mem._memory_bank_service.list_all(include_archived=False)
 
         # v0.3.7: Proven facts (3+ uses) sort by Wilson; cold facts by quality
         def _cold_start_sort_key(f):
@@ -321,7 +328,7 @@ async def _build_cold_start_profile() -> Optional[str]:
 
         if not identity_content:
             # Check if they have history (existing user) or not (truly new)
-            has_history = await _memory.search(
+            has_history = await mem.search(
                 query="", collections=["history", "patterns"], limit=1
             )
 
@@ -534,19 +541,73 @@ class UpdateContentRequest(BaseModel):
 # ==================== Lifecycle ====================
 
 
+def _hydrate_sidecar_from_opencode_config():
+    """v0.5.4: The FastAPI server is launched independently of the OpenCode
+    plugin process, so it doesn't inherit ROAMPAL_SIDECAR_URL/MODEL/KEY env
+    vars set in opencode.json's mcp.roampal-core.environment block. Without
+    these, sidecar_service.CUSTOM_URL is empty and server-side helpers like
+    extract_tags() (used by /api/hooks/stop and /record-outcome to populate
+    noun_tags when the plugin doesn't send them) silently fail — every
+    OpenCode-stored memory ended up without noun_tags despite v0.5.3 §11
+    claiming server-side fallback.
+
+    Mirror cli.py:_check_sidecar_configured: read the env block from the
+    user-global opencode.json, write missing vars into os.environ, and
+    re-bind sidecar_service module globals (since they were already set at
+    import time).
+    """
+    if os.environ.get("ROAMPAL_SIDECAR_URL") and os.environ.get("ROAMPAL_SIDECAR_MODEL"):
+        return  # already configured via real env, nothing to hydrate
+
+    if sys.platform == "win32":
+        config_dir = Path.home() / ".config" / "opencode"
+    else:
+        xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+        config_dir = Path(xdg_config) / "opencode"
+    config_path = config_dir / "opencode.json"
+    if not config_path.exists():
+        return
+
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        logger.debug(f"Could not read sidecar config from {config_path}: {e}")
+        return
+
+    env_block = config.get("mcp", {}).get("roampal-core", {}).get("environment", {})
+    url = env_block.get("ROAMPAL_SIDECAR_URL", "")
+    model = env_block.get("ROAMPAL_SIDECAR_MODEL", "")
+    key = env_block.get("ROAMPAL_SIDECAR_KEY", "")
+    if not (url and model):
+        return
+
+    os.environ.setdefault("ROAMPAL_SIDECAR_URL", url)
+    os.environ.setdefault("ROAMPAL_SIDECAR_MODEL", model)
+    if key:
+        os.environ.setdefault("ROAMPAL_SIDECAR_KEY", key)
+
+    # Re-bind module globals — sidecar_service read these at import time.
+    import roampal.sidecar_service as svc
+    svc.CUSTOM_URL = url
+    svc.CUSTOM_MODEL = model
+    if key:
+        svc.CUSTOM_KEY = key
+    logger.info(
+        f"Hydrated sidecar config from opencode.json: model={model} url={url}"
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage memory system lifecycle."""
-    global _memory, _session_manager
     logger.info("Starting Roampal server...")
 
-    # Check for dev mode or custom data path
-    dev_mode = os.environ.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")
-    data_path = os.environ.get("ROAMPAL_DATA_PATH")
+    # v0.5.4: Pull sidecar config from opencode.json before any handler runs
+    # so server-side extract_tags() can reach the sidecar.
+    _hydrate_sidecar_from_opencode_config()
 
-    # v0.5.1: Named profile. Precedence: ROAMPAL_PROFILE env var > persisted
-    # active_profile file ('roampal profile use <name>') > 'default'.
-    # Delegating to active_profile_name() for the full precedence chain.
+    # v0.5.4: Resolve profile at startup for banner only — actual memory init
+    # is lazy per-request. This avoids binding a single profile to the process.
     from roampal.profile_manager import (
         active_profile_name,
         active_profile_source,
@@ -554,77 +615,123 @@ async def lifespan(app: FastAPI):
     )
 
     resolved_name = active_profile_name()
-    profile_name = resolved_name if resolved_name != DEFAULT_PROFILE else None
-    if profile_name:
+    if resolved_name != DEFAULT_PROFILE:
         logger.info(
-            f"Using named profile: {profile_name} (source: {active_profile_source()})"
+            f"Active profile at startup: {resolved_name} (source: {active_profile_source()})"
         )
 
-    # If dev mode and no custom path, use DEV data directory
-    if dev_mode and not data_path:
-        if os.name == "nt":  # Windows
-            appdata = os.environ.get("APPDATA", str(Path.home()))
-            data_path = str(Path(appdata) / "Roampal_DEV" / "data")
-        elif sys.platform == "darwin":  # macOS
-            data_path = str(
-                Path.home() / "Library" / "Application Support" / "Roampal_DEV" / "data"
-            )
-        else:  # Linux — v0.4.1: respect XDG_DATA_HOME
-            xdg_data = os.environ.get(
-                "XDG_DATA_HOME", str(Path.home() / ".local" / "share")
-            )
-            data_path = str(Path(xdg_data) / "roampal_dev" / "data")
-        logger.info(f"DEV MODE enabled - using: {data_path}")
-    elif data_path:
-        logger.info(f"Using custom data path: {data_path}")
-
-    # v0.4.1: Wrap initialization in try/except with user-friendly guidance
+    # v0.5.4: Shared embedding service — one ONNX model for all profiles.
+    global _shared_embed_service
     try:
-        _memory = UnifiedMemorySystem(data_path=data_path, profile_name=profile_name)
-        await _memory.initialize()
-        logger.info("Memory system initialized")
-    except ImportError as e:
-        logger.error(
-            f"Missing dependency: {e}\n"
-            "Fix: pip install roampal  (needs: onnxruntime, tokenizers, huggingface-hub)"
-        )
-        raise SystemExit(1)
+        from roampal.backend.modules.memory.embedding_service import EmbeddingService
+        _shared_embed_service = EmbeddingService()
+        await _shared_embed_service.prewarm()
     except Exception as e:
-        logger.error(
-            f"Failed to initialize memory system: {e}\n"
-            "Common fixes:\n"
-            "  - First run? Ensure you have internet for model download (~420MB)\n"
-            "  - ChromaDB error? Check disk space and permissions on data directory\n"
-            "  - Run 'roampal doctor' for diagnostics"
-        )
-        raise SystemExit(1)
-
-    # v0.2.9: Cleanup legacy archived memories (one-time migration)
-    if _memory._memory_bank_service:
-        cleaned = _memory._memory_bank_service.cleanup_archived()
-        if cleaned > 0:
-            logger.info(f"v0.2.9 migration: cleaned up {cleaned} archived memories")
-
-    # Initialize session manager (uses same data path)
-    _session_manager = SessionManager(_memory.data_path)
-    logger.info("Session manager initialized")
-
-    # v0.3.2: Parent process monitoring removed. FastAPI now outlives any single
-    # MCP client so multiple clients (Claude Code, Cursor, OpenCode) can share it.
-    # First MCP to start auto-starts FastAPI; others detect port in use and skip.
+        logger.warning(f"Embedding service unavailable: {e}")
+        _shared_embed_service = None
 
     yield
 
     # v0.4.1: Explicit cleanup of ChromaDB adapters (replaces __del__ destructor)
     logger.info("Shutting down Roampal server...")
-    if _memory:
+    for mem in _memory_by_profile.values():
         try:
-            for name, adapter in getattr(_memory, "collections", {}).items():
+            for name, adapter in getattr(mem, "collections", {}).items():
                 if hasattr(adapter, "cleanup"):
                     await adapter.cleanup()
                     logger.debug(f"Cleaned up {name} adapter")
         except Exception as e:
             logger.warning(f"Error during adapter cleanup: {e}")
+
+
+# ==================== Per-Request Profile Resolution (v0.5.4) ====================
+
+def _resolve_profile_name(request: Request) -> str:
+    """Resolve the profile name for a request.
+
+    Priority: X-Roampal-Profile header > ROAMPAL_PROFILE env > active_profile_name().
+    Returns a normalized key suitable for _memory_by_profile lookup.
+    """
+    header = request.headers.get("X-Roampal-Profile")
+    if header:
+        return header
+
+    from roampal.profile_manager import active_profile_name, DEFAULT_PROFILE
+    resolved = active_profile_name()
+    return resolved if resolved != DEFAULT_PROFILE else "default"
+
+
+async def get_memory_for_request(request: Request) -> UnifiedMemorySystem:
+    """Get (or lazily create) the UnifiedMemorySystem for this request's profile."""
+    profile_name = _resolve_profile_name(request)
+
+    # Handle bogus/unknown profile names gracefully
+    if not profile_name or not profile_name.strip():
+        logger.warning("Empty profile name in request, falling back to default")
+        profile_name = "default"
+
+    if profile_name not in _memory_by_profile:
+        async with _init_lock:
+            if profile_name not in _memory_by_profile:
+                try:
+                    data_path = os.environ.get("ROAMPAL_DATA_PATH")
+                    umem = UnifiedMemorySystem(
+                        data_path=data_path,
+                        profile_name=None if profile_name == "default" else profile_name,
+                        embed_service=_shared_embed_service,
+                    )
+                    await umem.initialize()
+
+                    # Wire TagService with sidecar-backed LLM extractor (per-profile)
+                    if hasattr(umem, "_tag_service") and umem._tag_service:
+                        from roampal.utils.sidecar_tag_wrapper import make_llm_tag_extractor
+                        umem._tag_service.set_llm_extract_fn(make_llm_tag_extractor())
+
+                    # v0.2.9: Cleanup legacy archived memories (per-profile, first access)
+                    if umem._memory_bank_service:
+                        cleaned = umem._memory_bank_service.cleanup_archived()
+                        if cleaned > 0:
+                            logger.info(f"v0.2.9 migration [{profile_name}]: cleaned up {cleaned} archived memories")
+
+                    _memory_by_profile[profile_name] = umem
+                    _session_manager_by_profile[profile_name] = SessionManager(umem.data_path)
+                except ImportError as e:
+                    logger.error(
+                        f"Missing dependency for profile '{profile_name}': {e}\n"
+                        "Fix: pip install roampal  (needs: onnxruntime, tokenizers, huggingface-hub)"
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Failed to initialize profile '{profile_name}': {e}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to initialize profile '{profile_name}': {e}\n"
+                        "Common fixes:\n"
+                        "  - First run? Ensure you have internet for model download (~420MB)\n"
+                        "  - ChromaDB error? Check disk space and permissions on data directory\n"
+                        "  - Run 'roampal doctor' for diagnostics"
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Failed to initialize profile '{profile_name}': {e}"
+                    )
+
+    return _memory_by_profile[profile_name]
+
+
+async def get_session_manager_for_request(request: Request) -> SessionManager:
+    """Get (or lazily create) the SessionManager for this request's profile."""
+    mem = await get_memory_for_request(request)
+    profile_name = _resolve_profile_name(request)
+    return _session_manager_by_profile.get(profile_name, None)
+
+
+async def get_profile_context(request: Request) -> Tuple[UnifiedMemorySystem, SessionManager]:
+    """Get (memory, session_manager) pair for this request's profile."""
+    mem = await get_memory_for_request(request)
+    profile_name = _resolve_profile_name(request)
+    return mem, _session_manager_by_profile.get(profile_name, None)
 
 
 def create_app() -> FastAPI:
@@ -648,7 +755,7 @@ def create_app() -> FastAPI:
     # ==================== Hook Endpoints ====================
 
     @app.post("/api/hooks/get-context", response_model=GetContextResponse)
-    async def get_context(request: GetContextRequest):
+    async def get_context(request: GetContextRequest, main_req: Request = None):
         """
         Called by UserPromptSubmit hook BEFORE the LLM sees the message.
 
@@ -658,8 +765,7 @@ def create_app() -> FastAPI:
         3. Relevant memories from search
         4. User facts from memory_bank
         """
-        if not _memory or not _session_manager:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
+        _memory, _session_manager = await get_profile_context(main_req)
 
         try:
             # Evict stale cache entries (30-minute TTL)
@@ -693,7 +799,7 @@ def create_app() -> FastAPI:
                     context_parts.append(update_injection)
 
                 # Dump full user profile on first message
-                cold_start_profile = await _build_cold_start_profile()
+                cold_start_profile = await _build_cold_start_profile(_memory)
                 if cold_start_profile:
                     formatted_parts.append(cold_start_profile)
                     context_parts.append(cold_start_profile)
@@ -852,16 +958,20 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/hooks/check-scored")
-    async def check_scored(conversation_id: str = ""):
+    async def check_scored(conversation_id: str = "", request: Request = None):
         """Check if score_memories was already called for this conversation this turn.
         Used by OpenCode plugin to skip sidecar if main LLM already scored."""
+        try:
+            _session_manager = await get_session_manager_for_request(request)
+        except Exception:
+            return {"scored": False}
         if not _session_manager:
             return {"scored": False}
         scored = _session_manager.was_scored_this_turn(conversation_id)
         return {"scored": scored}
 
     @app.post("/api/hooks/stop", response_model=StopHookResponse)
-    async def stop_hook(request: StopHookRequest):
+    async def stop_hook(request: StopHookRequest, main_req: Request = None):
         """
         Called by Stop hook AFTER the LLM responds.
 
@@ -874,8 +984,7 @@ def create_app() -> FastAPI:
 
         Always handles turn lifecycle: checks scoring compliance, marks turn complete.
         """
-        if not _memory or not _session_manager:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
+        _memory, _session_manager = await get_profile_context(main_req)
 
         try:
             conversation_id = request.conversation_id or "default"
@@ -1028,10 +1137,9 @@ def create_app() -> FastAPI:
     # ==================== Memory API Endpoints ====================
 
     @app.post("/api/search")
-    async def search_memory(request: SearchRequest):
+    async def search_memory(request: SearchRequest, main_req: Request = None):
         """Search across memory collections."""
-        if not _memory:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
+        _memory = await get_memory_for_request(main_req)
 
         try:
             # Direct ID lookup — bypass search entirely
@@ -1074,10 +1182,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/memory-bank/add")
-    async def add_to_memory_bank(request: MemoryBankAddRequest):
+    async def add_to_memory_bank(request: MemoryBankAddRequest, main_req: Request = None):
         """Add a fact to memory bank."""
-        if not _memory:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
+        _memory = await get_memory_for_request(main_req)
 
         MAX_MEMORY_CHARS = 2000
         content = request.content
@@ -1104,10 +1211,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/memory-bank/update")
-    async def update_memory_bank(request: MemoryBankUpdateRequest):
+    async def update_memory_bank(request: MemoryBankUpdateRequest, main_req: Request = None):
         """Update a memory bank entry."""
-        if not _memory:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
+        _memory = await get_memory_for_request(main_req)
 
         MAX_MEMORY_CHARS = 2000
         new_content = request.new_content
@@ -1129,10 +1235,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/memory-bank/archive")
-    async def delete_memory_bank(request: Dict[str, str]):
+    async def delete_memory_bank(request: Dict[str, str], main_req: Request = None):
         """Archive a memory bank entry."""
-        if not _memory:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
+        _memory = await get_memory_for_request(main_req)
 
         content = request.get("content", "")
         if not content:
@@ -1147,7 +1252,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/ingest")
-    async def ingest_document(request: Dict[str, Any]):
+    async def ingest_document(request: Dict[str, Any], main_req: Request = None):
         """
         Ingest a document into the books collection.
 
@@ -1160,8 +1265,7 @@ def create_app() -> FastAPI:
             chunk_size: Characters per chunk (default 1000)
             chunk_overlap: Overlap between chunks (default 200)
         """
-        if not _memory:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
+        _memory = await get_memory_for_request(main_req)
 
         content = request.get("content", "")
         title = request.get("title", "Untitled")
@@ -1203,10 +1307,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/books")
-    async def list_books():
+    async def list_books(request: Request = None):
         """List all ingested books."""
-        if not _memory:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
+        _memory = await get_memory_for_request(request)
 
         try:
             books = await _memory.list_books()
@@ -1216,12 +1319,11 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/remove-book")
-    async def remove_book(request: Dict[str, Any]):
+    async def remove_book(request_body: Dict[str, Any], request: Request = None):
         """Remove a book by title."""
-        if not _memory:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
+        _memory = await get_memory_for_request(request)
 
-        title = request.get("title", "")
+        title = request_body.get("title", "")
         if not title:
             raise HTTPException(status_code=400, detail="Title required")
 
@@ -1240,10 +1342,9 @@ def create_app() -> FastAPI:
     # ==================== MCP Tool Proxy Endpoints ====================
 
     @app.post("/api/record-response")
-    async def record_response_endpoint(request: RecordResponseRequest):
+    async def record_response_endpoint(request: RecordResponseRequest, main_req: Request = None):
         """Record a key takeaway in working memory (MCP tool proxy)."""
-        if not _memory:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
+        _memory = await get_memory_for_request(main_req)
 
         MAX_MEMORY_CHARS = 2000
         takeaway = request.key_takeaway
@@ -1273,69 +1374,8 @@ def create_app() -> FastAPI:
             logger.error(f"Error recording response: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
-    # v0.2.3: Deferred background task for Action KG updates
-    async def _deferred_action_kg_updates(
-        doc_ids: List[str], outcome: str, cached_query: str
-    ):
-        """
-        Background task for heavy Action KG and routing updates.
-
-        v0.2.3: Extracted from record_outcome endpoint for performance.
-        """
-        try:
-            # Detect context type
-            context_type = await _memory.detect_context_type() or "general"
-            collections_updated = set()
-
-            # v0.4.4: Build actions and record concurrently
-            action_tasks = []
-            for doc_id in doc_ids:
-                # Extract collection from doc_id prefix
-                collection = None
-                for coll_name in [
-                    "memory_bank",
-                    "books",
-                    "working",
-                    "history",
-                    "patterns",
-                ]:
-                    if doc_id.startswith(coll_name + "_"):
-                        collection = coll_name
-                        break
-
-                action = ActionOutcome(
-                    action_type="score_memories",
-                    context_type=context_type,
-                    outcome=outcome,
-                    doc_id=doc_id,
-                    collection=collection,
-                )
-                action_tasks.append(_memory.record_action_outcome(action))
-
-                if collection:
-                    collections_updated.add(collection)
-
-            if action_tasks:
-                await asyncio.gather(*action_tasks)
-
-            # Update Routing KG concurrently
-            if cached_query and collections_updated:
-                await asyncio.gather(
-                    *(
-                        _memory._update_kg_routing(cached_query, collection, outcome)
-                        for collection in collections_updated
-                    )
-                )
-
-            logger.info(
-                f"[Background] Action KG updates completed for {len(doc_ids)} docs"
-            )
-
-        except Exception as e:
-            logger.error(f"[Background] Action KG update error: {e}")
-
     @app.post("/api/record-outcome")
-    async def record_outcome(request: RecordOutcomeRequest):
+    async def record_outcome(request: RecordOutcomeRequest, main_req: Request = None):
         """
         Record outcome for learning.
 
@@ -1344,8 +1384,8 @@ def create_app() -> FastAPI:
         1. Most recent unscored exchange (across ALL sessions - handles MCP/hook ID mismatch)
         2. Cached search results (from _search_cache)
         """
-        if not _memory or not _session_manager:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
+        _memory = await get_memory_for_request(main_req)
+        _session_manager = await get_session_manager_for_request(main_req)
 
         try:
             conversation_id = request.conversation_id or "default"
@@ -1511,18 +1551,26 @@ def create_app() -> FastAPI:
             # OpenCode: replace the full exchange stored by stop hook with summary
             # v0.5.3: Extract tags from content when plugin doesn't provide noun_tags
             summary_stored = False
+            # v0.5.4: Initialize before the summary block so the facts loop
+            # below always has a defined value to read. Without this, requests
+            # carrying facts but no exchange_summary hit a NameError on
+            # `effective_summary_tags` and every fact fails to store.
+            effective_summary_tags = request.noun_tags or None
             if request.exchange_summary and _memory:
                 try:
-                    # v0.5.3: Extract tags from summary if not provided by plugin
+                    # v0.5.4: Route tag extraction through TagService (Desktop-aligned)
+                    # instead of calling sidecar_extract_tags directly. Extract once at
+                    # exchange level (preserves Qwen's 1-call/request perf) and reuse the
+                    # result for both summary storage and the facts loop below.
                     extracted_tags = None
-                    if not request.noun_tags:
+                    if not request.noun_tags and hasattr(_memory, "_tag_service") and _memory._tag_service:
                         try:
-                            from roampal.sidecar_service import extract_tags as sidecar_extract_tags
-
-                            extracted_tags = sidecar_extract_tags(request.exchange_summary)
+                            extracted_tags = await _memory._tag_service.extract_tags_async(
+                                request.exchange_summary
+                            )
                             if extracted_tags:
                                 logger.info(
-                                    f"Extracted {len(extracted_tags)} tags from exchange summary via sidecar"
+                                    f"Extracted {len(extracted_tags)} tags from exchange summary via TagService"
                                 )
                         except Exception as tag_err:
                             logger.warning(f"Failed to extract tags from summary (non-fatal): {tag_err}")
@@ -1586,24 +1634,21 @@ def create_app() -> FastAPI:
 
             # v0.4.5: Store atomic facts as separate working memories
             # v0.4.8: Restore noun_tags on facts — benchmark proves tagged facts
-            # improve TagCascade retrieval. Pass exchange-level tags; store_working's
-            # LLM-only extraction provides per-fact tags if no sidecar configured.
-            # v0.5.3: Extract per-fact tags when plugin doesn't provide noun_tags
+            # improve TagCascade retrieval.
+            # v0.5.4: Reuse exchange-level effective_summary_tags for every fact
+            # (1 sidecar call total per request, Qwen's perf rework). When neither the
+            # plugin nor exchange-level extraction produced tags, store_working's
+            # auto-extract via TagService kicks in as the last fallback.
             if request.facts and _memory:
                 for fact_text in request.facts:
                     if not fact_text or len(fact_text.strip()) < 10:
                         continue
                     try:
-                        # v0.5.3: Extract per-fact tags when no exchange-level tags provided
-                        fact_tags = None
-                        if not request.noun_tags:
-                            try:
-                                from roampal.sidecar_service import extract_tags as sidecar_extract_tags
-
-                                fact_tags = sidecar_extract_tags(fact_text)
-                            except Exception:
-                                pass  # silently skip tag extraction per-fact
-
+                        fact_tags = (
+                            list(effective_summary_tags)
+                            if effective_summary_tags
+                            else None
+                        )
                         await _memory.store_working(
                             content=fact_text,
                             conversation_id=conversation_id,
@@ -1625,15 +1670,8 @@ def create_app() -> FastAPI:
                 logger.info(f"Scored {len(doc_ids_scored)} documents")
 
                 # ========== FAST PATH COMPLETE (v0.2.3) ==========
-                # Score recorded. Defer heavy Action KG and routing updates to background.
-                cached_query = cached.get("query", "")
-                asyncio.create_task(
-                    _deferred_action_kg_updates(
-                        doc_ids=doc_ids_scored,
-                        outcome=request.outcome,
-                        cached_query=cached_query,
-                    )
-                )
+                # Score recorded. v0.4.5: Action KG and routing updates removed
+                # (deferred-task path was dead — methods deleted in v0.4.5).
 
             # Clear search cache for the key we used
             if cache_key_used in _search_cache:
@@ -1659,14 +1697,13 @@ def create_app() -> FastAPI:
     # ==================== Content Update (v0.3.6 Summarization) ====================
 
     @app.post("/api/memory/update-content")
-    async def update_memory_content(request: UpdateContentRequest):
+    async def update_memory_content(request: UpdateContentRequest, main_req: Request = None):
         """
         Update a memory's content and re-embed it.
 
         v0.3.6: Used by `roampal summarize` to replace long memories with summaries.
         """
-        if not _memory:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
+        _memory = await get_memory_for_request(main_req)
 
         try:
             collection = request.collection
@@ -1748,15 +1785,14 @@ def create_app() -> FastAPI:
         )
 
     @app.post("/api/retag", response_model=RetagResponse)
-    async def retag_memories(request: RetagRequest):
+    async def retag_memories(request: RetagRequest, main_req: Request = None):
         """
         Re-extract tags on existing memories using the sidecar LLM.
 
         Reads memories, extracts fresh tags, replaces existing ones.
         Use for ongoing cleanup or to improve tag quality over time.
         """
-        if not _memory:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
+        _memory = await get_memory_for_request(main_req)
 
         # v0.4.9: Validate collection name against whitelist
         if request.collection not in VALID_RETAG_COLLECTIONS:
@@ -1918,16 +1954,20 @@ def create_app() -> FastAPI:
 
         v0.3.0: Actually tests embedding functionality to catch PyTorch state corruption.
         Returns 503 if embeddings are broken, allowing auto-restart.
+        v0.5.4: Checks any initialized profile (singleton removed).
         """
         embedding_ok = False
         embedding_error = None
 
-        if _memory and _memory.initialized and _memory._embedding_service:
-            try:
-                test_vector = await _memory._embedding_service.embed_text("health check")
-                embedding_ok = len(test_vector) > 0
-            except Exception as e:
-                embedding_error = str(e)
+        for mem in _memory_by_profile.values():
+            if mem.initialized and mem._embedding_service:
+                try:
+                    test_vector = await mem._embedding_service.embed_text("health check")
+                    if len(test_vector) > 0:
+                        embedding_ok = True
+                    break
+                except Exception as e:
+                    embedding_error = str(e)
 
         if not embedding_ok:
             raise HTTPException(
@@ -1937,17 +1977,17 @@ def create_app() -> FastAPI:
 
         return {
             "status": "healthy",
-            "memory_initialized": _memory is not None and _memory.initialized,
-            "session_manager_ready": _session_manager is not None,
+            "memory_initialized": len(_memory_by_profile) > 0,
+            "session_manager_ready": len(_session_manager_by_profile) > 0,
+            "profiles_loaded": len(_memory_by_profile),
             "embedding_ok": embedding_ok,
             "timestamp": datetime.now().isoformat(),
         }
 
     @app.get("/api/stats")
-    async def get_stats():
+    async def get_stats(request: Request = None):
         """Get memory system statistics."""
-        if not _memory:
-            raise HTTPException(status_code=503, detail="Memory system not ready")
+        _memory = await get_memory_for_request(request)
 
         return _memory.get_stats()
 

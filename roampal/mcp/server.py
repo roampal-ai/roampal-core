@@ -158,6 +158,10 @@ _dev_mode = False
 # v0.3.6: Platform detection — OpenCode sets ROAMPAL_PLATFORM=opencode via MCP env
 _is_opencode = os.environ.get("ROAMPAL_PLATFORM", "").lower() == "opencode"
 
+# v0.5.4: Cache resolved profile name for X-Roampal-Profile header on all HTTP calls.
+_MCP_PROFILE_UNRESOLVED = object()
+_mcp_profile_name: Any = _MCP_PROFILE_UNRESOLVED
+
 # v0.4.1: Hide score_memories tool when OpenCode sidecar is active.
 # The sidecar handles scoring silently. If score_memories is visible, the model
 # reads the tool description and calls it unprompted — causing double-scoring.
@@ -221,6 +225,18 @@ def _get_update_notice() -> str:
     if update_available:
         return f"\n⚠️ **Update available:** roampal {latest} (you have {current})\n   Run: `pip install --upgrade roampal && roampal init --force`\n"
     return ""
+
+
+def _get_mcp_profile_name() -> Optional[str]:
+    """v0.5.4: Resolve the profile name for X-Roampal-Profile header."""
+    global _mcp_profile_name
+    if _mcp_profile_name is not _MCP_PROFILE_UNRESOLVED:
+        return _mcp_profile_name
+
+    from roampal.profile_manager import active_profile_name, DEFAULT_PROFILE
+    resolved = active_profile_name()
+    _mcp_profile_name = None if resolved == DEFAULT_PROFILE else resolved
+    return _mcp_profile_name
 
 
 def _is_port_in_use(port: int) -> bool:
@@ -398,15 +414,21 @@ async def _api_call(method: str, path: str, payload: dict = None, timeout: float
 
     All MCP tool calls go through this helper. Single-writer pattern:
     FastAPI owns ChromaDB, MCP is just an HTTP client.
+
+    v0.5.4: Attaches X-Roampal-Profile header so FastAPI resolves the correct profile.
     """
     import httpx
     port = _get_port()
     url = f"http://127.0.0.1:{port}{path}"
+    headers = {}
+    profile = _get_mcp_profile_name()
+    if profile:
+        headers["X-Roampal-Profile"] = profile
     async with httpx.AsyncClient() as client:
         if method == "GET":
-            response = await client.get(url, timeout=timeout)
+            response = await client.get(url, timeout=timeout, headers=headers)
         else:
-            response = await client.post(url, json=payload or {}, timeout=timeout)
+            response = await client.post(url, json=payload or {}, timeout=timeout, headers=headers)
         response.raise_for_status()
         return response.json()
 

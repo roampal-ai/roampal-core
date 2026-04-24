@@ -75,17 +75,25 @@ def mock_session_manager():
 
 @pytest.fixture
 def client(mock_memory, mock_session_manager):
-    """Create a FastAPI TestClient with mocked backends."""
+    """Create a FastAPI TestClient with mocked backends.
+
+    v0.5.4: Pre-populates the per-profile registry with the mocks under the
+    'default' key. Requests without an X-Roampal-Profile header resolve to
+    'default' via _resolve_profile_name(), so handlers see our mocks instead
+    of triggering lazy initialization of a real UnifiedMemorySystem.
+    """
     from httpx import AsyncClient, ASGITransport
     from roampal.server import main
 
-    # Patch globals before creating app
-    original_memory = main._memory
-    original_sm = main._session_manager
-    main._memory = mock_memory
-    main._session_manager = mock_session_manager
+    # Snapshot existing dicts so we can restore after the test
+    original_memory_by_profile = dict(main._memory_by_profile)
+    original_sm_by_profile = dict(main._session_manager_by_profile)
 
-    # Create app without lifespan (we already set globals)
+    # Pre-populate the registry with mocks under 'default' so lazy init is bypassed
+    main._memory_by_profile["default"] = mock_memory
+    main._session_manager_by_profile["default"] = mock_session_manager
+
+    # Create app without lifespan (we already populated the registry)
     app = main.create_app()
 
     # Override lifespan to avoid real initialization
@@ -96,8 +104,10 @@ def client(mock_memory, mock_session_manager):
     yield app, mock_memory, mock_session_manager
 
     # Restore
-    main._memory = original_memory
-    main._session_manager = original_sm
+    main._memory_by_profile.clear()
+    main._memory_by_profile.update(original_memory_by_profile)
+    main._session_manager_by_profile.clear()
+    main._session_manager_by_profile.update(original_sm_by_profile)
 
 
 @pytest.fixture
@@ -134,17 +144,23 @@ class TestHealthEndpoint:
 
     @pytest.mark.asyncio
     async def test_health_returns_503_when_not_initialized(self, async_client):
-        """Health check returns 503 when memory not initialized."""
+        """Health check returns 503 when no profiles are loaded.
+
+        v0.5.4: The singleton _memory was replaced by _memory_by_profile dict.
+        The health endpoint iterates the dict; an empty dict means embedding
+        check never runs and we 503.
+        """
         from roampal.server import main
         ac, _, _ = async_client
 
-        original = main._memory
-        main._memory = None
+        snapshot = dict(main._memory_by_profile)
+        main._memory_by_profile.clear()
         try:
             response = await ac.get("/api/health")
             assert response.status_code == 503
         finally:
-            main._memory = original
+            main._memory_by_profile.clear()
+            main._memory_by_profile.update(snapshot)
 
 
 # ============================================================================
@@ -240,20 +256,25 @@ class TestGetContextEndpoint:
 
     @pytest.mark.asyncio
     async def test_503_when_memory_not_ready(self, async_client):
-        """Returns 503 when memory system not initialized."""
+        """Returns 503 when memory init fails for the requested profile.
+
+        v0.5.4: With the per-profile registry, "not ready" means
+        get_memory_for_request raises HTTPException(503) (per Bug 2 fix).
+        Patch the helper to simulate the failure path.
+        """
+        from fastapi import HTTPException
         from roampal.server import main
         ac, _, _ = async_client
 
-        original = main._memory
-        main._memory = None
-        try:
+        async def fail(_request):
+            raise HTTPException(status_code=503, detail="memory init failed")
+
+        with patch.object(main, "get_memory_for_request", side_effect=fail):
             response = await ac.post("/api/hooks/get-context", json={
                 "query": "test",
                 "conversation_id": "test"
             })
             assert response.status_code == 503
-        finally:
-            main._memory = original
 
 
 # ============================================================================
@@ -829,21 +850,25 @@ class TestCheckScoredEndpoint:
 
     @pytest.mark.asyncio
     async def test_returns_false_when_session_manager_none(self, async_client):
-        """Graceful fallback when session manager not initialized."""
+        """Graceful fallback when session manager init fails.
+
+        v0.5.4: check-scored handler catches any exception from
+        get_session_manager_for_request and returns scored=False rather than
+        500ing. Patch the helper to raise so we exercise the except branch.
+        """
         from roampal.server import main
         ac, _, _ = async_client
 
-        original = main._session_manager
-        main._session_manager = None
-        try:
+        async def fail(_request):
+            raise RuntimeError("session manager init failed")
+
+        with patch.object(main, "get_session_manager_for_request", side_effect=fail):
             response = await ac.get("/api/hooks/check-scored", params={
                 "conversation_id": "no_sm"
             })
             assert response.status_code == 200
             data = response.json()
             assert data["scored"] is False
-        finally:
-            main._session_manager = original
 
     @pytest.mark.asyncio
     async def test_empty_conversation_id(self, async_client):
