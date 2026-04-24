@@ -1,9 +1,9 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "maintainers": ["roampal-ai"],
-  "version": "0.5.3.1",
-  "pinned_commit": "4d63a10",
+  "version": "0.5.4",
+  "pinned_commit": "5e1e80a",
   "description": "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)",
   "keywords": ["memory", "mcp", "claude-code", "opencode", "ai", "persistent-memory"],
-  "release_notes": "v0.5.3.1: Hotfix for the OpenCode plugin's JSON extraction logic — facts and summary lanes were silently failing on responses from thinking/reasoning models (greedy regex swallowing markdown code fences, non-greedy regex stopping at the first } inside nested memory_scores objects). Both lanes refactored onto a shared extractJson() helper that handles fences, nested objects, and embedded brace characters in one place. Bumped scoring max_tokens 2000 → 4000 and facts max_tokens 1000 → 2000 to give verbose reasoning models headroom. Verified end-to-end with a thinking sidecar model on LM Studio: multiple consecutive SUCCESS + SUMMARY stored + FACTS extracted with per-memory scoring, zero JSON Parse errors. Recommendation: prefer non-thinking sidecar models — thinking models can occasionally truncate output mid-reason. Also bundles a separate test-only commit consolidating Linux + Python 3.10 CI isolation fixes."
+  "release_notes": "v0.5.4: Profile binding is now per-request instead of per-process. FastAPI no longer binds a single profile at startup - it holds a per-profile registry and resolves the active profile on every request via an X-Roampal-Profile header sent by each client (MCP server, OpenCode plugin, Claude Code / Cursor hooks). Fixes issue #7 where OpenCode Desktop's per-project ROAMPAL_PROFILE in opencode.json was ignored. Also ships: sidecar config hydration from opencode.json at FastAPI startup, TagService unification with Desktop (async extract + client lock to prevent local-model GPU OOM), 1 sidecar call per /api/summarize request (down from 3-4), facts extraction retry loop in the OpenCode plugin, and eight audit-driven bug fixes. Test suite: 603 passing, 3 pre-existing skips, 0 failed. Live-validated across OpenCode CLI, OpenCode with per-project opencode.json, and Claude Code hooks."
 }
