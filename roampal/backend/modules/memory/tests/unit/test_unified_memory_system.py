@@ -1294,5 +1294,68 @@ class TestV053MemoryBankDedup:
         assert results is not None
 
 
+class TestDedupFilter:
+    """v0.5.5: memory_bank dedup filter excludes archived entries."""
+
+    def test_memory_bank_dedup_filter_has_status_check(self, tmp_path):
+        """FACT_DEDUP_FILTERS['memory_bank'] must exclude archived entries."""
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        assert ums.FACT_DEDUP_FILTERS["memory_bank"] == {"status": {"$ne": "archived"}}
+
+    def test_other_tiers_filter_by_memory_type(self, tmp_path):
+        """Other tiers should still filter by memory_type=fact."""
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        for tier in ("working", "history", "patterns"):
+            assert ums.FACT_DEDUP_FILTERS[tier] == {"memory_type": "fact"}
+
+
+class TestStartupPhantomMigration:
+    """v0.5.5: _startup_cleanup removes phantom IDs from memory_bank."""
+
+    @pytest.mark.asyncio
+    async def test_phantom_migration_removes_dead_ids(self, tmp_path):
+        """IDs in list_all_ids but not get_fragment should be removed."""
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        mock_coll = MagicMock()
+        mock_coll.list_all_ids = MagicMock(return_value=[
+            "memory_bank_real1",
+            "memory_bank_phantom1",
+            "memory_bank_phantom2"
+        ])
+        mock_coll.get_fragment = MagicMock(side_effect=[
+            {"content": "real", "metadata": {"status": "active"}},  # real1
+            None,  # phantom1 — get_fragment returns None
+            None,  # phantom2 — get_fragment returns None
+        ])
+        mock_coll.delete_vectors = MagicMock()
+
+        ums._memory_bank_service.collection = mock_coll
+
+        await ums._startup_cleanup()
+
+        mock_coll.delete_vectors.assert_called_once_with(["memory_bank_phantom1", "memory_bank_phantom2"])
+
+    @pytest.mark.asyncio
+    async def test_phantom_migration_no_op_when_clean(self, tmp_path):
+        """No delete call when all IDs have valid fragments."""
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        mock_coll = MagicMock()
+        mock_coll.list_all_ids = MagicMock(return_value=["memory_bank_real1"])
+        mock_coll.get_fragment = MagicMock(return_value={
+            "content": "real", "metadata": {"status": "active"}
+        })
+        mock_coll.delete_vectors = MagicMock()
+
+        ums._memory_bank_service.collection = mock_coll
+
+        await ums._startup_cleanup()
+
+        mock_coll.delete_vectors.assert_not_called()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

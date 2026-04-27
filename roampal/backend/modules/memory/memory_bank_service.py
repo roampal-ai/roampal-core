@@ -175,7 +175,13 @@ class MemoryBankService:
         reason: str = "llm_decision"
     ) -> bool:
         """
-        Archive memory by content (semantic match).
+        Soft-delete memory by setting status=archived in metadata.
+
+        v0.5.5: Replaced ChromaDB hard delete with soft delete. HNSW index doesn't
+        support true deletion — collection.delete() marks entries as deleted but they
+        remain queryable in the vector graph, causing phantom matches during dedup.
+        Soft delete is reliable, reversible, and consistent with how working/history/
+        patterns collections handle archived memories.
 
         Args:
             content: Content to find and archive (semantic match)
@@ -192,28 +198,45 @@ class MemoryBankService:
                 limit=5
             )
 
-            # Find best match - look for exact or close content match
+            # Find best match - look for exact or close content match among ACTIVE entries only
             doc_id = None
             for r in results:
-                r_content = r.get("content") or r.get("metadata", {}).get("content", "")
-                # Check if content matches (exact or substring)
+                meta = r.get("metadata", {})
+                # v0.5.5: Skip already-archived entries when searching for target
+                if meta.get("status") == "archived":
+                    continue
+                r_content = r.get("content") or meta.get("content", "")
                 if content in r_content or r_content in content:
                     doc_id = r.get("id")
                     break
 
             if not doc_id and results:
-                # Fall back to top result if no exact match
-                doc_id = results[0].get("id")
+                # Fall back to top active result
+                for r in results:
+                    if r.get("metadata", {}).get("status") != "archived":
+                        doc_id = r.get("id")
+                        break
         else:
-            # No search function - try content as doc_id (backwards compat)
             doc_id = content
 
         if not doc_id:
             logger.warning(f"Could not find memory to archive: {content[:50]}...")
             return False
 
-        # Actually delete the memory (not soft archive)
-        return await self.delete(doc_id)
+        # v0.5.5: Soft delete — update metadata instead of ChromaDB hard delete
+        doc = self.collection.get_fragment(doc_id)
+        if not doc:
+            logger.warning(f"Memory {doc_id} not found for archiving")
+            return False
+
+        metadata = doc.get("metadata", {})
+        metadata["status"] = "archived"
+        metadata["archived_at"] = datetime.now().isoformat()
+        metadata["archive_reason"] = reason
+
+        self.collection.update_fragment_metadata(doc_id, metadata)
+        logger.info(f"Soft-deleted memory_bank item {doc_id}: {reason}")
+        return True
 
     async def search(
         self,
@@ -445,11 +468,19 @@ class MemoryBankService:
         return True
 
     def _get_count(self) -> int:
-        """Get current item count."""
+        """Get current active item count (excludes archived entries)."""
+        # v0.5.5: collection.count() includes ALL documents including archived ones,
+        # which inflates the capacity check and blocks new writes after deletion.
+        # Batch-fetch all metadatas in one call, then filter in Python.
         try:
-            return self.collection.collection.count()
+            result = self.collection.collection.get(include=["metadatas"])
+            metadatas = result.get("metadatas", [])
+            return sum(
+                1 for m in metadatas
+                if m and m.get("status", "active") != "archived"
+            )
         except Exception as e:
-            logger.warning(f"Could not get memory_bank count: {e}")
+            logger.warning(f"Could not get memory_bank active count: {e}")
             return 0
 
     def get_always_inject(self) -> List[Dict[str, Any]]:

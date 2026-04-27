@@ -47,8 +47,10 @@ class TestStore:
     @pytest.fixture
     def mock_collection(self):
         coll = MagicMock()
-        coll.collection = MagicMock()
-        coll.collection.count = MagicMock(return_value=10)
+        coll.collection.get = MagicMock(return_value={
+            "ids": ["memory_bank_1"],
+            "metadatas": [{"status": "active"}]
+        })
         coll.upsert_vectors = AsyncMock()
         return coll
 
@@ -97,7 +99,10 @@ class TestStore:
     @pytest.mark.asyncio
     async def test_store_capacity_check(self, service, mock_collection):
         """Should reject when at capacity."""
-        mock_collection.collection.count = MagicMock(return_value=500)
+        mock_collection.collection.get = MagicMock(return_value={
+            "ids": [f"memory_bank_{i}" for i in range(500)],
+            "metadatas": [{"status": "active"}] * 500
+        })
 
         with pytest.raises(ValueError, match="capacity"):
             await service.store("Test", ["test"])
@@ -118,9 +123,11 @@ class TestUpdate:
                 "confidence": 0.7
             }
         })
+        coll.collection.get = MagicMock(return_value={
+            "ids": ["memory_bank_1"],
+            "metadatas": [{"status": "active"}]
+        })
         coll.upsert_vectors = AsyncMock()
-        coll.collection = MagicMock()
-        coll.collection.count = MagicMock(return_value=10)
         return coll
 
     @pytest.fixture
@@ -188,7 +195,7 @@ class TestArchive:
             "content": "test",
             "metadata": {"status": "active"}
         })
-        coll.delete_vectors = MagicMock()
+        coll.update_fragment_metadata = MagicMock()
         return coll
 
     @pytest.fixture
@@ -207,20 +214,56 @@ class TestArchive:
         )
 
     @pytest.mark.asyncio
-    async def test_archive_success(self, service, mock_collection):
-        """Should delete memory successfully (archive = hard delete)."""
+    async def test_archive_soft_delete(self, service, mock_collection):
+        """v0.5.5: Should soft-delete by setting status=archived (not hard delete)."""
         result = await service.archive(
             content="test content to archive",
             reason="outdated"
         )
 
         assert result is True
-        mock_collection.delete_vectors.assert_called_once_with(["memory_bank_test123"])
+        # v0.5.5: archive() no longer calls delete_vectors — it updates metadata
+        mock_collection.update_fragment_metadata.assert_called_once()
+        call_args = mock_collection.update_fragment_metadata.call_args
+        doc_id = call_args[0][0]
+        metadata = call_args[0][1]
+
+        assert doc_id == "memory_bank_test123"
+        assert metadata["status"] == "archived"
+        assert metadata["archive_reason"] == "outdated"
+        assert "archived_at" in metadata
+
+    @pytest.mark.asyncio
+    async def test_archive_skips_already_archived(self, mock_collection):
+        """v0.5.5: Should skip already-archived entries when searching for target."""
+        coll = MagicMock()
+        coll.get_fragment = MagicMock(return_value={
+            "content": "test",
+            "metadata": {"status": "active"}
+        })
+        coll.update_fragment_metadata = MagicMock()
+
+        async def search_returns_archived(query, collections, limit=5):
+            return [
+                {"id": "memory_bank_old1", "content": query, "metadata": {"status": "archived"}},
+                {"id": "memory_bank_active1", "content": query, "metadata": {"status": "active"}}
+            ]
+
+        service = MemoryBankService(
+            collection=coll,
+            embed_fn=AsyncMock(),
+            search_fn=search_returns_archived
+        )
+
+        result = await service.archive("test content to archive", reason="outdated")
+        assert result is True
+        call_args = coll.update_fragment_metadata.call_args
+        # Should pick the active one, not the archived one
+        assert call_args[0][0] == "memory_bank_active1"
 
     @pytest.mark.asyncio
     async def test_archive_not_found(self, mock_collection):
         """Should return False if not found."""
-        # Service with search that returns no results
         async def empty_search(query, collections, limit=5):
             return []
         service = MemoryBankService(
@@ -508,6 +551,65 @@ class TestIncrementMention:
 
         result = service.increment_mention("nonexistent")
         assert result is False
+
+
+class TestGetCount:
+    """Test capacity count excludes archived entries (v0.5.5)."""
+
+    @pytest.fixture
+    def mock_collection(self):
+        coll = MagicMock()
+        coll.collection.get = MagicMock(return_value={
+            "ids": ["memory_bank_1", "memory_bank_2", "memory_bank_3"],
+            "metadatas": [
+                {"status": "active"},
+                {"status": "archived"},
+                {"status": "active"}
+            ]
+        })
+        return coll
+
+    @pytest.fixture
+    def service(self, mock_collection):
+        return MemoryBankService(
+            collection=mock_collection,
+            embed_fn=AsyncMock()
+        )
+
+    def test_get_count_excludes_archived(self, service):
+        """v0.5.5: Should only count active entries."""
+        count = service._get_count()
+        assert count == 2
+
+    def test_get_count_all_active(self, mock_collection):
+        """Should return correct count when all are active."""
+        mock_collection.collection.get = MagicMock(return_value={
+            "ids": ["m1", "m2"],
+            "metadatas": [
+                {"status": "active"},
+                {"status": "active"}
+            ]
+        })
+        service = MemoryBankService(
+            collection=mock_collection,
+            embed_fn=AsyncMock()
+        )
+        assert service._get_count() == 2
+
+    def test_get_count_all_archived(self, mock_collection):
+        """Should return 0 when all entries are archived."""
+        mock_collection.collection.get = MagicMock(return_value={
+            "ids": ["m1", "m2"],
+            "metadatas": [
+                {"status": "archived"},
+                {"status": "archived"}
+            ]
+        })
+        service = MemoryBankService(
+            collection=mock_collection,
+            embed_fn=AsyncMock()
+        )
+        assert service._get_count() == 0
 
 
 if __name__ == "__main__":

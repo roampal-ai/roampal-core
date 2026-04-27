@@ -579,8 +579,15 @@ async function scoreExchangeViaLLM(
     // Per-memory scoring uses relevance heuristic — sidecar can judge topic relevance
     // but not actual usage, so irrelevant memories get "unknown" instead of inheriting
     // unearned exchange outcomes. Conservative: defaults to "unknown" when unsure.
+    // v0.5.5: Wrap memories in delimiters with explicit "do not summarize" hint.
+    // Small scoring models (qwen3:1.7b et al.) treat undelimited memory blocks as
+    // content to summarize, producing summaries that lift verbatim text from prior
+    // memories. Once those contaminated summaries land back in the memory bank,
+    // they get re-injected next turn, creating a self-reinforcing pollution loop.
+    // Delimiters + an explicit instruction keep the model's summary scope tight
+    // to the exchange itself.
     const memorySection = memories?.length
-      ? `\nThese memories were injected into your context for this exchange:\n${memories.map(m => `- ${m.id}: "${m.content}"`).join("\n")}\n`
+      ? `\n<memories_to_score>\nThese are stored memories — score them below. DO NOT summarize, quote, or reference their content in the "summary" field.\n${memories.map(m => `- ${m.id}: "${m.content}"`).join("\n")}\n</memories_to_score>\n`
       : ""
 
     const memoryScoreSection = memories?.length
@@ -605,24 +612,20 @@ MEMORY SCORES: For each memory, judge based on topic relevance and exchange outc
     // Matches benchmark sidecar_score(). Tags and facts extracted separately.
     // v0.5.1: Cap exchange fields at 8K chars to match extract_facts; safety net
     // against a massive exchange blowing the scoring model's context window.
-    const scoringPrompt = `The user said:
-"${exchange.user.slice(0, 8000)}"
-
-You responded:
-"${exchange.assistant.slice(0, 8000)}"
-
-The user then followed up with:
-"${currentUserMessage.slice(0, 8000)}"
+    const scoringPrompt = `<exchange_to_summarize>
+USER: "${exchange.user.slice(0, 8000)}"
+ASSISTANT: "${exchange.assistant.slice(0, 8000)}"
+USER_FOLLOW_UP: "${currentUserMessage.slice(0, 8000)}"
+</exchange_to_summarize>
 ${memorySection}
 Respond with ONLY a JSON object:
-{ "summary": "<~2000 chars>", "outcome": "<worked|failed|partial|unknown>"${memoryScoreSection} }
+{ "summary": "<~300 chars>", "outcome": "<worked|failed|partial|unknown>"${memoryScoreSection} }
 
-SUMMARY (under 2000 chars): Capture what happened AND what changed. Summaries provide context and continuity — the story behind the facts.
+SUMMARY (under 300 chars): Capture what happened AND what changed. Summaries provide context and continuity — the story behind the facts.
 - Include names, topics, and the flow of the conversation
 - Note corrections, decisions, and new information alongside the context
 - Help future retrieval understand WHY something matters, not just WHAT
 BAD: "User and assistant had a conversation" (empty, no content)
-BAD: "Temperature is 350F" (that's a fact, not a summary)
 GOOD: "User corrected the baking temp from 375F to 350F while adapting the recipe for a convection oven — first attempt burned the edges"
 GOOD: "Discussed switching API from REST to GraphQL after mobile team reported nested query issues with the current setup"
 GOOD: "User shared that their daughter Emma starts kindergarten in September, worried about the bus route — asked for tips on easing the transition"

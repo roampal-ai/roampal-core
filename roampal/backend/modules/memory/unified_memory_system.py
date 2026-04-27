@@ -375,12 +375,15 @@ class UnifiedMemorySystem:
         # Per-tier filter. working/history/patterns hold mixed memory types
         # (exchanges, summaries, facts) so scan only facts. memory_bank is
         # fact-shaped by construction and doesn't tag rows with memory_type,
-        # so scan unfiltered.
+        # so scan unfiltered — EXCEPT for archived status.
         self.FACT_DEDUP_FILTERS = {
             "working": {"memory_type": "fact"},
             "history": {"memory_type": "fact"},
             "patterns": {"memory_type": "fact"},
-            "memory_bank": None,
+            # v0.5.5: CRITICAL FIX — filter out archived entries during dedup.
+            # Without this, _find_duplicate_fact() matches against soft-deleted memories
+            # and silently blocks new fact storage. Root cause of issue #8.
+            "memory_bank": {"status": {"$ne": "archived"}},  # was None
         }
 
         # v0.4.5: KG removed. Tag service handles routing now.
@@ -675,6 +678,25 @@ class UnifiedMemorySystem:
         if deleted_count > 0:
             logger.info(f"Startup cleanup: {deleted_count} garbage deleted")
 
+        # v0.5.5: memory_bank phantom migration — remove IDs from pre-fix hard deletes.
+        # ChromaDB's collection.delete() marks entries as deleted but leaves the ID in
+        # list_all_ids(). get_fragment() returns None for these phantoms because both
+        # document and metadata are gone. They're already broken (no content, no vector),
+        # so it's safe to remove them from the index permanently.
+        if self._memory_bank_service:
+            try:
+                all_ids = self._memory_bank_service.collection.list_all_ids()
+                phantom_ids = []
+                for doc_id in all_ids:
+                    if not self._memory_bank_service.collection.get_fragment(doc_id):
+                        phantom_ids.append(doc_id)
+
+                if phantom_ids:
+                    self._memory_bank_service.collection.delete_vectors(phantom_ids)
+                    logger.info(f"v0.5.5 migration: removed {len(phantom_ids)} phantom entries from memory_bank")
+            except Exception as e:
+                logger.warning(f"Startup cleanup error for memory_bank phantoms: {e}")
+
         # v0.4.4: Run both cleanup tasks concurrently
         await asyncio.gather(
             self._promotion_service.cleanup_old_working_memory(max_age_hours=24.0),
@@ -690,6 +712,7 @@ class UnifiedMemorySystem:
         collections: Optional[List[CollectionName]] = None,
         metadata_filters: Optional[Dict[str, Any]] = None,
         sort_by: Optional[str] = None,
+        include_archived: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Search memory with optional collection filtering.
@@ -725,6 +748,13 @@ class UnifiedMemorySystem:
                 all_results = [
                     r for r in all_results if r.get("id", "") not in self.ghost_ids
                 ]
+
+                # v0.5.5: Filter archived memory_bank entries unless include_archived
+                if not include_archived:
+                    all_results = [
+                        r for r in all_results
+                        if r.get("metadata", {}).get("status") != "archived"
+                    ]
 
                 # Add legacy field aliases for Desktop compatibility
                 for r in all_results:
@@ -780,6 +810,10 @@ class UnifiedMemorySystem:
                 for r in results:
                     doc_id = r.get("id", "")
                     if doc_id in self.ghost_ids:
+                        continue
+
+                    # v0.5.5: Skip archived entries unless include_archived
+                    if not include_archived and r.get("metadata", {}).get("status") == "archived":
                         continue
 
                     r["collection"] = coll_name

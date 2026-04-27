@@ -480,6 +480,7 @@ class SearchRequest(BaseModel):
     limit: int = Field(10, ge=1, le=500)
     metadata_filters: Optional[Dict[str, Any]] = None
     sort_by: Optional[str] = Field(None, pattern="^(relevance|recency|score)$")
+    include_archived: bool = False  # v0.5.5: include archived memory_bank entries
 
 
 class MemoryBankAddRequest(BaseModel):
@@ -1164,6 +1165,7 @@ def create_app() -> FastAPI:
                 limit=request.limit,
                 metadata_filters=metadata_filters if metadata_filters else None,
                 sort_by=request.sort_by,
+                include_archived=request.include_archived,
             )
 
             # Cache doc_ids for outcome scoring
