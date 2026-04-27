@@ -1,9 +1,9 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "maintainers": ["roampal-ai"],
-  "version": "0.5.4",
-  "pinned_commit": "5e1e80a",
+  "version": "0.5.5",
+  "pinned_commit": "6bac65e",
   "description": "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)",
   "keywords": ["memory", "mcp", "claude-code", "opencode", "ai", "persistent-memory"],
-  "release_notes": "v0.5.4: Profile binding is now per-request instead of per-process. FastAPI no longer binds a single profile at startup - it holds a per-profile registry and resolves the active profile on every request via an X-Roampal-Profile header sent by each client (MCP server, OpenCode plugin, Claude Code / Cursor hooks). Fixes issue #7 where OpenCode Desktop's per-project ROAMPAL_PROFILE in opencode.json was ignored. Also ships: sidecar config hydration from opencode.json at FastAPI startup, TagService unification with Desktop (async extract + client lock to prevent local-model GPU OOM), 1 sidecar call per /api/summarize request (down from 3-4), facts extraction retry loop in the OpenCode plugin, and eight audit-driven bug fixes. Test suite: 603 passing, 3 pre-existing skips, 0 failed. Live-validated across OpenCode CLI, OpenCode with per-project opencode.json, and Claude Code hooks."
+  "release_notes": "v0.5.5: Fix issue #8 — new memories stop being generated after GUI deletion of memory_bank entries. Root cause: ChromaDB's collection.delete() doesn't remove vectors from HNSW index, leaving phantom entries that match during dedup and block new fact storage. Fix replaces hard delete with soft delete (status=archived), adds archived filter to dedup queries, excludes archived from capacity count, and adds startup migration to clean pre-fix phantoms. Also ships: scoring mutex replaced with async request queue in OpenCode plugin (eliminates dropped scoring requests with slow localhost models), sidecar summary contamination fix via delimiter fencing in score_exchange prompt."
 }

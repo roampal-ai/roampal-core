@@ -469,9 +469,9 @@ class TestSidecarCaps:
         assert "exchange.user.slice(0, 8000)" in plugin_source
         assert "exchange.assistant.slice(0, 8000)" in plugin_source
 
-    def test_summary_output_cap_2000(self, plugin_source):
-        """Summary prompt instructs 2000 char limit."""
-        assert "2000 chars" in plugin_source
+    def test_summary_output_cap_300(self, plugin_source):
+        """Summary prompt instructs 300 char limit."""
+        assert "300 chars" in plugin_source
 
 
 if __name__ == "__main__":
