@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/roampal-ai-roampal-core-badge.png)](https://mseep.ai/app/roampal-ai-roampal-core)
+
 <h1 align="center">roampal-core</h1>
 
 <p align="center"><strong>Outcome-Based Persistent Memory MCP Server</strong></p>
