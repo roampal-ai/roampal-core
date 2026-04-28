@@ -1019,7 +1019,7 @@ def configure_opencode(is_dev: bool = False, force: bool = False, scope: str | N
 
     plugin_needs_write = True
 
-    if plugin_file.exists():
+    if not force and plugin_file.exists():
         # Check if plugin content matches
         try:
             existing_content = plugin_file.read_text(encoding="utf-8")
@@ -1038,8 +1038,15 @@ def configure_opencode(is_dev: bool = False, force: bool = False, scope: str | N
 
     if plugin_needs_write:
         if plugin_source.exists():
-            shutil.copy(plugin_source, plugin_file)
-            print(f"  {GREEN}Installed plugin: {plugin_file}{RESET}")
+            try:
+                shutil.copy(plugin_source, plugin_file)
+                print(f"  {GREEN}Installed plugin: {plugin_file}{RESET}")
+            except (OSError, PermissionError) as e:
+                print(f"  {RED}Failed to install plugin: {e}{RESET}")
+                print(
+                    f"  {YELLOW}Close OpenCode Desktop and try again, or copy manually:{RESET}"
+                )
+                print(f"  {YELLOW}  cp {plugin_source} {plugin_file}{RESET}")
         else:
             print(f"  {RED}Plugin source not found: {plugin_source}{RESET}")
             print(f"  {YELLOW}You may need to reinstall roampal{RESET}")

@@ -59,18 +59,29 @@ function debugLog(msg: string) {
 // v0.5.4: Profile resolution for X-Roampal-Profile header on every FastAPI call.
 // Mirrors MCP server-side _get_mcp_profile_name() so OpenCode hits the right
 // profile instead of defaulting to active_profile_name() on the server.
-function resolveRoampalProfile(): string {
+//
+// v0.5.5.1: Desktop project-switch fix (#10).
+// The plugin receives a client from OpenCode that has project.current().
+// This queries Desktop's HTTP API (localhost:4096) for the currently active
+// project's worktree directory — which updates when the user switches projects
+// in the UI. We cache the resolved profile and refresh it on every chat.message
+// (before any API calls), so the correct profile is used for the exchange.
+let _pluginClient: any = null
+let _cachedProfile: string = ""
+
+function resolveRoampalProfile(worktree?: string): string {
   // Priority 1: explicit env var (CLI: $env:ROAMPAL_PROFILE = "..."; opencode)
   const envProfile = process.env.ROAMPAL_PROFILE
   if (envProfile && envProfile !== "default") return envProfile
 
   // Priority 2: project opencode.json (Desktop per-project)
-  // Reads mcp.roampal-core.environment.ROAMPAL_PROFILE from the project's
-  // opencode.json, matching the env block Desktop passes to the MCP subprocess.
+  // Uses the worktree from client.project.current() when available (Desktop),
+  // falls back to process.cwd() (CLI / older Desktop without project.current).
   try {
-    const cwdConfig = join(process.cwd(), "opencode.json")
-    statSync(cwdConfig)
-    const config = JSON.parse(readFileSync(cwdConfig, "utf-8"))
+    const projectDir = worktree || process.cwd()
+    const projectConfig = join(projectDir, "opencode.json")
+    statSync(projectConfig)
+    const config = JSON.parse(readFileSync(projectConfig, "utf-8"))
     const projectProfile = config?.mcp?.["roampal-core"]?.environment?.ROAMPAL_PROFILE
     if (projectProfile && projectProfile !== "default") return projectProfile
   } catch { /* no project config or unreadable */ }
@@ -91,13 +102,72 @@ function resolveRoampalProfile(): string {
   return ""
 }
 
-const ROAMPAL_PROFILE = resolveRoampalProfile()
-debugLog(`[v0.5.4] Resolved profile: ${ROAMPAL_PROFILE || "(default — no header)"}`)
+async function _withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return await Promise.race<T>([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
+  ])
+}
+
+// Resolve the active project's worktree.
+// Primary: client.session.get({path: {id: sessionID}}) — the OpenCode SDK uses
+// URL templating, so the session ID goes under `path`. The session's directory
+// reflects the project the message was sent from, even when the Desktop plugin
+// is a singleton across project switches. Verified against Desktop 1.14.29.
+// Fallback: client.project.current() (works on CLI, returns workspace root on
+// Desktop — only useful when there's no session yet, e.g. plugin load).
+async function _resolveActiveWorktree(sessionID?: string): Promise<string> {
+  if (sessionID && _pluginClient?.session?.get) {
+    try {
+      const resp = await _withTimeout(
+        (_pluginClient as any).session.get({ path: { id: sessionID } }),
+        2000,
+      )
+      const data = (resp as any)?.data ?? resp
+      if (!(resp as any)?.error && !data?.error) {
+        const dir = data?.directory || data?.worktree
+        if (dir && dir !== "/" && dir !== "\\") return dir as string
+      }
+    } catch (err) {
+      debugLog(`[v0.5.5.1] session.get failed (${err})`)
+    }
+  }
+
+  if (_pluginClient?.project?.current) {
+    try {
+      const resp = await _withTimeout((_pluginClient as any).project.current(), 2000)
+      const data = (resp as any)?.data ?? resp
+      const wt = data?.worktree
+      if (wt && wt !== "/" && wt !== "\\") return wt as string
+    } catch (err) {
+      debugLog(`[v0.5.5.1] project.current() failed (${err})`)
+    }
+  }
+
+  return ""
+}
+
+async function refreshProfile(sessionID?: string): Promise<void> {
+  const worktree = await _resolveActiveWorktree(sessionID)
+  if (worktree) {
+    _cachedProfile = resolveRoampalProfile(worktree)
+    debugLog(`[v0.5.5.1] refreshProfile: worktree=${worktree} → profile=${_cachedProfile || "(none)"}`)
+    return
+  }
+  _cachedProfile = resolveRoampalProfile()
+  debugLog(`[v0.5.5.1] refreshProfile: no worktree from APIs, fell back to cwd → profile=${_cachedProfile || "(none)"}`)
+}
+
+let _roampalProfileResolved = false
 
 function roampalHeaders(): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" }
-  if (ROAMPAL_PROFILE) {
-    h["X-Roampal-Profile"] = ROAMPAL_PROFILE
+  if (!_roampalProfileResolved) {
+    debugLog(`[v0.5.5.1] Resolved profile: ${_cachedProfile || "(default — no header)"}`)
+    _roampalProfileResolved = true
+  }
+  if (_cachedProfile) {
+    h["X-Roampal-Profile"] = _cachedProfile
   }
   return h
 }
@@ -1128,7 +1198,12 @@ If no useful facts, return: {"facts": []}`
 // ============================================================================
 
 export const RoampalPlugin: Plugin = async ({ client }) => {
+  _pluginClient = client
   debugLog(`Plugin loaded (${ROAMPAL_DEV ? "DEV" : "PROD"} mode, port ${ROAMPAL_PORT})${CUSTOM_SIDECAR_URL ? `, custom sidecar: ${CUSTOM_SIDECAR_MODEL}@${CUSTOM_SIDECAR_URL}` : ""}`)
+
+  // v0.5.5.1: Resolve initial profile via client.project.current() (Desktop) or cwd (CLI).
+  // Stored in _cachedProfile and re-resolved in chat.message on every exchange.
+  await refreshProfile()
 
   // Discover available Zen free models at startup — replaces hardcoded list.
   // If discovery fails, the hardcoded fallback list is used.
@@ -1254,6 +1329,12 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
       const userText = extractTextFromParts(output.parts)
 
       if (!userText) return
+
+      // v0.5.5.1: Re-resolve profile on every exchange. Desktop plugin is a
+      // singleton — process.cwd() and process.env never change across project
+      // switches. session.get(sessionID) knows which project this message came
+      // from; that's our authoritative source for the active project's worktree.
+      await refreshProfile(sessionId)
 
       // v0.4.9.4: Subagent filtering (Issue #4).
       // Skip context fetch + exchange tracking for subagent sessions.
