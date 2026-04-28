@@ -1,9 +1,9 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "maintainers": ["roampal-ai"],
-  "version": "0.5.5",
-  "pinned_commit": "6bac65e",
+  "version": "0.5.5.1",
+  "pinned_commit": "3131735",
   "description": "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)",
   "keywords": ["memory", "mcp", "claude-code", "opencode", "ai", "persistent-memory"],
-  "release_notes": "v0.5.5: Fix issue #8 — new memories stop being generated after GUI deletion of memory_bank entries. Root cause: ChromaDB's collection.delete() doesn't remove vectors from HNSW index, leaving phantom entries that match during dedup and block new fact storage. Fix replaces hard delete with soft delete (status=archived), adds archived filter to dedup queries, excludes archived from capacity count, and adds startup migration to clean pre-fix phantoms. Also ships: scoring mutex replaced with async request queue in OpenCode plugin (eliminates dropped scoring requests with slow localhost models), sidecar summary contamination fix via delimiter fencing in score_exchange prompt."
+  "release_notes": "v0.5.5.1: Hotfix for two GitHub-reported bugs in v0.5.5. Issue #10 (Critical): OpenCode Desktop ignored project-specific ROAMPAL_PROFILE; switching projects in the Desktop UI didn't apply the project-specific profile because the singleton plugin's process.cwd() and process.env are frozen at workspace launch. Fixed by reading the active session's directory via client.session.get on every chat.message; the session reflects the user's actually-active project even when the plugin is workspace-scoped. Verified end-to-end on Desktop 1.14.29 with two test projects flipping between profile=test-a and profile=test-b. Issue #11: roampal init --force now actually replaces the OpenCode plugin file on Windows. The --force flag was previously ignored for the plugin path, and shutil.copy errors (e.g. file lock from running Desktop) had no error handling. Both fixes are plugin/CLI only, no server-side changes."
 }
