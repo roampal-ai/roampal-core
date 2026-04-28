@@ -895,6 +895,54 @@ def configure_cursor(cursor_dir: Path, is_dev: bool = False, force: bool = False
     print(f"  {GREEN}Cursor configured!{RESET}\n")
 
 
+def _install_plugin_file(plugin_source: Path, plugin_dest: Path):
+    """Install plugin file with post-copy verification and fallback methods.
+
+    v0.5.5.2: Windows shutil.copy can silently fail due to OneDrive sync,
+    antivirus interference, or Controlled Folder Access. This function verifies
+    the copy succeeded and falls back to manual read/write if needed.
+    """
+    plugin_dest.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Primary method: shutil.copy
+        shutil.copy(str(plugin_source), str(plugin_dest))
+    except (OSError, PermissionError) as e:
+        print(f"  {RED}Failed to install plugin: {e}{RESET}")
+        print(
+            f"  {YELLOW}Close OpenCode Desktop and try again, or copy manually:{RESET}"
+        )
+        print(f"  {YELLOW}  cp {plugin_source} {plugin_dest}{RESET}")
+        return
+
+    # Verify the copy actually succeeded
+    if not plugin_dest.exists():
+        print(
+            f"  {RED}Plugin install failed: file disappeared after copy (antivirus/OneDrive?) {plugin_dest}{RESET}"
+        )
+        print(f"  {YELLOW}Copy manually:{RESET}")
+        print(f"  {YELLOW}  cp {plugin_source} {plugin_dest}{RESET}")
+        return
+
+    try:
+        dest_size = plugin_dest.stat().st_size
+        source_size = plugin_source.stat().st_size
+        if dest_size == 0 or dest_size != source_size:
+            # Copy appeared to succeed but file is wrong size - retry with manual method
+            src_content = plugin_source.read_bytes()
+            plugin_dest.write_bytes(src_content)
+            new_size = plugin_dest.stat().st_size
+            if new_size != len(src_content):
+                print(
+                    f"  {RED}Plugin install failed: file size mismatch after fallback copy (expected {len(src_content)}, got {new_size}){RESET}"
+                )
+                return
+    except Exception as e:
+        logger.warning(f"Failed to verify plugin file: {e}")
+
+    print(f"  {GREEN}Installed plugin: {plugin_dest}{RESET}")
+
+
 def configure_opencode(is_dev: bool = False, force: bool = False, scope: str | None = None):
     """Configure OpenCode MCP and plugin.
 
@@ -1038,15 +1086,18 @@ def configure_opencode(is_dev: bool = False, force: bool = False, scope: str | N
 
     if plugin_needs_write:
         if plugin_source.exists():
-            try:
-                shutil.copy(plugin_source, plugin_file)
-                print(f"  {GREEN}Installed plugin: {plugin_file}{RESET}")
-            except (OSError, PermissionError) as e:
-                print(f"  {RED}Failed to install plugin: {e}{RESET}")
-                print(
-                    f"  {YELLOW}Close OpenCode Desktop and try again, or copy manually:{RESET}"
-                )
-                print(f"  {YELLOW}  cp {plugin_source} {plugin_file}{RESET}")
+            _install_plugin_file(plugin_source, plugin_file)
+
+            # v0.5.5.2: On Windows, also copy to %APPDATA%\opencode\plugins as fallback
+            # Some Electron apps resolve config paths differently on Windows
+            if sys.platform == "win32":
+                appdata = os.environ.get("APPDATA", "")
+                if appdata:
+                    alt_plugin_dir = Path(appdata) / "opencode" / "plugins"
+                    alt_plugin_file = alt_plugin_dir / "roampal.ts"
+                    if alt_plugin_file != plugin_file:
+                        alt_plugin_dir.mkdir(parents=True, exist_ok=True)
+                        _install_plugin_file(plugin_source, alt_plugin_file)
         else:
             print(f"  {RED}Plugin source not found: {plugin_source}{RESET}")
             print(f"  {YELLOW}You may need to reinstall roampal{RESET}")
