@@ -1,9 +1,9 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "maintainers": ["roampal-ai"],
-  "version": "0.5.5.1",
-  "pinned_commit": "3131735",
+  "version": "0.5.5.2",
+  "pinned_commit": "15b6e7f",
   "description": "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)",
   "keywords": ["memory", "mcp", "claude-code", "opencode", "ai", "persistent-memory"],
-  "release_notes": "v0.5.5.1: Hotfix for two GitHub-reported bugs in v0.5.5. Issue #10 (Critical): OpenCode Desktop ignored project-specific ROAMPAL_PROFILE; switching projects in the Desktop UI didn't apply the project-specific profile because the singleton plugin's process.cwd() and process.env are frozen at workspace launch. Fixed by reading the active session's directory via client.session.get on every chat.message; the session reflects the user's actually-active project even when the plugin is workspace-scoped. Verified end-to-end on Desktop 1.14.29 with two test projects flipping between profile=test-a and profile=test-b. Issue #11: roampal init --force now actually replaces the OpenCode plugin file on Windows. The --force flag was previously ignored for the plugin path, and shutil.copy errors (e.g. file lock from running Desktop) had no error handling. Both fixes are plugin/CLI only, no server-side changes."
+  "release_notes": "v0.5.5.2: Hotfix — post-copy plugin verification + dual-path Windows install. New _install_plugin_file() helper with post-copy size check and manual read/write fallback for OneDrive/antivirus interference. Dual-path installation on Windows: copies to both ~/.config/opencode/plugins and %APPDATA%/opencode/plugins as fallback. CLI only, no server-side changes."
 }
