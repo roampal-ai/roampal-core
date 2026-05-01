@@ -7,6 +7,7 @@ the exact bug Marcus reported: add facts → archive some → add similar →
 all new facts stored successfully.
 """
 
+import asyncio
 import sys
 import os
 
@@ -15,6 +16,24 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 import pytest
 import tempfile
 import shutil
+
+
+@pytest.fixture(autouse=True)
+async def _cancel_warmup_tasks():
+    """Cancel UnifiedMemorySystem warmup_ce / warmup_embedding tasks after each
+    test. See test_phantom_cleanup_safety.py for the full backstory; same fix.
+    """
+    yield
+    try:
+        for task in asyncio.all_tasks():
+            if task.get_name() in ("warmup_ce", "warmup_embedding") and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+    except RuntimeError:
+        pass
 
 
 class TestArchiveDedupCycle:

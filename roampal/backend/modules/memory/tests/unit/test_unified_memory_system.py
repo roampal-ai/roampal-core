@@ -1439,7 +1439,7 @@ class TestStartupCleanupStatusBackfill:
 
         ums._memory_bank_service.collection = mock_coll
 
-        await ums._startup_cleanup()
+        await ums._startup_cleanup(force_migrations=True)
 
         # Should have backfilled 2 entries (both lack status field)
         assert mock_coll.update_fragment_metadata.call_count == 2
@@ -1464,7 +1464,7 @@ class TestStartupCleanupStatusBackfill:
 
         ums._memory_bank_service.collection = mock_coll
 
-        await ums._startup_cleanup()
+        await ums._startup_cleanup(force_migrations=True)
 
         mock_coll.update_fragment_metadata.assert_not_called()
 
@@ -1481,7 +1481,7 @@ class TestStartupCleanupStatusBackfill:
 
         ums._memory_bank_service.collection = mock_coll
 
-        await ums._startup_cleanup()
+        await ums._startup_cleanup(force_migrations=True)
 
         mock_coll.update_fragment_metadata.assert_not_called()
 
@@ -1511,7 +1511,7 @@ class TestStartupCleanupStatusBackfill:
 
         ums._memory_bank_service.collection = mock_coll
 
-        await ums._startup_cleanup()
+        await ums._startup_cleanup(force_migrations=True)
 
         # Only legacy1 gets backfilled; phantom and modern are skipped
         assert mock_coll.update_fragment_metadata.call_count == 1
@@ -1529,6 +1529,16 @@ class TestStartupSweepAllTiers:
     that the desktop GUI's bulk-delete tab can poison. Pre-v0.5.6 only memory_bank was
     swept — leaving phantoms in working/history/patterns invisible to the workaround.
     """
+
+    @pytest.fixture(autouse=True)
+    def _reset_v056_migration_flag(self):
+        """Reset the one-shot v0.5.6 migrations flag so each test exercises the
+        Item 32 sweep path. See sibling fixture in TestStartupCleanupStatusBackfill."""
+        import roampal.backend.modules.memory.unified_memory_system as ums_mod
+        ums_mod._v056_migrations_done = False
+        yield
+        ums_mod._v056_migrations_done = False
+
 
     @pytest.mark.asyncio
     async def test_phantoms_swept_from_working_history_patterns(self, tmp_path):
@@ -1568,7 +1578,7 @@ class TestStartupSweepAllTiers:
         patterns_adapter.delete_vectors = MagicMock()
         ums.collections["patterns"] = patterns_adapter
 
-        await ums._startup_cleanup()
+        await ums._startup_cleanup(force_migrations=True)
 
         # Sweep called delete_vectors with the phantom IDs (other startup steps may also
         # delete from the same adapter — assert_any_call is the right check).
@@ -1606,7 +1616,7 @@ class TestStartupSweepAllTiers:
         patterns_adapter.delete_vectors = MagicMock()
         ums.collections["patterns"] = patterns_adapter
 
-        await ums._startup_cleanup()  # Must not raise
+        await ums._startup_cleanup(force_migrations=True)  # Must not raise
 
         patterns_adapter.delete_vectors.assert_not_called()
 
@@ -1642,7 +1652,7 @@ class TestStartupSweepAllTiers:
         patterns_adapter.delete_vectors = MagicMock()
         ums.collections["patterns"] = patterns_adapter
 
-        await ums._startup_cleanup()  # Must not raise
+        await ums._startup_cleanup(force_migrations=True)  # Must not raise
 
         # working raised before reaching delete_vectors in our sweep — but promotion_service
         # also iterates working and may surface its own delete calls. The invariant we care

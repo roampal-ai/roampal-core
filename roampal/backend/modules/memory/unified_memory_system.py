@@ -298,6 +298,16 @@ class UnifiedMemorySystem:
         """
         self.config = config or MemoryConfig()
 
+        # v0.5.6: Per-instance one-shot guard for the new migration work in
+        # _startup_cleanup. Items 7 (status backfill) and 32 (working/history/
+        # patterns phantom sweep) are migrations — they only need to run once
+        # per profile (per UMS instance lifetime). Re-running them on every
+        # _startup_cleanup() call wastes work in production and is a real RAM
+        # leak in test environments where many UMS instances get spun up
+        # back-to-back. Per-instance (not module-global) so multi-profile
+        # FastAPI servers still migrate each profile correctly.
+        self._v056_migrations_done = False
+
         # Resolution precedence:
         #   1. Explicit data_path arg (constructor caller knows best)
         #   2. ROAMPAL_DATA_PATH env var (backward-compat override)
@@ -639,12 +649,18 @@ class UnifiedMemorySystem:
         # Startup cleanup: delete garbage memories (score < 0.2)
         await self._startup_cleanup()
 
-    async def _startup_cleanup(self):
+    async def _startup_cleanup(self, force_migrations: bool = False):
         """
         Delete garbage memories on startup.
 
         Scans working, history, and patterns collections for items with score < 0.2
         and deletes them. This ensures garbage doesn't pile up between sessions.
+
+        Args:
+            force_migrations: If True, re-runs the v0.5.6 one-shot migrations
+                (status backfill, working/history/patterns phantom sweep) even if
+                they've already run in this process. Tests pass True to exercise
+                the migration paths repeatedly; production code never does.
         """
         deleted_count = 0
         collections_to_clean = ["working", "history", "patterns"]
@@ -686,50 +702,59 @@ class UnifiedMemorySystem:
 
         # v0.5.6: Sweep phantom entries from startup — shared helper used by both
         # _startup_cleanup and cleanup_archived to keep logic in one place.
+        # Idempotent and cheap (early-out on a clean index), so kept unconditional.
         if self._memory_bank_service:
             swept = self._memory_bank_service._sweep_phantoms()
             if swept:
                 logger.info(f"v0.5.6 startup sweep: removed {swept} phantom entries from memory_bank")
 
-            # v0.5.6: backfill status=active on legacy memory_bank entries that lack it.
+        # v0.5.6: One-shot migrations. These only need to run once per UMS
+        # instance lifetime (== once per profile in production). Per-instance
+        # flag so multi-profile FastAPI servers still migrate each profile
+        # correctly. Tests pass force_migrations=True to re-exercise the path.
+        if force_migrations or not self._v056_migrations_done:
+            self._v056_migrations_done = True
+
+            # v0.5.6 Item 7: backfill status=active on legacy memory_bank entries that lack it.
             # Pre-v0.5.5 entries written before add() started setting status="active" have no
             # status field. This ensures $ne: archived filters work correctly across all versions.
-            try:
-                all_ids = self._memory_bank_service.collection.list_all_ids()
-                backfilled = 0
-                for doc_id in all_ids:
-                    frag = self._memory_bank_service.collection.get_fragment(doc_id)
-                    if not frag:
-                        continue
-                    meta = frag.get("metadata", {}) or {}
-                    if "status" not in meta:
-                        self._memory_bank_service.collection.update_fragment_metadata(
-                            doc_id, {"status": "active"}
-                        )
-                        backfilled += 1
-                if backfilled:
-                    logger.info(f"v0.5.6 migration: backfilled status=active on {backfilled} legacy entries")
-            except Exception as e:
-                logger.warning(f"Status backfill error: {e}")
+            if self._memory_bank_service:
+                try:
+                    all_ids = self._memory_bank_service.collection.list_all_ids()
+                    backfilled = 0
+                    for doc_id in all_ids:
+                        frag = self._memory_bank_service.collection.get_fragment(doc_id)
+                        if not frag:
+                            continue
+                        meta = frag.get("metadata", {}) or {}
+                        if "status" not in meta:
+                            self._memory_bank_service.collection.update_fragment_metadata(
+                                doc_id, {"status": "active"}
+                            )
+                            backfilled += 1
+                    if backfilled:
+                        logger.info(f"v0.5.6 migration: backfilled status=active on {backfilled} legacy entries")
+                except Exception as e:
+                    logger.warning(f"Status backfill error: {e}")
 
-        # v0.5.6 Item 32: Sweep phantoms across the other dedup-affected collections too.
-        # Desktop's bulk-delete /clear/* endpoints (working/history/patterns) historically
-        # used collection.delete(ids=...), which leaves HNSW phantoms. The pre-v0.5.6 sweep
-        # only handled memory_bank, so the documented "restart core to clean phantoms"
-        # workaround for issue #8 didn't fully work for those tiers. Inline the sweep here
-        # since these adapters don't have a MemoryBankService wrapper.
-        for tier_name in ("working", "history", "patterns"):
-            adapter = self.collections.get(tier_name)
-            if adapter is None:
-                continue
-            try:
-                tier_ids = adapter.list_all_ids()
-                phantom_ids = [doc_id for doc_id in tier_ids if not adapter.get_fragment(doc_id)]
-                if phantom_ids:
-                    adapter.delete_vectors(phantom_ids)
-                    logger.info(f"v0.5.6 startup sweep: removed {len(phantom_ids)} phantom entries from {tier_name}")
-            except Exception as e:
-                logger.warning(f"Phantom sweep error on {tier_name}: {e}")
+            # v0.5.6 Item 32: Sweep phantoms across the other dedup-affected collections too.
+            # Desktop's bulk-delete /clear/* endpoints (working/history/patterns) historically
+            # used collection.delete(ids=...), which leaves HNSW phantoms. The pre-v0.5.6 sweep
+            # only handled memory_bank, so the documented "restart core to clean phantoms"
+            # workaround for issue #8 didn't fully work for those tiers. Inline the sweep here
+            # since these adapters don't have a MemoryBankService wrapper.
+            for tier_name in ("working", "history", "patterns"):
+                adapter = self.collections.get(tier_name)
+                if adapter is None:
+                    continue
+                try:
+                    tier_ids = adapter.list_all_ids()
+                    phantom_ids = [doc_id for doc_id in tier_ids if not adapter.get_fragment(doc_id)]
+                    if phantom_ids:
+                        adapter.delete_vectors(phantom_ids)
+                        logger.info(f"v0.5.6 startup sweep: removed {len(phantom_ids)} phantom entries from {tier_name}")
+                except Exception as e:
+                    logger.warning(f"Phantom sweep error on {tier_name}: {e}")
 
         # v0.4.4: Run both cleanup tasks concurrently
         await asyncio.gather(

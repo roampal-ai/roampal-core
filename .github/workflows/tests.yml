@@ -28,7 +28,14 @@ jobs:
 
       - name: Run tests
         timeout-minutes: 10
-        run: pytest --tb=short -q
+        # --forked: each test in its own subprocess so RAM (esp. ONNX models
+        # at ~420MB each) is fully released between tests. Without this the
+        # 27+ tests that call await ums.initialize() in test_unified_memory_system.py
+        # accumulate enough RSS on the GH runner to trigger SIGTERM/OOM at
+        # the 80% mark. Linux/macOS only (uses os.fork); Windows local runs
+        # use the standard in-process pytest path.
+        # --timeout=60: per-test cap so a hung test self-reports with a name.
+        run: pytest --tb=short -q --timeout=60 --forked
 
   plugin-parse:
     runs-on: ubuntu-latest

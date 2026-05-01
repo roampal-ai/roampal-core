@@ -12,6 +12,7 @@ Mirrors the manual live-validation run on 2026-05-01:
   Scenario B: archive a single entry, run `cleanup_archived()`, verify the
               archived entry is removed and all other entries remain intact.
 """
+import asyncio
 import os
 import shutil
 import sys
@@ -20,6 +21,34 @@ import tempfile
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..')))
+
+
+@pytest.fixture(autouse=True)
+async def _cancel_warmup_tasks():
+    """Cancel UnifiedMemorySystem warmup_ce / warmup_embedding tasks after each
+    test so they don't leak into the next test's event loop or RAM.
+
+    UnifiedMemorySystem.initialize() schedules two background warmup tasks via
+    asyncio.create_task that wrap asyncio.to_thread(...) for ONNX model loads.
+    Without explicit cancellation these orphan worker threads accumulate across
+    tests on Linux CI runners and either deadlock the next initialize() (3.10)
+    or push the worker pool past the runner's resource limit so the runner
+    sends SIGTERM (3.11/3.12 — what tanked the v0.5.6 release CI). 3.11+
+    asyncio.Runner cleans these up correctly when not under load; production
+    code only initialize()s once per process so the leak never materializes
+    outside the test harness.
+    """
+    yield
+    try:
+        for task in asyncio.all_tasks():
+            if task.get_name() in ("warmup_ce", "warmup_embedding") and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+    except RuntimeError:
+        pass
 
 
 class TestPhantomCleanupSafety:
