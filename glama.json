@@ -1,9 +1,9 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "maintainers": ["roampal-ai"],
-  "version": "0.5.5.2",
-  "pinned_commit": "15b6e7f",
+  "version": "0.5.6",
+  "pinned_commit": "de387fc",
   "description": "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)",
   "keywords": ["memory", "mcp", "claude-code", "opencode", "ai", "persistent-memory"],
-  "release_notes": "v0.5.5.2: Hotfix — post-copy plugin verification + dual-path Windows install. New _install_plugin_file() helper with post-copy size check and manual read/write fallback for OneDrive/antivirus interference. Dual-path installation on Windows: copies to both ~/.config/opencode/plugins and %APPDATA%/opencode/plugins as fallback. CLI only, no server-side changes."
+  "release_notes": "v0.5.6: Hardening release closing v0.5.5.x verification gaps. Memory phantom sweep extended to all collections + cleanup_archived sweep + capacity-pressure auto-trigger; sidecar concurrency reworked into async queues with background self-healing drainers for both scoring and summary writes (no more dropped exchanges when sidecar is slow); sidecar prompts realigned with the labs benchmark (field names, temperature pinning, facts examples, max_tokens); MCP tool descriptions and JSON schemas rewritten against the TDQS rubric; update_memory now requires id (was silently creating duplicates); always_inject removed (dead code); Windows install hardened with hash verification + AppData hardlink, multi-cause error messages, APPDATA-unset warning; OpenCode Go subscription auto-detected in the sidecar setup wizard. 661 unit tests pass (3 skipped); full suite 713 pass."
 }
