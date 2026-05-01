@@ -253,9 +253,9 @@ async def _build_cold_start_profile(mem: UnifiedMemorySystem) -> Optional[str]:
     Build the cold start user profile injection.
 
     v0.2.7: Lean but rich - 10 facts max with balanced coverage:
-    1. Always-inject memories (identity core)
-    2. One fact per tag category (identity, preference, goal, project, system_mastery, agent_growth)
-    3. (Future) Content KG entities - read path exists but entity extraction not yet wired up
+    Walk all memory_bank entries sorted by quality (Wilson once `uses >= 3`, else
+    `importance * confidence`) and pick the top entry per priority tag, then include
+    one fact per tag category (identity, preference, goal, project, system_mastery, agent_growth).
 
     Args:
         mem: UnifiedMemorySystem for the active profile.
@@ -418,7 +418,6 @@ class GetContextResponse(BaseModel):
     """Response with context to inject."""
 
     formatted_injection: str
-    user_facts: List[Dict[str, Any]]
     relevant_memories: List[Dict[str, Any]]
     context_summary: str
     scoring_required: bool = False  # True if previous exchange needs scoring
@@ -493,14 +492,17 @@ class MemoryBankAddRequest(BaseModel):
     )
     importance: float = 0.7
     confidence: float = 0.7
-    always_inject: bool = False
 
 
 class MemoryBankUpdateRequest(BaseModel):
     """Request to update memory bank."""
 
-    old_content: str
+    id: str
     new_content: str
+    tags: Optional[List[str]] = None
+    noun_tags: Optional[List[str]] = None
+    importance: Optional[float] = None
+    confidence: Optional[float] = None
 
 
 class RecordOutcomeRequest(BaseModel):
@@ -940,7 +942,6 @@ def create_app() -> FastAPI:
 
             return GetContextResponse(
                 formatted_injection="\n".join(formatted_parts),
-                user_facts=context.get("user_facts", []),
                 relevant_memories=context.get("relevant_memories", []),
                 context_summary=context.get("context_summary", ""),
                 scoring_required=scoring_required,
@@ -1203,7 +1204,6 @@ def create_app() -> FastAPI:
                 noun_tags=request.noun_tags,
                 importance=request.importance,
                 confidence=request.confidence,
-                always_inject=request.always_inject,
             )
 
             return {"success": True, "doc_id": doc_id}
@@ -1227,7 +1227,9 @@ def create_app() -> FastAPI:
 
         try:
             doc_id = await _memory.update_memory_bank(
-                old_content=request.old_content, new_content=new_content
+                doc_id=request.id, new_content=new_content,
+                tags=request.tags, noun_tags=request.noun_tags,
+                importance=request.importance, confidence=request.confidence,
             )
 
             return {"success": doc_id is not None, "doc_id": doc_id}
@@ -1957,19 +1959,34 @@ def create_app() -> FastAPI:
         v0.3.0: Actually tests embedding functionality to catch PyTorch state corruption.
         Returns 503 if embeddings are broken, allowing auto-restart.
         v0.5.4: Checks any initialized profile (singleton removed).
+        v0.5.6: Test the shared embedding service directly. The v0.5.4 per-profile check
+        returned 503 between server boot and the first profile-init request, because
+        `_memory_by_profile` populates lazily. The shared service is created in lifespan()
+        at startup, so this is the more accurate "are embeddings working?" signal.
+        Falls back to the per-profile path if the shared service isn't available
+        (e.g., older code paths or test harnesses that bypass lifespan).
         """
         embedding_ok = False
         embedding_error = None
 
-        for mem in _memory_by_profile.values():
-            if mem.initialized and mem._embedding_service:
-                try:
-                    test_vector = await mem._embedding_service.embed_text("health check")
-                    if len(test_vector) > 0:
-                        embedding_ok = True
-                    break
-                except Exception as e:
-                    embedding_error = str(e)
+        if _shared_embed_service is not None:
+            try:
+                test_vector = await _shared_embed_service.embed_text("health check")
+                if len(test_vector) > 0:
+                    embedding_ok = True
+            except Exception as e:
+                embedding_error = str(e)
+        else:
+            # Fallback: per-profile check (legacy v0.5.4 behavior)
+            for mem in _memory_by_profile.values():
+                if mem.initialized and mem._embedding_service:
+                    try:
+                        test_vector = await mem._embedding_service.embed_text("health check")
+                        if len(test_vector) > 0:
+                            embedding_ok = True
+                        break
+                    except Exception as e:
+                        embedding_error = str(e)
 
         if not embedding_ok:
             raise HTTPException(

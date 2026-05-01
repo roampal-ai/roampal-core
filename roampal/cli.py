@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -909,16 +910,29 @@ def _install_plugin_file(plugin_source: Path, plugin_dest: Path):
         shutil.copy(str(plugin_source), str(plugin_dest))
     except (OSError, PermissionError) as e:
         print(f"  {RED}Failed to install plugin: {e}{RESET}")
+        print(f"  {YELLOW}Possible causes:{RESET}")
         print(
-            f"  {YELLOW}Close OpenCode Desktop and try again, or copy manually:{RESET}"
+            f"  {YELLOW}  - OpenCode Desktop is running and holds a file lock{RESET}"
         )
+        print(
+            f"  {YELLOW}  - Read-only attribute on existing {plugin_dest.name}{RESET}"
+        )
+        print(f"  {YELLOW}  - Antivirus / Controlled Folder Access blocking write{RESET}")
+        print(f"  {YELLOW}  - OneDrive sync quarantining the destination{RESET}")
+        print(f"  {YELLOW}If those don't apply, copy manually:{RESET}")
         print(f"  {YELLOW}  cp {plugin_source} {plugin_dest}{RESET}")
         return
 
     # Verify the copy actually succeeded
     if not plugin_dest.exists():
         print(
-            f"  {RED}Plugin install failed: file disappeared after copy (antivirus/OneDrive?) {plugin_dest}{RESET}"
+            f"  {RED}Plugin install failed: file disappeared after copy{RESET}"
+        )
+        print(f"  {YELLOW}Possible causes:{RESET}")
+        print(f"  {YELLOW}  - Antivirus quarantined the destination{RESET}")
+        print(f"  {YELLOW}  - OneDrive sync still processing{RESET}")
+        print(
+            f"  {YELLOW}  - Controlled Folder Access blocked the write{RESET}"
         )
         print(f"  {YELLOW}Copy manually:{RESET}")
         print(f"  {YELLOW}  cp {plugin_source} {plugin_dest}{RESET}")
@@ -941,6 +955,63 @@ def _install_plugin_file(plugin_source: Path, plugin_dest: Path):
         logger.warning(f"Failed to verify plugin file: {e}")
 
     print(f"  {GREEN}Installed plugin: {plugin_dest}{RESET}")
+
+
+def _verify_plugin_install_targets(plugin_source: Path, targets: list[Path]) -> None:
+    """Hash every install target against source. Warn loudly on drift.
+
+    The dual-path install introduced in v0.5.5.2 succeeds as long as ONE
+    destination got the new bytes. If the other silently retained stale content
+    (lock, antivirus, OneDrive), OpenCode may load from that stale path with no
+    warning — exactly the symptom Marcus reported in issue #11.
+
+    This function detects the divergence after both writes and tells the user
+    which path is stale plus the exact command to repair it.
+    """
+    try:
+        src_bytes = plugin_source.read_bytes()
+    except OSError as e:
+        logger.warning(f"Plugin verification skipped — could not read source: {e}")
+        return
+    src_hash = hashlib.sha256(src_bytes).hexdigest()
+
+    fresh: List[Path] = []
+    stale: List[Path] = []
+    for target in targets:
+        try:
+            target_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+        except OSError:
+            stale.append(target)
+            continue
+        (fresh if target_hash == src_hash else stale).append(target)
+
+    if not stale:
+        return
+
+    print()
+    print(
+        f"  {RED}WARNING: Plugin install left stale content at {len(stale)} of {len(targets)} location(s).{RESET}"
+    )
+    print(
+        f"  {YELLOW}OpenCode may load whichever path it discovers first — if that's a stale one, you'll silently run an old plugin.{RESET}"
+    )
+    for path in stale:
+        print(f"  {RED}  STALE:  {path}{RESET}")
+    for path in fresh:
+        print(f"  {GREEN}  FRESH:  {path}{RESET}")
+    if fresh:
+        # Suggest the simplest repair: copy from a known-fresh destination.
+        donor = fresh[0]
+        for stale_path in stale:
+            print(f"  {YELLOW}  repair: cp {donor} {stale_path}{RESET}")
+    else:
+        # Both stale (rare) — point them at the source.
+        for stale_path in stale:
+            print(f"  {YELLOW}  repair: cp {plugin_source} {stale_path}{RESET}")
+    print(
+        f"  {YELLOW}  Then fully restart OpenCode Desktop (kill all processes) so it reloads the plugin.{RESET}"
+    )
+    print()
 
 
 def configure_opencode(is_dev: bool = False, force: bool = False, scope: str | None = None):
@@ -1086,10 +1157,18 @@ def configure_opencode(is_dev: bool = False, force: bool = False, scope: str | N
 
     if plugin_needs_write:
         if plugin_source.exists():
+            install_targets: list[Path] = [plugin_file]
             _install_plugin_file(plugin_source, plugin_file)
 
-            # v0.5.5.2: On Windows, also copy to %APPDATA%\opencode\plugins as fallback
-            # Some Electron apps resolve config paths differently on Windows
+            # v0.5.5.2: On Windows, also expose the plugin at %APPDATA%\opencode\plugins
+            # because different OpenCode builds resolve plugins from different paths.
+            # v0.5.6: Hardlink the alt path to the canonical .config copy when possible.
+            # Same inode → divergence is structurally impossible; both paths read the
+            # same bytes, so a successful canonical write is automatically reflected
+            # at the alt path with no second write to fail. Fall back to a real copy
+            # if hardlink creation fails (cross-volume, OneDrive reparse-point quirks,
+            # antivirus, filesystem that doesn't support hardlinks). The post-copy
+            # hash verification below still runs in either case.
             if sys.platform == "win32":
                 appdata = os.environ.get("APPDATA", "")
                 if appdata:
@@ -1097,7 +1176,30 @@ def configure_opencode(is_dev: bool = False, force: bool = False, scope: str | N
                     alt_plugin_file = alt_plugin_dir / "roampal.ts"
                     if alt_plugin_file != plugin_file:
                         alt_plugin_dir.mkdir(parents=True, exist_ok=True)
-                        _install_plugin_file(plugin_source, alt_plugin_file)
+                        try:
+                            if alt_plugin_file.exists() or alt_plugin_file.is_symlink():
+                                alt_plugin_file.unlink()
+                            os.link(str(plugin_file), str(alt_plugin_file))
+                        except OSError:
+                            # Hardlink unsupported here — fall back to a real copy.
+                            _install_plugin_file(plugin_source, alt_plugin_file)
+                        install_targets.append(alt_plugin_file)
+                else:
+                    print(
+                        f"  {YELLOW}Skipped %APPDATA% fallback install — APPDATA env var is unset.{RESET}"
+                    )
+                    print(
+                        f"  {YELLOW}If OpenCode can't find the plugin, set APPDATA and re-run, or copy manually.{RESET}"
+                    )
+
+            # v0.5.6: Cross-target verification. Catches the case where one
+            # destination silently retained stale content (e.g. transient lock,
+            # antivirus, OneDrive sync) while another succeeded — the bug Marcus
+            # originally reported (issue #11) that v0.5.5.2's dual-path partially
+            # masked. OpenCode loads from whichever destination it discovers
+            # first; if that one is stale, the user runs old plugin code with no
+            # warning. Hash all written destinations and warn loudly on drift.
+            _verify_plugin_install_targets(plugin_source, install_targets)
         else:
             print(f"  {RED}Plugin source not found: {plugin_source}{RESET}")
             print(f"  {YELLOW}You may need to reinstall roampal{RESET}")
@@ -2930,6 +3032,75 @@ def _apply_sidecar_env_and_write(
     return changed
 
 
+_DEFAULT_GO_MODELS = [
+    "glm-5.1",
+    "qwen3.5-plus",
+    "deepseek-v4-flash",
+]
+
+
+def _detect_opencode_go() -> dict | None:
+    """Detect an OpenCode Go subscription via auth.json.
+
+    Returns {url, key, models} if detected, or None.
+    """
+    parents = [Path.home() / ".local" / "share", Path.home() / ".config"]
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        parents.append(Path(appdata))
+    for parent in parents:
+        auth_path = parent / "opencode" / "auth.json"
+        if not auth_path.exists():
+            continue
+        try:
+            auth = json.loads(auth_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        entry = auth.get("opencode-go")
+        if not isinstance(entry, dict) or entry.get("type") != "api" or not entry.get("key"):
+            continue
+        key = entry["key"].strip()
+        if not key:
+            continue
+        url = "https://opencode.ai/zen/go/v1"
+        fetched = _list_opencode_go_models(url, key)
+        if not fetched:
+            print(f"  {YELLOW}Note: Using default Go model list (API fetch failed){RESET}")
+        models = fetched or _DEFAULT_GO_MODELS
+        return {"url": url, "key": key, "models": models}
+    return None
+
+
+def _list_opencode_go_models(url: str, key: str) -> list[str] | None:
+    """Hit /models on the Go endpoint to list available models.
+
+    Filters out non-OpenAI-compatible models (MiniMax uses Anthropic's
+    /v1/messages endpoint, which our sidecar OpenAI client cannot call).
+    """
+    import ssl
+
+    try:
+        req = urllib.request.Request(
+            f"{url}/models",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5, context=ssl.create_default_context()) as resp:
+            data = json.loads(resp.read().decode())
+            ids = [m.get("id") for m in data.get("data", []) if m.get("id")]
+            # MiniMax models route through Anthropic /v1/messages, not OpenAI
+            # /chat/completions — exclude them so the sidecar doesn't 403/400.
+            ids = [m for m in ids if not m.startswith("minimax-")]
+            return ids or None
+    except Exception as e:
+        # Redact key from error — str(e) may contain the bearer token bytes
+        err_msg = str(e).replace(key, "sk-**redacted**") if len(key) > 4 else str(e)
+        print(f"  {YELLOW}Note: Failed to fetch Go models from API ({type(e).__name__}: {err_msg}){RESET}")
+        return None
+
+
 def _detect_ollama_models() -> list:
     """Check if Ollama is running and return available models."""
     try:
@@ -3245,15 +3416,30 @@ def _sidecar_model_picker(
         print(f"    Then run:   roampal sidecar setup\n")
 
         print(f"  {BOLD}[1]{RESET} Configure custom API (Groq, DeepSeek, etc.)")
+
+        go = _detect_opencode_go()
+        if go:
+            print(
+                f"  {BOLD}[2]{RESET} Use OpenCode Go (detected) {GREEN}— your subscription, your quota{RESET}"
+            )
+            print(
+                f"      {YELLOW}Reliable scoring via Go's API. Each scored exchange consumes Go credits.{RESET}"
+            )
+
+        zen_idx = "3" if go else "2"
+        skip_idx = "4" if go else "3"
         print(
-            f"  {BOLD}[2]{RESET} Use free Zen cloud models {YELLOW}(rate-limited, may be flaky — data sent to opencode.ai){RESET}"
+            f"  {BOLD}[{zen_idx}]{RESET} Use free Zen cloud models {YELLOW}(rate-limited, may be flaky — data sent to opencode.ai){RESET}"
         )
         print(
-            f"  {BOLD}[3]{RESET} Skip — no scoring, no summaries, no fact extraction (retrieval still works)"
+            f"      {YELLOW}Note: OpenCode Go subscribers also use this path — Go quota is not consumed.{RESET}"
+        )
+        print(
+            f"  {BOLD}[{skip_idx}]{RESET} Skip — no scoring, no summaries, no fact extraction (retrieval still works)"
         )
 
         try:
-            choice = input(f"\nChoose [1-3]: ").strip()
+            choice = input(f"\nChoose [1-{skip_idx}]: ").strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{YELLOW}Cancelled.{RESET}")
             return None
@@ -3276,7 +3462,43 @@ def _sidecar_model_picker(
                     pass
             return result
 
-        elif choice == "2":
+        elif go and choice == "2":
+            # OpenCode Go model picker
+            print(f"\n{BOLD}Available OpenCode Go models for scoring:{RESET}")
+            for i, m in enumerate(go["models"], 1):
+                print(f"  {BOLD}[{i}]{RESET} {m}")
+            try:
+                m_choice = input(f"\nChoose [1-{len(go['models'])}]: ").strip()
+                m_idx = int(m_choice) - 1
+                if not (0 <= m_idx < len(go["models"])):
+                    raise ValueError
+            except (ValueError, EOFError, KeyboardInterrupt):
+                print(f"\n{YELLOW}Cancelled.{RESET}")
+                return None
+
+            chosen_model = go["models"][m_idx]
+            print(f"\n{GREEN}Configuring: OpenCode Go ({chosen_model}){RESET}")
+            print(f"  {YELLOW}Note: each scored exchange consumes Go credits.{RESET}")
+
+            updates = {
+                "ROAMPAL_SIDECAR_URL": go["url"],
+                "ROAMPAL_SIDECAR_KEY": go["key"],
+                "ROAMPAL_SIDECAR_MODEL": chosen_model,
+                "ROAMPAL_SIDECAR_FALLBACK": None,
+                "ROAMPAL_SIDECAR_PRIORITY": None,
+            }
+            if defer_write:
+                return {
+                    "ROAMPAL_SIDECAR_URL": go["url"],
+                    "ROAMPAL_SIDECAR_KEY": go["key"],
+                    "ROAMPAL_SIDECAR_MODEL": chosen_model,
+                    "ROAMPAL_SIDECAR_FALLBACK": None,
+                    "ROAMPAL_SIDECAR_PRIORITY": None,
+                }
+            _apply_sidecar_env_and_write(config_path, updates)
+            return True
+
+        elif choice == zen_idx:
             # v0.5.3: Explicit Zen opt-in — writes ROAMPAL_SIDECAR_PRIORITY=zen
             # so the user has clearly chosen the cloud fallback. Previously
             # this path wrote no config and relied on a hidden default cascade.
@@ -3327,14 +3549,25 @@ def _sidecar_model_picker(
     for i, (label, _model) in enumerate(options, 1):
         print(f"  {BOLD}[{i}]{RESET} {label}")
 
-    custom_idx = len(options) + 1
-    free_idx = len(options) + 2
-    cancel_idx = len(options) + 3
+    go = _detect_opencode_go()
+    custom_idx = len(options) + (2 if go else 1)
+    free_idx = custom_idx + 1
+    cancel_idx = free_idx + 1
 
     print(f"")
+    if go:
+        print(
+            f"  {BOLD}[{custom_idx - 1}]{RESET} Use OpenCode Go (detected) {GREEN}— your subscription, your quota{RESET}"
+        )
+        print(
+            f"      {YELLOW}Reliable scoring via Go's API. Each scored exchange consumes Go credits.{RESET}"
+        )
     print(f"  {BOLD}[{custom_idx}]{RESET} Configure custom API endpoint")
     print(
         f"  {BOLD}[{free_idx}]{RESET} Use free Zen cloud models {YELLOW}(rate-limited, may be flaky — data sent to opencode.ai){RESET}"
+    )
+    print(
+        f"      {YELLOW}Note: OpenCode Go subscribers also use this path — Go quota is not consumed.{RESET}"
     )
     print(
         f"  {BOLD}[{cancel_idx}]{RESET} Skip — no scoring, no summaries, no fact extraction (retrieval still works)"
@@ -3363,6 +3596,42 @@ def _sidecar_model_picker(
         if changed:
             print(f"{YELLOW}Restart OpenCode to activate.{RESET}")
         return changed
+
+    elif go and choice_num == custom_idx - 1:
+        # OpenCode Go model picker
+        print(f"\n{BOLD}Available OpenCode Go models for scoring:{RESET}")
+        for i, m in enumerate(go["models"], 1):
+            print(f"  {BOLD}[{i}]{RESET} {m}")
+        try:
+            m_choice = input(f"\nChoose [1-{len(go['models'])}]: ").strip()
+            m_idx = int(m_choice) - 1
+            if not (0 <= m_idx < len(go["models"])):
+                raise ValueError
+        except (ValueError, EOFError, KeyboardInterrupt):
+            print(f"\n{YELLOW}Cancelled.{RESET}")
+            return None
+
+        chosen_model = go["models"][m_idx]
+        print(f"\n{GREEN}Configuring: OpenCode Go ({chosen_model}){RESET}")
+        print(f"  {YELLOW}Note: each scored exchange consumes Go credits.{RESET}")
+
+        updates = {
+            "ROAMPAL_SIDECAR_URL": go["url"],
+            "ROAMPAL_SIDECAR_KEY": go["key"],
+            "ROAMPAL_SIDECAR_MODEL": chosen_model,
+            "ROAMPAL_SIDECAR_FALLBACK": None,
+            "ROAMPAL_SIDECAR_PRIORITY": None,
+        }
+        if defer_write:
+            return {
+                "ROAMPAL_SIDECAR_URL": go["url"],
+                "ROAMPAL_SIDECAR_KEY": go["key"],
+                "ROAMPAL_SIDECAR_MODEL": chosen_model,
+                "ROAMPAL_SIDECAR_FALLBACK": None,
+                "ROAMPAL_SIDECAR_PRIORITY": None,
+            }
+        _apply_sidecar_env_and_write(config_path, updates)
+        return True
 
     elif choice_num == custom_idx:
         result = _prompt_custom_endpoint(config_path)

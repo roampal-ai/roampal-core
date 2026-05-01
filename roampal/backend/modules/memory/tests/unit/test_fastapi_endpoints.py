@@ -34,7 +34,6 @@ def mock_memory():
     memory.record_outcome = AsyncMock()
     memory.get_context_for_injection = AsyncMock(return_value={
         "formatted_injection": "<test-context>memories here</test-context>",
-        "user_facts": [{"content": "User is a developer"}],
         "relevant_memories": [{"content": "Previous work on testing", "collection": "working"}],
         "context_summary": "Test context",
         "doc_ids": ["working_abc", "patterns_def"]
@@ -49,7 +48,6 @@ def mock_memory():
     memory._memory_bank_service = MagicMock()
     memory._memory_bank_service.cleanup_archived = MagicMock(return_value=0)
     memory._memory_bank_service.list_all = MagicMock(return_value=[])
-    memory.get_always_inject = MagicMock(return_value=[])
     return memory
 
 
@@ -144,23 +142,80 @@ class TestHealthEndpoint:
 
     @pytest.mark.asyncio
     async def test_health_returns_503_when_not_initialized(self, async_client):
-        """Health check returns 503 when no profiles are loaded.
+        """Health check returns 503 when no profiles are loaded AND no shared embed service.
 
         v0.5.4: The singleton _memory was replaced by _memory_by_profile dict.
-        The health endpoint iterates the dict; an empty dict means embedding
-        check never runs and we 503.
+        v0.5.6: Health prefers _shared_embed_service. This test covers the legacy
+        fallback path — both the per-profile dict AND the shared service must be empty
+        for 503 to fire.
         """
         from roampal.server import main
         ac, _, _ = async_client
 
         snapshot = dict(main._memory_by_profile)
+        shared_snapshot = main._shared_embed_service
         main._memory_by_profile.clear()
+        main._shared_embed_service = None
         try:
             response = await ac.get("/api/health")
             assert response.status_code == 503
         finally:
             main._memory_by_profile.clear()
             main._memory_by_profile.update(snapshot)
+            main._shared_embed_service = shared_snapshot
+
+    @pytest.mark.asyncio
+    async def test_health_passes_with_shared_service_when_profiles_empty(self, async_client):
+        """v0.5.6: Cold-boot regression — shared embed service alone makes health pass.
+
+        Before v0.5.6, /api/health required at least one profile in _memory_by_profile.
+        Between server boot and the first profile-init request, that dict was empty and
+        health returned 503 forever — blocking MCP's _ensure_server_running gate.
+        Fix: also accept _shared_embed_service (which lifespan() initializes at startup).
+        """
+        from roampal.server import main
+        ac, _, _ = async_client
+
+        snapshot = dict(main._memory_by_profile)
+        shared_snapshot = main._shared_embed_service
+        main._memory_by_profile.clear()
+        main._shared_embed_service = MagicMock()
+        main._shared_embed_service.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        try:
+            response = await ac.get("/api/health")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "healthy"
+            assert data["embedding_ok"] is True
+            assert data["profiles_loaded"] == 0
+        finally:
+            main._memory_by_profile.clear()
+            main._memory_by_profile.update(snapshot)
+            main._shared_embed_service = shared_snapshot
+
+    @pytest.mark.asyncio
+    async def test_health_returns_503_when_shared_service_throws(self, async_client):
+        """v0.5.6: Shared service exception still yields 503 with the error message.
+
+        Catches genuine PyTorch/ONNX runtime corruption that v0.3.0's healthcheck
+        was originally designed to surface.
+        """
+        from roampal.server import main
+        ac, _, _ = async_client
+
+        snapshot = dict(main._memory_by_profile)
+        shared_snapshot = main._shared_embed_service
+        main._memory_by_profile.clear()
+        main._shared_embed_service = MagicMock()
+        main._shared_embed_service.embed_text = AsyncMock(side_effect=RuntimeError("ONNX inference failure"))
+        try:
+            response = await ac.get("/api/health")
+            assert response.status_code == 503
+            assert "ONNX inference failure" in response.json()["detail"]
+        finally:
+            main._memory_by_profile.clear()
+            main._memory_by_profile.update(snapshot)
+            main._shared_embed_service = shared_snapshot
 
 
 # ============================================================================
@@ -181,7 +236,6 @@ class TestGetContextEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert "formatted_injection" in data
-        assert "user_facts" in data
         assert "relevant_memories" in data
         assert "scoring_required" in data
 
@@ -523,44 +577,45 @@ class TestMemoryBankEndpoints:
         assert data["doc_id"] == "mb_test123"
 
     @pytest.mark.asyncio
-    async def test_add_with_always_inject(self, async_client):
-        """v0.3.2: Add with always_inject flag."""
-        ac, mock_mem, _ = async_client
-        response = await ac.post("/api/memory-bank/add", json={
-            "content": "User's name is Test",
-            "tags": ["identity"],
-            "always_inject": True
-        })
-        assert response.status_code == 200
-        mock_mem.store_memory_bank.assert_called_once()
-        call_kwargs = mock_mem.store_memory_bank.call_args
-        assert call_kwargs.kwargs.get("always_inject") is True
-
-    @pytest.mark.asyncio
     async def test_update_memory_bank(self, async_client):
-        """Update existing memory bank entry."""
+        """v0.5.6: Update by exact doc_id (id-only path, no semantic match)."""
         ac, mock_mem, _ = async_client
         response = await ac.post("/api/memory-bank/update", json={
-            "old_content": "User prefers light mode",
+            "id": "memory_bank_abcdef12",
             "new_content": "User prefers dark mode"
         })
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
+        assert data["doc_id"] == "mb_test123"
+        mock_mem.update_memory_bank.assert_called_once()
+        kwargs = mock_mem.update_memory_bank.call_args.kwargs
+        assert kwargs["doc_id"] == "memory_bank_abcdef12"
+        assert kwargs["new_content"] == "User prefers dark mode"
 
     @pytest.mark.asyncio
     async def test_update_not_found(self, async_client):
-        """Update returns success=false when memory not found."""
+        """v0.5.6: Update returns success=false when doc_id is unknown."""
         ac, mock_mem, _ = async_client
         mock_mem.update_memory_bank = AsyncMock(return_value=None)
 
         response = await ac.post("/api/memory-bank/update", json={
-            "old_content": "nonexistent",
+            "id": "memory_bank_deadbeef",
             "new_content": "new content"
         })
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is False
+        assert data["doc_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_update_missing_id_returns_422(self, async_client):
+        """v0.5.6: Missing required `id` field rejected at Pydantic layer."""
+        ac, _, _ = async_client
+        response = await ac.post("/api/memory-bank/update", json={
+            "new_content": "no id provided"
+        })
+        assert response.status_code == 422
 
     @pytest.mark.asyncio
     async def test_archive_memory_bank(self, async_client):
@@ -647,7 +702,6 @@ class TestInjectionMap:
         # Configure mock to return doc_ids
         mock_mem.get_context_for_injection = AsyncMock(return_value={
             "formatted_injection": "<test>context</test>",
-            "user_facts": [],
             "relevant_memories": [],
             "context_summary": "",
             "doc_ids": ["working_abc123", "patterns_xyz789"]

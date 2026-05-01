@@ -53,9 +53,20 @@ async def _get_tools_for_platform(platform: str = ""):
     original_is_opencode = server_module._is_opencode
     server_module._is_opencode = (platform.lower() == "opencode")
 
+    class FakeTool:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    class FakeTypes:
+        Prompt = object
+        Resource = object
+        Tool = FakeTool
+        @staticmethod
+        def TextContent(**kw):
+            return type('TextContent', (), kw)()
+
     try:
-        with patch('roampal.mcp.server.Server', FakeServer), \
-             patch('roampal.mcp.server.stdio_server'), \
+        with patch.object(server_module, '_get_mcp_server', return_value=(FakeServer, MagicMock(), FakeTypes)), \
              patch.object(server_module, '_start_fastapi_server'), \
              patch('asyncio.run'):
             server_module.run_mcp_server(dev=False)
@@ -154,8 +165,19 @@ class TestServerEndpointRegression:
             async def run(self, *a, **kw):
                 pass
 
-        with patch('roampal.mcp.server.Server', FakeServer), \
-             patch('roampal.mcp.server.stdio_server'), \
+        class FakeTool:
+            def __init__(self, **kw):
+                self.__dict__.update(kw)
+
+        class FakeTypes:
+            Prompt = object
+            Resource = object
+            Tool = FakeTool
+            @staticmethod
+            def TextContent(**kw):
+                return type('TextContent', (), kw)()
+
+        with patch.object(server_module, '_get_mcp_server', return_value=(FakeServer, MagicMock(), FakeTypes)), \
              patch.object(server_module, '_start_fastapi_server'), \
              patch('asyncio.run'):
             server_module.run_mcp_server(dev=False)
@@ -236,8 +258,19 @@ class TestSidecarScoringFlow:
             async def run(self, *a, **kw):
                 pass
 
-        with patch('roampal.mcp.server.Server', FakeServer), \
-             patch('roampal.mcp.server.stdio_server'), \
+        class FakeTool:
+            def __init__(self, **kw):
+                self.__dict__.update(kw)
+
+        class FakeTypes:
+            Prompt = object
+            Resource = object
+            Tool = FakeTool
+            @staticmethod
+            def TextContent(**kw):
+                return type('TextContent', (), kw)()
+
+        with patch.object(server_module, '_get_mcp_server', return_value=(FakeServer, MagicMock(), FakeTypes)), \
              patch.object(server_module, '_start_fastapi_server'), \
              patch('asyncio.run'):
             server_module.run_mcp_server(dev=False)

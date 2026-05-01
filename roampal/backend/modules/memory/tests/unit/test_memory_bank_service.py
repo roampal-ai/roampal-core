@@ -103,6 +103,8 @@ class TestStore:
             "ids": [f"memory_bank_{i}" for i in range(500)],
             "metadatas": [{"status": "active"}] * 500
         })
+        # v0.5.6: _maybe_cleanup_archived needs total count too; with all active, ratio < 0.5 so no cleanup triggers
+        mock_collection.collection.count = MagicMock(return_value=500)
 
         with pytest.raises(ValueError, match="capacity"):
             await service.store("Test", ["test"])
@@ -183,6 +185,99 @@ class TestUpdate:
         )
 
         assert doc_id.startswith("memory_bank_")
+
+
+class TestUpdateById:
+    """v0.5.6: update_by_id is the only update path. No semantic search, no fallback."""
+
+    @pytest.fixture
+    def mock_collection(self):
+        coll = MagicMock()
+        coll.get_fragment = MagicMock(return_value={
+            "content": "User prefers dark mode",
+            "metadata": {
+                "text": "User prefers dark mode",
+                "tags": '["preference"]',
+                "importance": 0.7,
+                "confidence": 0.8,
+            }
+        })
+        coll.upsert_vectors = AsyncMock()
+        return coll
+
+    @pytest.fixture
+    def service(self, mock_collection):
+        return MemoryBankService(
+            collection=mock_collection,
+            embed_fn=AsyncMock(return_value=[0.1] * 384),
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_by_id_success(self, service, mock_collection):
+        """Direct id lookup, content replaced, doc_id returned."""
+        doc_id = await service.update_by_id(
+            doc_id="memory_bank_match123",
+            new_content="User switched to light mode",
+        )
+
+        assert doc_id == "memory_bank_match123"
+        mock_collection.upsert_vectors.assert_called_once()
+
+        call_args = mock_collection.upsert_vectors.call_args
+        assert call_args[1]["ids"] == ["memory_bank_match123"]
+        update_metadata = call_args[1]["metadatas"][0]
+        assert update_metadata["text"] == "User switched to light mode"
+        assert update_metadata["content"] == "User switched to light mode"
+        assert update_metadata["update_reason"] == "mcp_update"
+
+    @pytest.mark.asyncio
+    async def test_update_by_id_overwrites_provided_metadata(self, service, mock_collection):
+        """Provided metadata fields overwrite; omitted ones preserve."""
+        await service.update_by_id(
+            doc_id="memory_bank_match123",
+            new_content="Updated content",
+            tags=["identity"],
+            importance=0.95,
+        )
+
+        call_args = mock_collection.upsert_vectors.call_args
+        update_metadata = call_args[1]["metadatas"][0]
+        assert json.loads(update_metadata["tags"]) == ["identity"]
+        assert update_metadata["importance"] == 0.95
+        assert update_metadata["confidence"] == 0.8  # preserved from old
+
+    @pytest.mark.asyncio
+    async def test_update_by_id_preserves_metadata_when_not_provided(self, service, mock_collection):
+        """When optional kwargs are omitted, existing metadata is kept verbatim."""
+        await service.update_by_id(
+            doc_id="memory_bank_match123",
+            new_content="New text only",
+        )
+
+        call_args = mock_collection.upsert_vectors.call_args
+        update_metadata = call_args[1]["metadatas"][0]
+        assert json.loads(update_metadata["tags"]) == ["preference"]
+        assert update_metadata["importance"] == 0.7
+        assert update_metadata["confidence"] == 0.8
+
+    @pytest.mark.asyncio
+    async def test_update_by_id_returns_none_when_not_found(self):
+        """Unknown doc_id returns None — no semantic fallback, no new entry."""
+        coll = MagicMock()
+        coll.get_fragment = MagicMock(return_value=None)
+        coll.upsert_vectors = AsyncMock()
+
+        service = MemoryBankService(
+            collection=coll,
+            embed_fn=AsyncMock(return_value=[0.1] * 384),
+        )
+
+        result = await service.update_by_id(
+            doc_id="memory_bank_deadbeef",
+            new_content="should never write",
+        )
+        assert result is None
+        coll.upsert_vectors.assert_not_called()
 
 
 class TestArchive:
@@ -374,8 +469,8 @@ class TestRestore:
         assert result is False
 
 
-class TestDelete:
-    """Test memory deletion."""
+class TestDeletePermanent:
+    """v0.5.6: delete_permanent requires force=True to prevent accidental hard-deletes."""
 
     @pytest.fixture
     def mock_collection(self):
@@ -391,20 +486,32 @@ class TestDelete:
         )
 
     @pytest.mark.asyncio
-    async def test_delete_success(self, service, mock_collection):
-        """Should delete memory successfully."""
-        result = await service.delete("memory_bank_test123")
+    async def test_delete_permanent_success_with_force(self, service, mock_collection):
+        """Should delete memory successfully when force=True."""
+        result = await service.delete_permanent("memory_bank_test123", force=True)
 
         assert result is True
         mock_collection.delete_vectors.assert_called_with(["memory_bank_test123"])
 
     @pytest.mark.asyncio
-    async def test_delete_failure(self, service, mock_collection):
+    async def test_delete_permanent_failure(self, service, mock_collection):
         """Should return False on error."""
         mock_collection.delete_vectors = MagicMock(side_effect=Exception("Test error"))
 
-        result = await service.delete("memory_bank_test123")
+        result = await service.delete_permanent("memory_bank_test123", force=True)
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_delete_permanent_requires_force_flag(self, service):
+        """Calling without force=True must raise RuntimeError."""
+        with pytest.raises(RuntimeError, match="force=True"):
+            await service.delete_permanent("memory_bank_test123")
+
+    @pytest.mark.asyncio
+    async def test_delete_permanent_raises_on_false_force(self, service):
+        """Explicitly passing force=False must also raise."""
+        with pytest.raises(RuntimeError, match="force=True"):
+            await service.delete_permanent("memory_bank_test123", force=False)
 
 
 class TestListAll:
@@ -610,6 +717,166 @@ class TestGetCount:
             embed_fn=AsyncMock()
         )
         assert service._get_count() == 0
+
+
+class TestMaybeCleanupArchived:
+    """v0.5.6: _maybe_cleanup_archived auto-cleanup under capacity pressure."""
+
+    @pytest.fixture
+    def mock_collection(self):
+        coll = MagicMock()
+        coll.collection.count = MagicMock(return_value=800)
+        coll.list_all_ids = MagicMock(return_value=["a1"])
+        coll.get_fragment = MagicMock(return_value={
+            "content": "old",
+            "metadata": {"status": "archived"},
+        })
+        coll.delete_vectors = MagicMock()
+        return coll
+
+    def test_no_cleanup_below_active_threshold(self, mock_collection):
+        """Active count below ACTIVE_THRESHOLD (400) → no cleanup."""
+        mock_collection.collection.get = MagicMock(return_value={
+            "ids": list(range(300)),
+            "metadatas": [{"status": "active"}] * 300,
+        })
+        service = MemoryBankService(
+            collection=mock_collection,
+            embed_fn=AsyncMock()
+        )
+        service._maybe_cleanup_archived()
+        mock_collection.delete_vectors.assert_not_called()
+
+    def test_no_cleanup_low_archived_ratio(self, mock_collection):
+        """Active above threshold but archived ratio < 50% → no cleanup."""
+        # active=410 out of total=600 → archived=190, ratio ≈ 0.32 < 0.5
+        mock_collection.collection.count = MagicMock(return_value=600)
+        mock_collection.collection.get = MagicMock(return_value={
+            "ids": list(range(410)),
+            "metadatas": [{"status": "active"}] * 410,
+        })
+        service = MemoryBankService(
+            collection=mock_collection,
+            embed_fn=AsyncMock()
+        )
+        service._maybe_cleanup_archived()
+        mock_collection.delete_vectors.assert_not_called()
+
+    def test_triggers_cleanup_high_archived_ratio(self, mock_collection):
+        """Active above threshold and archived ratio >= 50% → cleanup triggers."""
+        # active=410 out of total=820 → archived=410, ratio = 0.5 >= 0.5
+        mock_collection.collection.count = MagicMock(return_value=820)
+        mock_collection.collection.get = MagicMock(return_value={
+            "ids": list(range(410)),
+            "metadatas": [{"status": "active"}] * 410,
+        })
+        service = MemoryBankService(
+            collection=mock_collection,
+            embed_fn=AsyncMock()
+        )
+        service._maybe_cleanup_archived()
+        mock_collection.delete_vectors.assert_called_once()
+
+    def test_no_cleanup_when_total_zero(self):
+        """Total count of 0 → no cleanup (division guard)."""
+        coll = MagicMock()
+        coll.collection.count = MagicMock(return_value=0)
+        coll.collection.get = MagicMock(return_value={"ids": [], "metadatas": []})
+        service = MemoryBankService(
+            collection=coll,
+            embed_fn=AsyncMock()
+        )
+        service._maybe_cleanup_archived()
+        coll.delete_vectors.assert_not_called()
+
+
+class TestCleanupArchivedSweepsPhantoms:
+    """v0.5.6 Item 5: cleanup_archived() must sweep phantoms its own delete_vectors leaves behind.
+
+    ChromaDB's delete_vectors() removes the document/metadata but leaves the ID in
+    list_all_ids() until the next HNSW rebuild. Those phantom IDs poison dedup
+    ($ne archived returns them as candidates with no content). Issue #8 root cause.
+    """
+
+    def test_cleanup_archived_invokes_sweep_after_delete(self):
+        """After deleting archived IDs, _sweep_phantoms must run to clear leftovers."""
+        coll = MagicMock()
+        coll.list_all_ids = MagicMock(return_value=["m1", "m2_archived_xyz"])
+        coll.get_fragment = MagicMock(return_value={
+            "metadata": {"status": "archived"}
+        })
+        coll.delete_vectors = MagicMock()
+        service = MemoryBankService(collection=coll, embed_fn=AsyncMock())
+
+        # Spy on _sweep_phantoms to confirm it's called after delete_vectors
+        sweep_calls = []
+        original_sweep = service._sweep_phantoms
+
+        def spy_sweep():
+            sweep_calls.append(len(coll.delete_vectors.call_args_list))
+            return original_sweep()
+
+        service._sweep_phantoms = spy_sweep
+        service.cleanup_archived()
+
+        # _sweep_phantoms ran exactly once, after the archived delete_vectors call
+        assert len(sweep_calls) == 1
+        assert sweep_calls[0] >= 1, "sweep ran before delete_vectors — wrong order"
+
+    def test_cleanup_archived_ends_with_no_phantoms(self):
+        """End-to-end: archived delete leaves phantoms, sweep removes them, post-state is clean."""
+        ids_state = {"m1", "m2"}
+        fragments = {
+            "m1": {"metadata": {"status": "archived"}},
+            "m2": {"metadata": {"status": "archived"}},
+        }
+
+        coll = MagicMock()
+        coll.list_all_ids = MagicMock(side_effect=lambda: list(ids_state))
+
+        def get_frag(doc_id):
+            return fragments.get(doc_id)
+        coll.get_fragment = MagicMock(side_effect=get_frag)
+
+        def delete_vecs(target_ids):
+            # Simulate ChromaDB: drop fragments but leave IDs in the index until rebuild
+            for tid in target_ids:
+                fragments.pop(tid, None)
+        coll.delete_vectors = MagicMock(side_effect=delete_vecs)
+
+        service = MemoryBankService(collection=coll, embed_fn=AsyncMock())
+        deleted = service.cleanup_archived()
+
+        assert deleted == 2
+        # delete_vectors was called twice: once for archived IDs, once for phantoms
+        assert coll.delete_vectors.call_count == 2
+        first_call = set(coll.delete_vectors.call_args_list[0][0][0])
+        second_call = set(coll.delete_vectors.call_args_list[1][0][0])
+        assert first_call == {"m1", "m2"}
+        # Phantom sweep targets the same IDs ChromaDB still lists despite no fragment
+        assert second_call == {"m1", "m2"}
+
+    def test_cleanup_archived_no_phantoms_to_sweep(self):
+        """If delete_vectors removes IDs from the index too, sweep is a no-op."""
+        ids_state = {"m1"}
+        fragments = {"m1": {"metadata": {"status": "archived"}}}
+
+        coll = MagicMock()
+        coll.list_all_ids = MagicMock(side_effect=lambda: list(ids_state))
+        coll.get_fragment = MagicMock(side_effect=lambda did: fragments.get(did))
+
+        def delete_vecs(target_ids):
+            for tid in target_ids:
+                fragments.pop(tid, None)
+                ids_state.discard(tid)  # well-behaved index drops the ID too
+        coll.delete_vectors = MagicMock(side_effect=delete_vecs)
+
+        service = MemoryBankService(collection=coll, embed_fn=AsyncMock())
+        deleted = service.cleanup_archived()
+
+        assert deleted == 1
+        # Only the archived delete fired; sweep had nothing to do
+        assert coll.delete_vectors.call_count == 1
 
 
 if __name__ == "__main__":

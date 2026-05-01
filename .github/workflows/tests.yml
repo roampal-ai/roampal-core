@@ -29,3 +29,11 @@ jobs:
       - name: Run tests
         timeout-minutes: 10
         run: pytest --tb=short -q
+
+  plugin-parse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Verify OpenCode plugin parses
+        run: bun build roampal/plugins/opencode/roampal.ts --outdir /tmp/plugin-out --target bun --packages external

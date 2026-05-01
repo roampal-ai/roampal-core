@@ -514,7 +514,13 @@ class UnifiedMemorySystem:
                 logger.debug(f"[DEDUP] query_vectors failed on tier={tier}: {e}")
                 continue
             if hits and hits[0].get("distance", 2.0) < self.FACT_DEDUP_DISTANCE_THRESHOLD:
-                return hits[0].get("id")
+                matched_id = hits[0].get("id")
+                logger.info(
+                    f"[DEDUP] skip={tier} "
+                    f"distance={hits[0]['distance']:.3f} "
+                    f"id={matched_id}"
+                )
+                return matched_id
         return None
 
     async def initialize(self):
@@ -678,24 +684,52 @@ class UnifiedMemorySystem:
         if deleted_count > 0:
             logger.info(f"Startup cleanup: {deleted_count} garbage deleted")
 
-        # v0.5.5: memory_bank phantom migration — remove IDs from pre-fix hard deletes.
-        # ChromaDB's collection.delete() marks entries as deleted but leaves the ID in
-        # list_all_ids(). get_fragment() returns None for these phantoms because both
-        # document and metadata are gone. They're already broken (no content, no vector),
-        # so it's safe to remove them from the index permanently.
+        # v0.5.6: Sweep phantom entries from startup — shared helper used by both
+        # _startup_cleanup and cleanup_archived to keep logic in one place.
         if self._memory_bank_service:
+            swept = self._memory_bank_service._sweep_phantoms()
+            if swept:
+                logger.info(f"v0.5.6 startup sweep: removed {swept} phantom entries from memory_bank")
+
+            # v0.5.6: backfill status=active on legacy memory_bank entries that lack it.
+            # Pre-v0.5.5 entries written before add() started setting status="active" have no
+            # status field. This ensures $ne: archived filters work correctly across all versions.
             try:
                 all_ids = self._memory_bank_service.collection.list_all_ids()
-                phantom_ids = []
+                backfilled = 0
                 for doc_id in all_ids:
-                    if not self._memory_bank_service.collection.get_fragment(doc_id):
-                        phantom_ids.append(doc_id)
-
-                if phantom_ids:
-                    self._memory_bank_service.collection.delete_vectors(phantom_ids)
-                    logger.info(f"v0.5.5 migration: removed {len(phantom_ids)} phantom entries from memory_bank")
+                    frag = self._memory_bank_service.collection.get_fragment(doc_id)
+                    if not frag:
+                        continue
+                    meta = frag.get("metadata", {}) or {}
+                    if "status" not in meta:
+                        self._memory_bank_service.collection.update_fragment_metadata(
+                            doc_id, {"status": "active"}
+                        )
+                        backfilled += 1
+                if backfilled:
+                    logger.info(f"v0.5.6 migration: backfilled status=active on {backfilled} legacy entries")
             except Exception as e:
-                logger.warning(f"Startup cleanup error for memory_bank phantoms: {e}")
+                logger.warning(f"Status backfill error: {e}")
+
+        # v0.5.6 Item 32: Sweep phantoms across the other dedup-affected collections too.
+        # Desktop's bulk-delete /clear/* endpoints (working/history/patterns) historically
+        # used collection.delete(ids=...), which leaves HNSW phantoms. The pre-v0.5.6 sweep
+        # only handled memory_bank, so the documented "restart core to clean phantoms"
+        # workaround for issue #8 didn't fully work for those tiers. Inline the sweep here
+        # since these adapters don't have a MemoryBankService wrapper.
+        for tier_name in ("working", "history", "patterns"):
+            adapter = self.collections.get(tier_name)
+            if adapter is None:
+                continue
+            try:
+                tier_ids = adapter.list_all_ids()
+                phantom_ids = [doc_id for doc_id in tier_ids if not adapter.get_fragment(doc_id)]
+                if phantom_ids:
+                    adapter.delete_vectors(phantom_ids)
+                    logger.info(f"v0.5.6 startup sweep: removed {len(phantom_ids)} phantom entries from {tier_name}")
+            except Exception as e:
+                logger.warning(f"Phantom sweep error on {tier_name}: {e}")
 
         # v0.4.4: Run both cleanup tasks concurrently
         await asyncio.gather(
@@ -941,7 +975,6 @@ class UnifiedMemorySystem:
         noun_tags: Optional[List[str]] = None,
         importance: float = 0.7,
         confidence: float = 0.7,
-        always_inject: bool = False,
     ) -> str:
         """
         Store a fact in memory_bank.
@@ -952,7 +985,6 @@ class UnifiedMemorySystem:
             noun_tags: Content nouns for TagCascade retrieval (from LLM)
             importance: How critical (0.0-1.0)
             confidence: How certain (0.0-1.0)
-            always_inject: If True, appears in every context
 
         Returns:
             Document ID
@@ -973,7 +1005,6 @@ class UnifiedMemorySystem:
             tags=tags or [],
             importance=importance,
             confidence=confidence,
-            always_inject=always_inject,
             embedding=embedding,
         )
 
@@ -989,14 +1020,16 @@ class UnifiedMemorySystem:
         return doc_id
 
     async def update_memory_bank(
-        self, old_content: str, new_content: str
+        self, doc_id: str, new_content: str,
+        tags=None, noun_tags=None, importance=None, confidence=None,
     ) -> Optional[str]:
         """
-        Update a memory_bank entry.
+        Update a memory_bank entry by its exact doc_id.
 
         Args:
-            old_content: Content to find (semantic match)
+            doc_id: The memory ID to update (from search_memory)
             new_content: New content
+            tags, noun_tags, importance, confidence: Override metadata fields (None = preserve)
 
         Returns:
             Document ID or None if not found
@@ -1004,7 +1037,16 @@ class UnifiedMemorySystem:
         if not self.initialized:
             await self.initialize()
 
-        return await self._memory_bank_service.update(old_content, new_content)
+        result = await self._memory_bank_service.update_by_id(
+            doc_id=doc_id,
+            new_content=new_content,
+            tags=tags, noun_tags=noun_tags,
+            importance=importance, confidence=confidence,
+        )
+
+        if not result:
+            logger.warning(f"Memory {doc_id} not found for update")
+        return result
 
     async def delete_memory_bank(self, content: str) -> bool:
         """
@@ -1020,20 +1062,6 @@ class UnifiedMemorySystem:
             await self.initialize()
 
         return await self._memory_bank_service.archive(content)
-
-    def get_always_inject(self) -> List[Dict[str, Any]]:
-        """
-        Get all memories marked with always_inject: true.
-
-        These are core identity facts that should appear in EVERY context
-        regardless of semantic relevance to the query.
-
-        Returns:
-            List of always_inject memories
-        """
-        if not self._memory_bank_service:
-            return []
-        return self._memory_bank_service.get_always_inject()
 
     def get_by_id(self, doc_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -1130,9 +1158,6 @@ class UnifiedMemorySystem:
         v0.4.5: TagCascade retrieval — tags-first cascade fills candidate pool,
         CE reranks, top results injected into LLM context.
 
-        Always_inject memory_bank facts (identity, preferences) are fetched
-        separately and included outside the 4 scored slots.
-
         Args:
             query: The user's message
             conversation_id: Current conversation ID
@@ -1146,19 +1171,9 @@ class UnifiedMemorySystem:
 
         result = {
             "memories": [],
-            "user_facts": [],
             "formatted_injection": "",
             "doc_ids": [],
         }
-
-        # 0. Fetch always_inject memories (core identity - always included)
-        always_inject_memories = self._memory_bank_service.get_always_inject()
-        if always_inject_memories:
-            result["user_facts"] = always_inject_memories
-            # Add their doc_ids for scoring
-            for mem in always_inject_memories:
-                if mem.get("id"):
-                    result["doc_ids"].append(mem["id"])
 
         # v0.4.5: Two-lane retrieval matching benchmark (4 summaries + 4 facts = 8)
         all_collections = ["working", "patterns", "history", "memory_bank"]
@@ -1210,7 +1225,7 @@ class UnifiedMemorySystem:
         parts = []
         user_name = None
 
-        # Find identity-tagged facts in memory_bank (no always_inject required)
+        # Find identity-tagged facts in memory_bank
         all_facts = self._memory_bank_service.list_all(include_archived=False)
         for fact in all_facts:
             # Check for identity tag
@@ -1233,21 +1248,21 @@ class UnifiedMemorySystem:
             )
             content_lower = content.lower()
 
-            # Look for name patterns
-            if (
-                "name is" in content_lower
-                or "i'm " in content_lower
-                or "i am " in content_lower
-            ):
-                # Try "name is X" pattern
-                match = re.search(r"name is (\w+)", content, re.IGNORECASE)
+            if "user" in content_lower or "identified as" in content_lower:
+                # Explicit user attribution: "User's name is X", "user name is X"
+                match = re.search(r"user(?:'s| )?\s*name\s*(?:is|=)\s+(\w+)", content, re.IGNORECASE)
                 if match:
                     user_name = match.group(1)
                     break
-                # Try "I'm X" or "I am X" pattern
-                match = re.search(r"i[''`]?m (\w+)|i am (\w+)", content, re.IGNORECASE)
+                # Reverse format: "Maya is the user's name"
+                match = re.search(r"(\w+)\s+is\s+(?:the\s+)?user(?:'s)?\s*name\b", content, re.IGNORECASE)
                 if match:
-                    user_name = match.group(1) or match.group(2)
+                    user_name = match.group(1)
+                    break
+                # Agent summary style: "identified as X" — always refers to the user
+                match = re.search(r"identified\s+(?:as|=)\s+(\w+)", content, re.IGNORECASE)
+                if match:
+                    user_name = match.group(1)
                     break
 
         memories = context.get("memories", [])

@@ -394,5 +394,145 @@ class TestChromaDBMultipleCollections:
         await adapter_b.cleanup()
 
 
+class TestPhantomFiltering:
+    """Test v0.5.6 phantom filtering with OR logic catches mid-state results."""
+
+    @pytest.mark.asyncio
+    async def test_filters_phantom_doc_none_with_meta(self):
+        """v0.5.6: Should filter entry where document=None but metadata is truthy."""
+        from roampal.backend.modules.memory.chromadb_adapter import ChromaDBAdapter
+        
+        adapter = ChromaDBAdapter(
+            persistence_directory=tempfile.mkdtemp(prefix="roampal_phantom_"),
+            use_server=False,
+        )
+        
+        await adapter.initialize(collection_name="phantom_test")
+        
+        from unittest.mock import patch, MagicMock
+        
+        mock_collection = MagicMock()
+        mock_collection.query.return_value = {
+            'ids': [['good_1', 'phantom_doc_none']],
+            'embeddings': [[[0.5] * 768, [0.5] * 768]],
+            'documents': [['valid content', None]],
+            'metadatas': [[{'text': 'valid content', 'status': 'active'}, {'text': 'cached meta', 'score': 0.8}]],
+            'distances': [[0.1, 0.2]],
+        }
+        mock_collection.count.return_value = 2
+        
+        # Line 201-205 reassigns self.collection from client.get_or_create_collection()
+        # so we must patch that to return our mock
+        with patch.object(adapter.client, 'get_or_create_collection', return_value=mock_collection):
+            results = await adapter.query_vectors(
+                query_vector=[0.5] * 768, top_k=2
+            )
+        
+        ids = [r['id'] for r in results]
+        assert 'good_1' in ids
+        assert 'phantom_doc_none' not in ids
+        
+        await adapter.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_filters_phantom_meta_none_with_doc(self):
+        """v0.5.6: Should filter entry where metadata=None but document is truthy."""
+        from roampal.backend.modules.memory.chromadb_adapter import ChromaDBAdapter
+        
+        adapter = ChromaDBAdapter(
+            persistence_directory=tempfile.mkdtemp(prefix="roampal_phantom_"),
+            use_server=False,
+        )
+        
+        await adapter.initialize(collection_name="phantom_test")
+        
+        from unittest.mock import patch, MagicMock
+        
+        mock_collection = MagicMock()
+        mock_collection.query.return_value = {
+            'ids': [['good_1', 'phantom_meta_none']],
+            'embeddings': [[[0.5] * 768, [0.5] * 768]],
+            'documents': [['valid content', 'some stale text']],
+            'metadatas': [[{'text': 'valid content', 'status': 'active'}, None]],
+            'distances': [[0.1, 0.2]],
+        }
+        mock_collection.count.return_value = 2
+        
+        with patch.object(adapter.client, 'get_or_create_collection', return_value=mock_collection):
+            results = await adapter.query_vectors(
+                query_vector=[0.5] * 768, top_k=2
+            )
+        
+        ids = [r['id'] for r in results]
+        assert 'good_1' in ids
+        assert 'phantom_meta_none' not in ids
+        
+        await adapter.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_filters_both_none(self):
+        """Original AND case: both doc and metadata None should still be filtered."""
+        from roampal.backend.modules.memory.chromadb_adapter import ChromaDBAdapter
+        from unittest.mock import patch, MagicMock
+        
+        adapter = ChromaDBAdapter(
+            persistence_directory=tempfile.mkdtemp(prefix="roampal_phantom_"),
+            use_server=False,
+        )
+        
+        await adapter.initialize(collection_name="phantom_test")
+        
+        mock_collection = MagicMock()
+        mock_collection.query.return_value = {
+            'ids': [['both_none']],
+            'embeddings': [[[0.5] * 768]],
+            'documents': [[None]],
+            'metadatas': [[None]],
+            'distances': [[0.1]],
+        }
+        mock_collection.count.return_value = 1
+        
+        with patch.object(adapter.client, 'get_or_create_collection', return_value=mock_collection):
+            results = await adapter.query_vectors(
+                query_vector=[0.5] * 768, top_k=2
+            )
+        
+        assert len(results) == 0
+        await adapter.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_passes_valid_entry(self):
+        """Valid entries with both doc and metadata should pass through."""
+        from roampal.backend.modules.memory.chromadb_adapter import ChromaDBAdapter
+        from unittest.mock import patch, MagicMock
+        
+        adapter = ChromaDBAdapter(
+            persistence_directory=tempfile.mkdtemp(prefix="roampal_phantom_"),
+            use_server=False,
+        )
+        
+        await adapter.initialize(collection_name="phantom_test")
+        
+        mock_collection = MagicMock()
+        mock_collection.query.return_value = {
+            'ids': [['good_1']],
+            'embeddings': [[[0.5] * 768]],
+            'documents': [['valid content']],
+            'metadatas': [[{'text': 'valid', 'status': 'active'}]],
+            'distances': [[0.1]],
+        }
+        mock_collection.count.return_value = 1
+        
+        with patch.object(adapter.client, 'get_or_create_collection', return_value=mock_collection):
+            results = await adapter.query_vectors(
+                query_vector=[0.5] * 768, top_k=2
+            )
+        
+        ids = [r['id'] for r in results]
+        assert 'good_1' in ids
+        
+        await adapter.cleanup()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

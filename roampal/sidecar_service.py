@@ -197,10 +197,14 @@ def _call_custom(prompt: str, timeout: int = 15) -> Optional[Dict[str, Any]]:
                 {"role": "user", "content": prompt},
             ],
             "max_tokens": 8000,
+            "temperature": 0,
         }
     ).encode("utf-8")
 
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "roampal-sidecar/1.0",
+    }
     if CUSTOM_KEY:
         headers["Authorization"] = f"Bearer {CUSTOM_KEY}"
 
@@ -247,6 +251,7 @@ def _call_haiku(prompt: str, timeout: int = 15) -> Optional[Dict[str, Any]]:
             "model": HAIKU_MODEL,
             "max_tokens": 8000,
             "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
         }
     ).encode("utf-8")
 
@@ -300,6 +305,7 @@ def _call_zen(prompt: str, timeout: int = 10) -> Optional[Dict[str, Any]]:
                         {"role": "user", "content": prompt},
                     ],
                     "max_tokens": 8000,
+                    "temperature": 0,
                 }
             ).encode("utf-8")
 
@@ -309,6 +315,7 @@ def _call_zen(prompt: str, timeout: int = 10) -> Optional[Dict[str, Any]]:
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {ZEN_KEY}",
+                    "User-Agent": "roampal-sidecar/1.0",
                 },
                 method="POST",
             )
@@ -409,7 +416,7 @@ def _call_ollama_native(prompt: str, timeout: int = 30) -> Optional[Dict[str, An
                 "model": model,
                 "prompt": full_prompt,
                 "stream": False,
-                "options": {"num_predict": 500},
+                "options": {"num_predict": 500, "temperature": 0.0},
             }
         ).encode("utf-8")
 
@@ -459,6 +466,7 @@ def _call_lmstudio(prompt: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
                     {"role": "user", "content": prompt},
                 ],
                 "max_tokens": 8000,
+                "temperature": 0,
             }
         ).encode("utf-8")
 
@@ -732,6 +740,7 @@ def get_backend_info() -> str:
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {ZEN_KEY}",
+                "User-Agent": "roampal-sidecar/1.0",
             },
             method="POST",
         )
@@ -771,7 +780,7 @@ def summarize_and_score(
     Summarize an exchange and score its outcome.
 
     Returns:
-        {"summary": "...", "outcome": "worked|failed|partial|unknown"}
+        {"exchange_summary": "...", "exchange_outcome": "worked|failed|partial|unknown"}
         or None on failure
     """
     prompt = f"""You are part of a memory system for an AI assistant. You ARE the main AI in this system — write as if you are making a note for your future self.
@@ -786,9 +795,9 @@ The user then followed up with:
 "{followup}"
 
 Respond with ONLY a JSON object:
-{{"summary": "<~300 chars>", "outcome": "<worked|failed|partial|unknown>"}}
+{{"exchange_summary": "<around 300 chars, 1-2 sentences if possible>", "exchange_outcome": "<worked|failed|partial|unknown>"}}
 
-Summary: Write a first-person note to your future self (~300 chars). Capture the important details from the exchange — what the user needed, what you did, and any key specifics worth remembering.
+Summary: Write a first-person note to your future self (around 300 chars, 1-2 sentences if possible). Capture the important details from the exchange — what the user needed, what you did, and any key specifics worth remembering.
 
 Outcome: Based on the user's follow-up:
 - worked: user confirmed, moved on, or was satisfied
@@ -812,6 +821,7 @@ def _call_anthropic_model(
             "model": model,
             "max_tokens": 8000,
             "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
         }
     ).encode("utf-8")
 
@@ -855,13 +865,13 @@ def summarize_only(content: str) -> Optional[str]:
     Returns:
         Summary string (<300 chars) or None on failure
     """
-    prompt = f"""You are part of a memory system for an AI assistant. You ARE the main AI — write a first-person note to your future self (~300 chars). Capture the important details from this exchange.
+    prompt = f"""You are part of a memory system for an AI assistant. You ARE the main AI — write a first-person note to your future self (around 300 chars, 1-2 sentences if possible). Capture the important details from this exchange.
 
 Exchange:
 "{content}"
 
 Respond with ONLY a JSON object:
-{{"summary": "<~300 chars>"}}"""
+{{"summary": "<around 300 chars, 1-2 sentences if possible>"}}"""
 
     # v0.3.6: Main-model override — user explicitly opted in to expensive model
     if SUMMARIZE_MODEL and os.environ.get("ANTHROPIC_API_KEY"):
@@ -954,13 +964,19 @@ def extract_facts(text: str, timeout: int = 30) -> Optional[List[str]]:
         "- Include WHO or WHAT each fact is about — names, projects, topics\n"
         "- Combine related details into ONE rich fact rather than many fragments\n"
         "- Include specifics: dates, versions, preferences, decisions, reasons\n"
+        "- Capture what can be inferred, not just what was explicitly said\n"
         "- ONE fact per line, max 150 characters\n"
         "- Skip vague feelings, pleasantries, or generic observations\n"
         "\n"
         'GOOD: "The auth service uses JWT with 24h expiry, needs refresh token rotation added"\n'
         'GOOD: "User prefers TypeScript over JavaScript and uses Zod for validation"\n'
+        "GOOD: \"Chapter 3 draft needs more dialogue per editor feedback, focus on protagonist's childhood\"\n"
+        'GOOD: "Lakers won 112-108 on March 5, LeBron scored 34 — user\'s favorite player"\n'
+        'GOOD: "Sourdough starter day 4, feeds every 12h at room temp, first bake planned for Saturday"\n'
+        'GOOD: "User\'s daughter Emma starts kindergarten in September, worried about the bus route"\n'
         'BAD: "They discussed something" (no specifics)\n'
         'BAD: "It was helpful" (no content)\n'
+        'BAD: "The user asked a question" (meta, not a fact)\n'
         "\n"
         'Return ONLY a JSON object: {"facts": ["fact 1", "fact 2"]}\n'
         'If no useful facts, return: {"facts": []}\n'
@@ -985,71 +1001,49 @@ def extract_facts(text: str, timeout: int = 30) -> Optional[List[str]]:
 
 def test_sidecar_scoring() -> Dict[str, Any]:
     """
-    Test sidecar with a full scoring prompt and validate response format.
+    Test sidecar by firing the three production prompts in sequence.
 
-    v0.4.5: Used by `roampal sidecar test` to verify the sidecar
-    returns all required fields (summary, outcome, noun_tags, facts).
+    v0.5.6: Replaced combined phantom prompt with real production calls.
+    Production fires three separate prompts (score, tags, facts), not one
+    combined request. This test now exercises exactly what the model will
+    handle in production, so pass/fail reflects actual runtime behavior.
 
     Returns:
-        Dict with test results: {passed: bool, fields: {field: {ok, value}}, raw: str}
+        Dict with test results: {passed: bool, fields: {field: {ok, value}}}
     """
-    prompt = """The user said:
-"I'm working on a Python project called Roampal that adds persistent memory to AI coding tools"
-
-You responded:
-"I'll help with your Roampal project. It sounds like a memory system for AI assistants."
-
-The user then followed up with:
-"Thanks, that's exactly right"
-
-Respond with ONLY a JSON object:
-{ "summary": "<~300 chars>", "outcome": "<worked|failed|partial|unknown>", "noun_tags": ["<lowercase nouns>"], "facts": ["<atomic fact 1>", "<atomic fact 2>"] }
-
-SUMMARY (under 300 chars): Capture what happened AND what changed.
-OUTCOME: Based on the user's follow-up (worked/failed/partial/unknown).
-NOUN_TAGS: Key topic nouns — lowercase, 1-3 words each, max 8.
-FACTS: Key facts worth remembering — WHO/WHAT, specifics, max 150 chars each."""
-
-    result = _call_llm(prompt)
+    sample_user = "I'm working on a Python project called Roampal that adds persistent memory to AI coding tools"
+    sample_assistant = "I'll help with your Roampal project. It sounds like a memory system for AI assistants."
+    sample_followup = "Thanks, that's exactly right"
+    sample_exchange = f"User: {sample_user}\nAssistant: {sample_assistant}\nFollow-up: {sample_followup}"
 
     fields = {}
-    if result is None:
-        return {"passed": False, "fields": {}, "error": "All backends failed"}
 
-    # v0.5.3 Section 3: 3B-class models sometimes return a bare list
-    # instead of the schema-wrapped object. The full scoring schema
-    # (summary/outcome/noun_tags/facts) can't be validated from a list,
-    # so report a clear error rather than crashing on result.get(...).
-    if isinstance(result, list):
-        return {
-            "passed": False,
-            "fields": {},
-            "error": "Sidecar returned a bare JSON array; expected an object with summary/outcome/noun_tags/facts. Try a larger model.",
-        }
+    # 1. Score (summary + outcome) — uses summarize_and_score path
+    score_result = summarize_and_score(sample_user, sample_assistant, followup=sample_followup, timeout=15)
+    if score_result is None:
+        return {"passed": False, "fields": {}, "error": "Score call failed"}
 
-    # Validate summary
-    summary = result.get("summary", "")
+    summary_val = score_result.get("exchange_summary", "") or ""
     fields["summary"] = {
-        "ok": isinstance(summary, str) and len(summary) > 0,
-        "value": summary[:100] if summary else "(missing)",
+        "ok": isinstance(summary_val, str) and len(summary_val) > 0,
+        "value": summary_val[:100] if summary_val else "(missing)",
     }
 
-    # Validate outcome
-    outcome = result.get("outcome", "")
+    outcome_val = score_result.get("exchange_outcome", "") or ""
     fields["outcome"] = {
-        "ok": outcome in ("worked", "failed", "partial", "unknown"),
-        "value": outcome or "(missing)",
+        "ok": outcome_val in ("worked", "failed", "partial", "unknown"),
+        "value": outcome_val or "(missing)",
     }
 
-    # Validate noun_tags
-    noun_tags = result.get("noun_tags", [])
+    # 2. Tags — uses extract_tags path
+    tags = extract_tags(sample_exchange, timeout=15)
     fields["noun_tags"] = {
-        "ok": isinstance(noun_tags, list) and len(noun_tags) > 0,
-        "value": noun_tags if isinstance(noun_tags, list) else "(missing)",
+        "ok": isinstance(tags, list) and len(tags) > 0,
+        "value": tags if isinstance(tags, list) else "(missing)",
     }
 
-    # Validate facts (bare-list case handled by early-return above)
-    facts = result.get("facts", [])
+    # 3. Facts — uses extract_facts path
+    facts = extract_facts(sample_exchange, timeout=15)
     fields["facts"] = {
         "ok": isinstance(facts, list) and len(facts) > 0,
         "value": facts if isinstance(facts, list) else "(missing)",

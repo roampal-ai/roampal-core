@@ -264,8 +264,14 @@ class ChromaDBAdapter:
                             logger.warning(f"[ChromaDB] Unexpected embeddings type: {type(result_embedding)}")
                             continue
                         
-                        # v0.4.1.2: Skip phantom HNSW entries (deleted docs still in vector index)
-                        if result_document is None and (result_metadata is None or not result_metadata):
+                        # v0.5.6: Skip phantom HNSW entries — OR logic catches mid-state results too.
+                        # ChromaDB can leave entries with doc cleared but metadata cached (or vice versa)
+                        # after a delete. Both leak through AND logic.
+                        is_phantom = (
+                            result_document is None
+                            or (result_metadata is None or not result_metadata)
+                        )
+                        if is_phantom:
                             continue
 
                         # Create safe result object

@@ -129,7 +129,7 @@ async function _resolveActiveWorktree(sessionID?: string): Promise<string> {
         if (dir && dir !== "/" && dir !== "\\") return dir as string
       }
     } catch (err) {
-      debugLog(`[v0.5.5.1] session.get failed (${err})`)
+      debugLog(`[v0.5.6] session.get failed (${err})`)
     }
   }
 
@@ -140,7 +140,7 @@ async function _resolveActiveWorktree(sessionID?: string): Promise<string> {
       const wt = data?.worktree
       if (wt && wt !== "/" && wt !== "\\") return wt as string
     } catch (err) {
-      debugLog(`[v0.5.5.1] project.current() failed (${err})`)
+      debugLog(`[v0.5.6] project.current() failed (${err})`)
     }
   }
 
@@ -151,11 +151,11 @@ async function refreshProfile(sessionID?: string): Promise<void> {
   const worktree = await _resolveActiveWorktree(sessionID)
   if (worktree) {
     _cachedProfile = resolveRoampalProfile(worktree)
-    debugLog(`[v0.5.5.1] refreshProfile: worktree=${worktree} → profile=${_cachedProfile || "(none)"}`)
+    debugLog(`[v0.5.6] refreshProfile: worktree=${worktree} → profile=${_cachedProfile || "(none)"}`)
     return
   }
   _cachedProfile = resolveRoampalProfile()
-  debugLog(`[v0.5.5.1] refreshProfile: no worktree from APIs, fell back to cwd → profile=${_cachedProfile || "(none)"}`)
+  debugLog(`[v0.5.6] refreshProfile: no worktree from APIs, fell back to cwd → profile=${_cachedProfile || "(none)"}`)
 }
 
 let _roampalProfileResolved = false
@@ -163,7 +163,7 @@ let _roampalProfileResolved = false
 function roampalHeaders(): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" }
   if (!_roampalProfileResolved) {
-    debugLog(`[v0.5.5.1] Resolved profile: ${_cachedProfile || "(default — no header)"}`)
+    debugLog(`[v0.5.6] Resolved profile: ${_cachedProfile || "(default — no header)"}`)
     _roampalProfileResolved = true
   }
   if (_cachedProfile) {
@@ -219,8 +219,17 @@ const idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 // v0.3.7: pendingScoringPrompt removed — scoring prompt injected via system.transform when sidecar broken
 
-// Mutex for independent scoring — only one scoring call at a time to avoid 429 pile-ups
-let scoringInFlight = false
+// v0.5.6: Async scoring queue — only one LLM call at a time to avoid 429 pile-ups,
+// but concurrent callers are queued (not dropped). Each waiter gets its own resolved value.
+type _ScoringQueueItem = {
+  sessionId: string
+  currentUserMessage: string
+  exchange: { user: string; assistant: string }
+  memories: Array<{ id: string; content: string }> | null
+  resolve: (ok: boolean) => void
+}
+let scoringQueueRunning = false
+const scoringQueue: _ScoringQueueItem[] = []
 
 // User-configurable sidecar — reads from opencode.json MCP environment at load time.
 // These env vars are stored in opencode.json > mcp > roampal-core > environment by `roampal sidecar setup`.
@@ -289,14 +298,218 @@ const FALLBACK_REQUEST_TIMEOUT_MS = 30000  // Per-request timeout for fallback (
 const modelCircuitBreaker = new Map<string, number>()
 const CIRCUIT_BREAKER_COOLDOWN_MS = 120000  // 2 minutes — recover quickly from transient failures
 
-// Deferred retry queue — if scoring fails, store the payload and retry next message.
-// Ensures scoring data is NEVER lost even if all models are temporarily down.
-let pendingScoring: {
-  sessionId: string
+// v0.5.6: Per-session deferred retry — multiple sessions can each have a pending score
+// without overwriting each other. Each entry tracks its own retry budget.
+type _PendingScoringEntry = {
   userMessage: string
   exchange: { user: string; assistant: string }
   memories: Array<{ id: string; content: string }> | null
-} | null = null
+  retryAttempts: number
+}
+const pendingScoringQueue = new Map<string, _PendingScoringEntry>()
+const PENDING_SCORING_MAX_RETRIES = 3   // initial attempt + 2 retries
+
+// v0.5.6 Fix G: Failed summary writes get their own deferred queue.
+// When sidecar scoring succeeds but the FastAPI POST to /stop fails (TimeoutError,
+// non-2xx status, network blip), the summary text was previously dropped without
+// retry. Now it lands here and the background drainer retries the write — which
+// is dedup-protected by exchange_fingerprint, so an already-stored summary
+// (FastAPI completed despite client disconnect) returns a cheap skip.
+type _PendingSummaryEntry = {
+  exchange: { user: string; assistant: string }
+  summary: string
+  outcome: string
+  fingerprint: string
+  retryAttempts: number
+}
+const pendingSummaryQueue = new Map<string, _PendingSummaryEntry>()
+const PENDING_SUMMARY_MAX_RETRIES = 3
+
+// v0.5.6 Fix F: Background drainer for pendingScoringQueue.
+// Item 19's session.idle-only retry meant queued items waited for the next user
+// message before retrying. If the user went idle, the queue stalled — and a new
+// user message added its own scoring task on top of stuck ones, compounding load.
+// Background interval drains the queue independently of user activity.
+const BACKGROUND_DRAIN_INTERVAL_MS = 30000   // 30s — matches sidecar timeout cadence
+let backgroundDrainTimer: ReturnType<typeof setInterval> | null = null
+let backgroundDrainRunning = false
+
+async function drainPendingScoringQueue(source: string): Promise<void> {
+  if (backgroundDrainRunning) return
+  if (SIDECAR_DISABLED || pendingScoringQueue.size === 0) return
+  backgroundDrainRunning = true
+  try {
+    const entries = Array.from(pendingScoringQueue.entries())
+    for (const [pendingSid, payload] of entries) {
+      payload.retryAttempts++
+      await refreshProfile(pendingSid)
+      debugLog(`${source}: Retrying deferred scoring for ${pendingSid} (attempt ${payload.retryAttempts}/${PENDING_SCORING_MAX_RETRIES})`)
+      try {
+        const ok = await scoreExchangeViaLLM(pendingSid, payload.userMessage, payload.exchange, payload.memories)
+        if (ok) {
+          pendingScoringQueue.delete(pendingSid)
+          debugLog(`${source}: Deferred scoring succeeded for ${pendingSid}`)
+        } else if (payload.retryAttempts >= PENDING_SCORING_MAX_RETRIES) {
+          consecutiveFailures++
+          pendingScoringQueue.delete(pendingSid)
+          debugLog(`${source}: Deferred scoring dropped after ${PENDING_SCORING_MAX_RETRIES} attempts — consecutiveFailures=${consecutiveFailures}`)
+        } else {
+          debugLog(`${source}: Deferred scoring failed for ${pendingSid}, will retry next drain`)
+        }
+      } catch (err) {
+        if (payload.retryAttempts >= PENDING_SCORING_MAX_RETRIES) {
+          consecutiveFailures++
+          pendingScoringQueue.delete(pendingSid)
+          debugLog(`${source}: Deferred scoring error, dropped after ${PENDING_SCORING_MAX_RETRIES} attempts — consecutiveFailures=${consecutiveFailures}: ${err}`)
+        } else {
+          debugLog(`${source}: Deferred scoring error for ${pendingSid}, will retry next drain: ${err}`)
+        }
+      }
+    }
+  } finally {
+    backgroundDrainRunning = false
+  }
+}
+
+// v0.5.6 Fix G: Compute the same fingerprint that gates dedup at /stop. Inlined
+// here so retry attempts produce the byte-identical fingerprint the original
+// attempt used — letting an already-stored summary short-circuit cleanly.
+function _summaryFingerprint(exchange: { user: string; assistant: string }): string {
+  const fpInput = `${exchange.user.slice(0, 200)}:${exchange.assistant.slice(0, 200)}`
+  let fpHash = 5381
+  for (let i = 0; i < fpInput.length; i++) {
+    fpHash = ((fpHash << 5) + fpHash + fpInput.charCodeAt(i)) | 0
+  }
+  return Math.abs(fpHash).toString(16).padStart(8, '0').slice(0, 12)
+}
+
+// v0.5.6 Fix G: Single-shot summary write. Returns true on success or dedup-skip,
+// false on any failure (timeout, non-2xx, network error). Caller decides whether
+// to enqueue for retry.
+async function tryStoreSummary(
+  sessionId: string,
+  exchange: { user: string; assistant: string },
+  summary: string,
+  outcome: string,
+  fingerprint: string
+): Promise<boolean> {
+  // Dedup check — skip if an entry with this fingerprint already exists.
+  // Best-effort: if the dedup query itself fails, proceed with the store
+  // (better duplicate than lost), and fall through to the same dedup-by-fingerprint
+  // metadata lookup the previous attempt may have missed.
+  try {
+    const dedupResp = await fetch(`${ROAMPAL_API_URL}/search`, {
+      method: "POST",
+      headers: roampalHeaders(),
+      body: JSON.stringify({
+        query: "",
+        collections: ["working"],
+        limit: 1,
+        sort_by: "recency",
+        metadata_filters: { exchange_fingerprint: fingerprint }
+      }),
+      signal: AbortSignal.timeout(3000)
+    })
+    if (dedupResp.ok) {
+      const dedupData = await dedupResp.json() as { count?: number }
+      if ((dedupData.count || 0) > 0) {
+        debugLog(`tryStoreSummary: SKIP — already exists (fingerprint=${fingerprint})`)
+        return true
+      }
+    }
+  } catch {
+    // proceed to store
+  }
+
+  let summaryResp: Response
+  try {
+    summaryResp = await fetch(`${ROAMPAL_HOOK_URL}/stop`, {
+      method: "POST",
+      headers: roampalHeaders(),
+      body: JSON.stringify({
+        conversation_id: sessionId,
+        user_message: exchange.user.slice(0, 200),
+        assistant_response: summary,
+        metadata: {
+          memory_type: "exchange_summary",
+          sidecar_outcome: outcome,
+          exchange_fingerprint: fingerprint,
+          original_user_msg_length: exchange.user.length,
+          original_assistant_msg_length: exchange.assistant.length
+        }
+      }),
+      signal: AbortSignal.timeout(30000)
+    })
+  } catch (err) {
+    debugLog(`tryStoreSummary: network/timeout error: ${err}`)
+    return false
+  }
+
+  if (!summaryResp.ok) {
+    debugLog(`tryStoreSummary: failed status=${summaryResp.status}`)
+    return false
+  }
+
+  let docId = ""
+  try {
+    const storeData = await summaryResp.json() as { doc_id?: string }
+    docId = storeData.doc_id || ""
+  } catch {
+    // Body was 2xx but couldn't parse — treat as success (data landed)
+  }
+  debugLog(`tryStoreSummary: SUMMARY stored: ${summary.length} chars, doc_id=${docId}`)
+
+  // Score the summary itself with the exchange outcome (best-effort).
+  if (docId && outcome !== "unknown") {
+    try {
+      await fetch(`${ROAMPAL_API_URL}/record-outcome`, {
+        method: "POST",
+        headers: roampalHeaders(),
+        body: JSON.stringify({
+          conversation_id: sessionId,
+          outcome,
+          memory_scores: { [docId]: outcome }
+        }),
+        signal: AbortSignal.timeout(3000)
+      })
+    } catch {
+      // Best effort — summary is stored regardless
+    }
+  }
+  return true
+}
+
+// v0.5.6 Fix G: Drain pendingSummaryQueue. Same backoff/retry semantics as Fix F's
+// scoring drain. Shares the backgroundDrainRunning guard so the two drainers don't
+// race each other (and don't double-pump on consecutive 30s ticks).
+async function drainPendingSummaryQueue(source: string): Promise<void> {
+  if (SIDECAR_DISABLED || pendingSummaryQueue.size === 0) return
+  const entries = Array.from(pendingSummaryQueue.entries())
+  for (const [pendingSid, payload] of entries) {
+    payload.retryAttempts++
+    await refreshProfile(pendingSid)
+    debugLog(`${source}: Retrying deferred summary for ${pendingSid} (attempt ${payload.retryAttempts}/${PENDING_SUMMARY_MAX_RETRIES})`)
+    try {
+      const ok = await tryStoreSummary(pendingSid, payload.exchange, payload.summary, payload.outcome, payload.fingerprint)
+      if (ok) {
+        pendingSummaryQueue.delete(pendingSid)
+        debugLog(`${source}: Deferred summary stored for ${pendingSid}`)
+      } else if (payload.retryAttempts >= PENDING_SUMMARY_MAX_RETRIES) {
+        pendingSummaryQueue.delete(pendingSid)
+        debugLog(`${source}: Deferred summary dropped after ${PENDING_SUMMARY_MAX_RETRIES} attempts for ${pendingSid}`)
+      } else {
+        debugLog(`${source}: Deferred summary failed for ${pendingSid}, will retry next drain`)
+      }
+    } catch (err) {
+      if (payload.retryAttempts >= PENDING_SUMMARY_MAX_RETRIES) {
+        pendingSummaryQueue.delete(pendingSid)
+        debugLog(`${source}: Deferred summary error, dropped after ${PENDING_SUMMARY_MAX_RETRIES} attempts for ${pendingSid}: ${err}`)
+      } else {
+        debugLog(`${source}: Deferred summary error for ${pendingSid}, will retry next drain: ${err}`)
+      }
+    }
+  }
+}
 
 // Pending scoring data — set in chat.message, consumed in session.idle.
 // Sidecar scoring is deferred to session.idle so we can check if the main LLM
@@ -630,20 +843,49 @@ function isSubagent(agentName?: string): boolean {
  * Produces summary, exchange outcome, AND per-memory scores in one call.
  * The summary is stored as a working memory with memory_type: "exchange_summary" metadata.
  */
+// v0.5.6: Public async-queue wrapper — callers get a result even if another scoring call is in flight.
 async function scoreExchangeViaLLM(
   sessionId: string,
   currentUserMessage: string,
   exchange: { user: string; assistant: string },
   memories: Array<{ id: string; content: string }> | null
 ): Promise<boolean> {
-  // Mutex: only one scoring call at a time to avoid 429 pile-ups
-  if (scoringInFlight) {
-    debugLog(`scoreExchange SKIP — already in flight`)
-    return false
+  if (scoringQueueRunning) {
+    debugLog(`scoreExchange QUEUED — ${scoringQueue.length + 1} waiting`)
+    return new Promise<boolean>((resolve) => {
+      scoringQueue.push({ sessionId, currentUserMessage, exchange, memories, resolve })
+    })
   }
-  scoringInFlight = true
 
+  scoringQueueRunning = true
   try {
+    const result = await _scoreExchangeViaLLM(sessionId, currentUserMessage, exchange, memories)
+    return result
+  } finally {
+    // Drain queue sequentially. Each waiter gets its own resolved value.
+    while (scoringQueue.length > 0) {
+      const next = scoringQueue.shift()!
+      try {
+        const ok = await _scoreExchangeViaLLM(
+          next.sessionId, next.currentUserMessage, next.exchange, next.memories
+        )
+        next.resolve(ok)
+      } catch (err) {
+        debugLog(`scoreExchange queued-call error: ${err}`)
+        next.resolve(false)
+      }
+    }
+    scoringQueueRunning = false
+  }
+}
+
+// Private worker — actual scoring logic. Called by queue wrapper or directly.
+async function _scoreExchangeViaLLM(
+  sessionId: string,
+  currentUserMessage: string,
+  exchange: { user: string; assistant: string },
+  memories: Array<{ id: string; content: string }> | null
+): Promise<boolean> {
     // v0.3.6: First-person prompt matching Claude Code sidecar (sidecar_service.py).
     // Asks for summary, outcome, and per-memory scores in one call.
     // Per-memory scoring uses relevance heuristic — sidecar can judge topic relevance
@@ -689,9 +931,9 @@ USER_FOLLOW_UP: "${currentUserMessage.slice(0, 8000)}"
 </exchange_to_summarize>
 ${memorySection}
 Respond with ONLY a JSON object:
-{ "summary": "<~300 chars>", "outcome": "<worked|failed|partial|unknown>"${memoryScoreSection} }
+{ "exchange_summary": "<around 300 chars, 1-2 sentences if possible>", "exchange_outcome": "<worked|failed|partial|unknown>"${memoryScoreSection} }
 
-SUMMARY (under 300 chars): Capture what happened AND what changed. Summaries provide context and continuity — the story behind the facts.
+SUMMARY (around 300 chars, 1-2 sentences if possible): Capture what happened AND what changed. Summaries provide context and continuity — the story behind the facts.
 - Include names, topics, and the flow of the conversation
 - Note corrections, decisions, and new information alongside the context
 - Help future retrieval understand WHY something matters, not just WHAT
@@ -788,7 +1030,10 @@ ${memoryInstructions}`
           // burn 500-2000 tokens thinking before producing JSON answer. 2000
           // was too low for verbose summaries on qwen3.6 — output got truncated
           // mid-string with no closing brace, causing parse failures.
-          const headers: Record<string, string> = { "Content-Type": "application/json" }
+          const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+            "User-Agent": "roampal-sidecar/1.0",
+          }
           if (target.key) headers["Authorization"] = `Bearer ${target.key}`
 
           // v0.4.9.4: `think: false` removed entirely.
@@ -803,7 +1048,7 @@ ${memoryInstructions}`
               messages: [
                 // /no_think disables qwen3's thinking mode (avoids burning all tokens on chain-of-thought).
                 // Other models ignore it as a harmless prefix. Scoring is simple — doesn't need reasoning.
-                { role: "system", content: "/no_think\nYou are part of a memory system. Return ONLY valid JSON with summary, outcome, and memory_scores fields. No other text. Be concise." },
+                { role: "system", content: "/no_think\nYou are part of a memory system. Return ONLY valid JSON with exchange_summary, exchange_outcome, and memory_scores fields. No other text. Be concise." },
                 { role: "user", content: "/no_think\n" + scoringPrompt }
               ],
               max_tokens: 4000,
@@ -888,13 +1133,13 @@ ${memoryInstructions}`
             debugLog(`scoreExchange no JSON from ${target.label}: content=${contentText.slice(0, 80)} reasoning=${reasoningText.slice(0, 80)}`)
             break  // bad output — try next model
           }
-          const outcome = result.outcome
+          const outcome = result.exchange_outcome
           if (!["worked", "failed", "partial", "unknown"].includes(outcome)) {
             debugLog(`scoreExchange invalid outcome from ${target.label}: ${outcome}`)
             break  // bad output — try next model
           }
 
-          const summary = typeof result.summary === "string" ? result.summary : ""
+          const summary = typeof result.exchange_summary === "string" ? result.exchange_summary : ""
           // v0.4.8: noun_tags and facts are NOT in Call 1. Tags extracted server-side at store time.
           // Facts extracted in Call 2 below.
 
@@ -952,96 +1197,22 @@ ${memoryInstructions}`
           }
 
           // v0.3.6: Store exchange summary as working memory (matches Claude Code sidecar)
-          // v0.4.8: Sidecar stores the summary via /stop (storeExchange removed)
+          // v0.5.6 Fix G: Summary write goes through tryStoreSummary(). On failure
+          // (timeout, non-2xx, network blip) the payload is queued for the
+          // background drainer to retry — same self-heal pattern as Fix F's
+          // pendingScoringQueue, just for the summary-store side of the pipeline.
           if (summary) {
-            try {
-              // Fingerprint: simple hash of first 200 chars of user+assistant (matches cli.py format)
-              // cli.py uses MD5 — we use djb2 hash since crypto is heavy in plugin context.
-              // Cross-implementation dedup isn't needed (user uses one client per exchange),
-              // but format is kept compact (12 chars) for consistent metadata sizing.
-              const fpInput = `${exchange.user.slice(0, 200)}:${exchange.assistant.slice(0, 200)}`
-              let fpHash = 5381
-              for (let i = 0; i < fpInput.length; i++) {
-                fpHash = ((fpHash << 5) + fpHash + fpInput.charCodeAt(i)) | 0
-              }
-              const fingerprint = Math.abs(fpHash).toString(16).padStart(8, '0').slice(0, 12)
-
-              // Dedup check: skip if this exchange was already summarized (matches cli.py)
-              try {
-                const dedupResp = await fetch(`${ROAMPAL_API_URL}/search`, {
-                  method: "POST",
-                  headers: roampalHeaders(),
-                  body: JSON.stringify({
-                    query: "",
-                    collections: ["working"],
-                    limit: 1,
-                    sort_by: "recency",
-                    metadata_filters: { exchange_fingerprint: fingerprint }
-                  }),
-                  signal: AbortSignal.timeout(3000)
-                })
-                if (dedupResp.ok) {
-                  const dedupData = await dedupResp.json() as { count?: number }
-                  if ((dedupData.count || 0) > 0) {
-                    debugLog(`scoreExchange SUMMARY skipped — already exists (fingerprint=${fingerprint})`)
-                    return true
-                  }
-                }
-              } catch {
-                // If dedup check fails, proceed with storing (better duplicate than lost)
-              }
-
-              const summaryResp = await fetch(`${ROAMPAL_HOOK_URL}/stop`, {
-                method: "POST",
-                headers: roampalHeaders(),
-                body: JSON.stringify({
-                  conversation_id: sessionId,
-                  user_message: exchange.user.slice(0, 200),
-                  assistant_response: summary,
-                  // v0.4.8: noun_tags not sent — server extracts tags at store time
-                  metadata: {
-                    memory_type: "exchange_summary",
-                    sidecar_outcome: outcome,
-                    exchange_fingerprint: fingerprint,
-                    original_user_msg_length: exchange.user.length,
-                    original_assistant_msg_length: exchange.assistant.length
-                  }
-                }),
-                // v0.5.4: 5s -> 30s. Server-side tag extraction via sidecar can take
-                // 10-30s on local models (LM Studio + qwen3.6-35b-a3b). The data was
-                // already being stored regardless (FastAPI handler completes despite
-                // client disconnect), but the plugin logged a misleading TimeoutError.
-                // Background task on session.idle, no user-facing impact.
-                signal: AbortSignal.timeout(30000)
+            const fingerprint = _summaryFingerprint(exchange)
+            const ok = await tryStoreSummary(sessionId, exchange, summary, outcome, fingerprint)
+            if (!ok) {
+              pendingSummaryQueue.set(sessionId, {
+                exchange,
+                summary,
+                outcome,
+                fingerprint,
+                retryAttempts: 0
               })
-
-              if (summaryResp.ok) {
-                const storeData = await summaryResp.json() as { doc_id?: string }
-                const docId = storeData.doc_id || ""
-                debugLog(`scoreExchange SUMMARY stored: ${summary.length} chars, doc_id=${docId}`)
-
-                // Score the summary itself with the exchange outcome (matches cli.py)
-                if (docId && outcome !== "unknown") {
-                  try {
-                    await fetch(`${ROAMPAL_API_URL}/record-outcome`, {
-                      method: "POST",
-                      headers: roampalHeaders(),
-                      body: JSON.stringify({
-                        conversation_id: sessionId,
-                        outcome,
-                        memory_scores: { [docId]: outcome }
-                      }),
-                      signal: AbortSignal.timeout(3000)
-                    })
-                  } catch {
-                    // Best effort — summary is stored regardless
-                  }
-                }
-              } else {
-                debugLog(`scoreExchange summary store failed: ${summaryResp.status}`)
-              }
-            } catch (err) {
-              debugLog(`scoreExchange summary store error: ${err}`)
+              debugLog(`scoreExchange: summary store failed — queued for deferred retry (session ${sessionId})`)
             }
           }
 
@@ -1059,13 +1230,19 @@ ${memoryInstructions}`
 - Include WHO or WHAT each fact is about — names, projects, topics
 - Combine related details into ONE rich fact rather than many fragments
 - Include specifics: dates, versions, preferences, decisions, reasons
+- Capture what can be inferred, not just what was explicitly said
 - ONE fact per line, max 150 characters
 - Skip vague feelings, pleasantries, or generic observations
 
 GOOD: "The auth service uses JWT with 24h expiry, needs refresh token rotation added"
 GOOD: "User prefers TypeScript over JavaScript and uses Zod for validation"
+GOOD: "Chapter 3 draft needs more dialogue per editor feedback, focus on protagonist's childhood"
+GOOD: "Lakers won 112-108 on March 5, LeBron scored 34 — user's favorite player"
+GOOD: "Sourdough starter day 4, feeds every 12h at room temp, first bake planned for Saturday"
+GOOD: "User's daughter Emma starts kindergarten in September, worried about the bus route"
 BAD: "They discussed something" (no specifics)
 BAD: "It was helpful" (no content)
+BAD: "The user asked a question" (meta, not a fact)
 
 User: ${exchange.user.slice(0, 8000)}
 Assistant: ${exchange.assistant.slice(0, 8000)}
@@ -1073,7 +1250,10 @@ Assistant: ${exchange.assistant.slice(0, 8000)}
 Return ONLY a JSON object: {"facts": ["fact 1", "fact 2"]}
 If no useful facts, return: {"facts": []}`
 
-            const factsHeaders: Record<string, string> = { "Content-Type": "application/json" }
+            const factsHeaders: Record<string, string> = {
+              "Content-Type": "application/json",
+              "User-Agent": "roampal-sidecar/1.0",
+            }
             if (target.key) factsHeaders["Authorization"] = `Bearer ${target.key}`
 
             // v0.5.4: 3 attempts for fallback (custom sidecar like LM Studio); 1 for Zen.
@@ -1094,7 +1274,7 @@ If no useful facts, return: {"facts": []}`
                       { role: "system", content: "/no_think\nExtract key facts. Return ONLY valid JSON with a facts array. No other text." },
                       { role: "user", content: "/no_think\n" + factsPrompt }
                     ],
-                    max_tokens: 2000,
+                    max_tokens: 4000,
                     temperature: 0,
                   }),
                   signal: AbortSignal.timeout(30000)
@@ -1185,9 +1365,6 @@ If no useful facts, return: {"facts": []}`
     debugLog(`scoreExchange FAILED — all models exhausted`)
     // Don't increment consecutiveFailures here — only after deferred retry also fails (session.idle)
     return false
-  } finally {
-    scoringInFlight = false
-  }
 }
 
 // v0.4.8: autoSummarize removed — caused Ollama contention with sidecar scoring.
@@ -1205,11 +1382,28 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
   // Stored in _cachedProfile and re-resolved in chat.message on every exchange.
   await refreshProfile()
 
+  // v0.5.6 Fix F + G: Start background drainer for pendingScoringQueue and pendingSummaryQueue.
+  // Without this, deferred retries only fire on user activity (session.idle).
+  if (!SIDECAR_DISABLED && backgroundDrainTimer === null) {
+    backgroundDrainTimer = setInterval(() => {
+      drainPendingScoringQueue("background.drain").catch(err => {
+        debugLog(`background.drain: unexpected scoring error: ${err}`)
+      })
+      drainPendingSummaryQueue("background.drain").catch(err => {
+        debugLog(`background.drain: unexpected summary error: ${err}`)
+      })
+    }, BACKGROUND_DRAIN_INTERVAL_MS)
+    debugLog(`Background queue drainer started (interval=${BACKGROUND_DRAIN_INTERVAL_MS}ms)`)
+  }
+
   // Discover available Zen free models at startup — replaces hardcoded list.
   // If discovery fails, the hardcoded fallback list is used.
   try {
     const resp = await fetch(`${ZEN_FALLBACK_URL}/models`, {
-      headers: { "Authorization": `Bearer ${ZEN_FALLBACK_KEY}` },
+      headers: {
+        "Authorization": `Bearer ${ZEN_FALLBACK_KEY}`,
+        "User-Agent": "roampal-sidecar/1.0",
+      },
       signal: AbortSignal.timeout(3000)
     })
     if (resp.ok) {
@@ -1776,6 +1970,10 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           idleTimers.set(sid, setTimeout(async () => {
             idleTimers.delete(sid)
 
+            // v0.5.6: Refresh profile for THIS session before any HTTP call below.
+            // Without this, _cachedProfile may belong to a different session's chat.message.
+            await refreshProfile(sid)
+
             const ctx = sessionContextMap.get(sid)
             const textParts = assistantTextParts.get(sid)
 
@@ -1818,25 +2016,11 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
             }
 
             // Retry deferred scoring from previous failures FIRST (before current scoring).
-            // This ensures failed scoring from exchange N-1 gets retried when exchange N completes.
-            if (pendingScoring && !SIDECAR_DISABLED) {
-              debugLog(`session.idle: Retrying deferred scoring for ${pendingScoring.sessionId}`)
-              try {
-                const ok = await scoreExchangeViaLLM(pendingScoring.sessionId, pendingScoring.userMessage, pendingScoring.exchange, pendingScoring.memories)
-                if (ok) {
-                  debugLog(`session.idle: Deferred scoring succeeded`)
-                  pendingScoring = null
-                } else {
-                  consecutiveFailures++
-                  debugLog(`session.idle: Deferred scoring also failed — consecutiveFailures=${consecutiveFailures}, dropping payload`)
-                  pendingScoring = null
-                }
-              } catch (err) {
-                consecutiveFailures++
-                debugLog(`session.idle: Deferred scoring error — consecutiveFailures=${consecutiveFailures}, dropping payload: ${err}`)
-                pendingScoring = null
-              }
-            }
+            // v0.5.6: Per-session map — multiple sessions can each have pending scores.
+            // Fix F + G: Shared drainers also fire from a background interval — see
+            // drainPendingScoringQueue/drainPendingSummaryQueue + setInterval at plugin init.
+            await drainPendingScoringQueue("session.idle")
+            await drainPendingSummaryQueue("session.idle")
 
             // v0.4.1: Sidecar is the sole scorer on OpenCode. No main LLM fallback.
             const scoringData = pendingScoringData.get(sid)
@@ -1852,11 +2036,11 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
                 try {
                   const ok = await scoreExchangeViaLLM(sid, scoringData.userMessage, scoringData.exchange, scoringData.memories)
                   if (!ok) {
-                    pendingScoring = { sessionId: sid, ...scoringData }
+                    pendingScoringQueue.set(sid, { ...scoringData, retryAttempts: 0 })
                     debugLog(`session.idle: Sidecar failed — queued for deferred retry`)
                   }
                 } catch (err) {
-                  pendingScoring = { sessionId: sid, ...scoringData }
+                  pendingScoringQueue.set(sid, { ...scoringData, retryAttempts: 0 })
                   debugLog(`session.idle: Sidecar error — queued for deferred retry: ${err}`)
                 }
               }
@@ -1903,6 +2087,8 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
           assistantTextParts.delete(sid)
           cachedContext.delete(sid)
           pendingScoringData.delete(sid)
+          pendingScoringQueue.delete(sid)  // v0.5.6: cleanup deferred retry debris for destroyed session
+          pendingSummaryQueue.delete(sid)  // v0.5.6 Fix G: same cleanup for summary queue
           includeRecentOnNextTurn.delete(sid)
           subagentSessions.delete(sid)  // v0.4.9.4: cleanup subagent tracking
           primarySessions.delete(sid)   // v0.5.0: cleanup primary session tracking

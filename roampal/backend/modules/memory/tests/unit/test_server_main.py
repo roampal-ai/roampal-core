@@ -146,7 +146,6 @@ class TestColdStartQualitySelection:
 
         # Mock the memory system
         mock_memory = MagicMock()
-        mock_memory.get_always_inject = MagicMock(return_value=[])
         mock_memory._memory_bank_service.list_all = MagicMock(return_value=mock_facts)
         mock_memory._data_path = MagicMock()
         mock_memory._data_path.__truediv__ = MagicMock(return_value=MagicMock(exists=MagicMock(return_value=False)))

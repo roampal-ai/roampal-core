@@ -62,7 +62,6 @@ class MemoryBankService:
         tags: List[str],
         importance: float = 0.7,
         confidence: float = 0.7,
-        always_inject: bool = False,
         embedding: Optional[List[float]] = None
     ) -> str:
         """
@@ -73,7 +72,6 @@ class MemoryBankService:
             tags: List of tags (identity, preference, project, context, goal)
             importance: 0.0-1.0 (how critical is this memory)
             confidence: 0.0-1.0 (how sure are we about this)
-            always_inject: If True, this memory appears in EVERY context
 
         Returns:
             Document ID
@@ -84,6 +82,9 @@ class MemoryBankService:
         # Capacity check (skip in benchmark mode - uncapped in 0.2.8)
         benchmark_mode = os.environ.get("ROAMPAL_BENCHMARK_MODE", "").lower() == "true"
         if not benchmark_mode:
+            # v0.5.6: auto-cleanup archived entries before capacity check
+            self._maybe_cleanup_archived()
+
             current_count = self._get_count()
             if current_count >= self.MAX_ITEMS:
                 error_msg = (
@@ -111,7 +112,6 @@ class MemoryBankService:
             "created_at": datetime.now().isoformat(),
             "mentioned_count": 1,
             "last_mentioned": datetime.now().isoformat(),
-            "always_inject": always_inject,
             # v0.2.9: Wilson scoring fields
             "uses": 0,
             "success_count": 0.0
@@ -167,6 +167,57 @@ class MemoryBankService:
         )
 
         logger.info(f"Updated memory_bank item {doc_id}: {reason}")
+        return doc_id
+
+    async def update_by_id(
+        self,
+        doc_id: str,
+        new_content: str,
+        *,
+        tags: Optional[List[str]] = None,
+        noun_tags: Optional[List[str]] = None,
+        importance: Optional[float] = None,
+        confidence: Optional[float] = None,
+    ) -> Optional[str]:
+        """Update a memory_bank entry by its exact doc_id.
+
+        No semantic search — the caller must provide the ID from a prior
+        search_memory call. This guarantees the correct entry is updated.
+
+        Returns the doc_id on success, or None if the ID doesn't exist.
+        Optionally overwrites metadata fields (None means preserve existing).
+        """
+        old_doc = self.collection.get_fragment(doc_id)
+        if not old_doc:
+            logger.warning(f"Memory {doc_id} not found for update")
+            return None
+
+        old_meta = old_doc.get("metadata", {})
+        new_embedding = await self.embed_fn(new_content)
+        patched_meta = {
+            **old_meta,
+            "text": new_content,
+            "content": new_content,
+            "updated_at": datetime.now().isoformat(),
+            "update_reason": "mcp_update",
+        }
+
+        if tags is not None:
+            patched_meta["tags"] = json.dumps(tags)
+        if noun_tags is not None:
+            patched_meta["noun_tags"] = noun_tags
+        if importance is not None:
+            patched_meta["importance"] = importance
+        if confidence is not None:
+            patched_meta["confidence"] = confidence
+
+        await self.collection.upsert_vectors(
+            ids=[doc_id],
+            vectors=[new_embedding],
+            metadatas=[patched_meta],
+        )
+
+        logger.info(f"Updated memory_bank item {doc_id} by ID")
         return doc_id
 
     async def archive(
@@ -311,23 +362,81 @@ class MemoryBankService:
         logger.info(f"User restored memory: {doc_id}")
         return True
 
-    async def delete(self, doc_id: str) -> bool:
+    async def delete_permanent(self, doc_id: str, *, force: bool = False) -> bool:
         """
-        User permanently deletes memory (hard delete).
+        Permanently hard-delete a memory_bank entry.
+
+        HNSW phantom risk: this leaves debris in the vector index that bypasses
+        metadata filters until the next phantom sweep. ONLY call from contexts
+        that follow up with a phantom sweep (cleanup_archived, explicit GDPR flow).
+
+        For user-facing deletes, call archive() instead.
 
         Args:
-            doc_id: Memory to delete
+            doc_id: Memory to permanently delete
+            force: Must be True to proceed — prevents accidental hard-delete calls
 
         Returns:
             Success status
         """
+        if not force:
+            raise RuntimeError(
+                "delete_permanent() requires force=True. "
+                "For user-facing deletes, use archive() instead."
+            )
         try:
             self.collection.delete_vectors([doc_id])
-            logger.info(f"User permanently deleted memory: {doc_id}")
+            logger.info(f"Permanently deleted memory_bank entry: {doc_id}")
             return True
         except Exception as e:
-            logger.error(f"Failed to delete memory {doc_id}: {e}")
+            logger.error(f"Failed to permanently delete memory {doc_id}: {e}")
             return False
+
+    ACTIVE_THRESHOLD = 400   # 80% of MAX_ITEMS — trigger cleanup before hard cap
+    ARCHIVED_RATIO_THRESHOLD = 0.5   # cleanup if >50% of total is archived
+
+    def _maybe_cleanup_archived(self) -> None:
+        """Auto-cleanup archived entries under capacity pressure.
+
+        Runs when active count is near MAX_ITEMS and a significant portion
+        of the collection is archived, to avoid HNSW performance degradation
+        and free room for new writes.
+        """
+        active = self._get_count()
+        if active < self.ACTIVE_THRESHOLD:
+            return
+        total = self.collection.collection.count()
+        archived = total - active
+        if total == 0 or archived / total < self.ARCHIVED_RATIO_THRESHOLD:
+            return
+        cleaned = self.cleanup_archived()
+        if cleaned:
+            logger.info(f"Auto-cleanup at capacity pressure: removed {cleaned} archived entries")
+
+    def _sweep_phantoms(self) -> int:
+        """Remove phantom entries from the HNSW index.
+
+        ChromaDB's delete() marks entries as deleted but leaves IDs in list_all_ids().
+        get_fragment() returns None for these phantoms because document and metadata are gone.
+        They're already broken (no content, no vector), so it's safe to remove them.
+
+        Returns:
+            Number of phantom entries removed
+        """
+        try:
+            all_ids = self.collection.list_all_ids()
+            phantom_ids = []
+            for doc_id in all_ids:
+                if not self.collection.get_fragment(doc_id):
+                    phantom_ids.append(doc_id)
+
+            if phantom_ids:
+                self.collection.delete_vectors(phantom_ids)
+                logger.info(f"Swept {len(phantom_ids)} phantom entries from memory_bank")
+            return len(phantom_ids)
+        except Exception as e:
+            logger.warning(f"Phantom sweep error: {e}")
+            return 0
 
     def cleanup_archived(self) -> int:
         """
@@ -352,11 +461,15 @@ class MemoryBankService:
                 if status == "archived":
                     archived_ids.append(doc_id)
 
+        deleted = len(archived_ids)
         if archived_ids:
             self.collection.delete_vectors(archived_ids)
-            logger.info(f"Cleaned up {len(archived_ids)} archived memories")
+            logger.info(f"Cleaned up {deleted} archived memories")
 
-        return len(archived_ids)
+        # v0.5.6: Sweep phantoms that were left behind by the hard deletes above
+        self._sweep_phantoms()
+
+        return deleted
 
     def get(self, doc_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -482,22 +595,6 @@ class MemoryBankService:
         except Exception as e:
             logger.warning(f"Could not get memory_bank active count: {e}")
             return 0
-
-    def get_always_inject(self) -> List[Dict[str, Any]]:
-        """
-        Get all memories marked with always_inject: true.
-
-        These are core identity facts that should appear in EVERY context
-        regardless of semantic relevance to the query.
-
-        Returns:
-            List of always_inject memories
-        """
-        all_items = self.list_all(include_archived=False)
-        return [
-            item for item in all_items
-            if item.get("metadata", {}).get("always_inject", False)
-        ]
 
     async def _get_all_items(self, limit: int) -> List[Dict[str, Any]]:
         """Get all items (fallback when no search query)."""

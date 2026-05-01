@@ -395,8 +395,19 @@ class TestToolHandlers:
             async def run(self, *a, **kw):
                 pass
 
-        with patch('roampal.mcp.server.Server', FakeServer), \
-             patch('roampal.mcp.server.stdio_server'), \
+        class FakeTool:
+            def __init__(self, **kw):
+                self.__dict__.update(kw)
+
+        class FakeTypes:
+            Prompt = object
+            Resource = object
+            Tool = FakeTool
+            @staticmethod
+            def TextContent(**kw):
+                return type('TextContent', (), kw)()
+
+        with patch.object(server_module, '_get_mcp_server', return_value=(FakeServer, MagicMock(), FakeTypes)), \
              patch.object(server_module, '_start_fastapi_server'), \
              patch('asyncio.run'):
             server_module.run_mcp_server(dev=False)
@@ -518,42 +529,50 @@ class TestToolHandlers:
         assert call_payload["content"] == "User prefers dark mode"
         assert call_payload["tags"] == ["preference"]
 
-    @pytest.mark.asyncio
-    async def test_add_to_memory_bank_with_always_inject(self, tool_handler):
-        """add_to_memory_bank passes always_inject flag."""
-        import roampal.mcp.server as server_module
-
-        mock_api = AsyncMock(return_value={"doc_id": "mb_identity"})
-
-        with patch.object(server_module, '_ensure_server_running', return_value=True), \
-             patch.object(server_module, '_api_call', mock_api):
-            result = await tool_handler("add_to_memory_bank", {
-                "content": "User's name is Alex",
-                "tags": ["identity"],
-                "always_inject": True
-            })
-
-        call_payload = mock_api.call_args[0][2]
-        assert call_payload["always_inject"] is True
-
     # ---- update_memory ----
 
     @pytest.mark.asyncio
     async def test_update_memory_success(self, tool_handler):
-        """update_memory returns success message."""
+        """update_memory returns success message with id-based API."""
         import roampal.mcp.server as server_module
 
-        mock_api = AsyncMock(return_value={"success": True, "doc_id": "mb_updated"})
+        mock_api = AsyncMock(return_value={"success": True, "doc_id": "memory_bank_a1b2c3d4"})
 
         with patch.object(server_module, '_ensure_server_running', return_value=True), \
              patch.object(server_module, '_api_call', mock_api):
             result = await tool_handler("update_memory", {
-                "old_content": "old fact",
+                "id": "memory_bank_a1b2c3d4",
                 "new_content": "corrected fact"
             })
 
         assert "Updated" in result[0].text
-        assert "mb_updated" in result[0].text
+        assert "memory_bank_a1b2c3d4" in result[0].text
+        call_payload = mock_api.call_args[0][2]
+        assert call_payload["id"] == "memory_bank_a1b2c3d4"
+        assert call_payload["new_content"] == "corrected fact"
+
+    @pytest.mark.asyncio
+    async def test_update_memory_with_metadata_override(self, tool_handler):
+        """update_memory forwards optional metadata fields."""
+        import roampal.mcp.server as server_module
+
+        mock_api = AsyncMock(return_value={"success": True, "doc_id": "memory_bank_x1y2z3"})
+
+        with patch.object(server_module, '_ensure_server_running', return_value=True), \
+             patch.object(server_module, '_api_call', mock_api):
+            result = await tool_handler("update_memory", {
+                "id": "memory_bank_x1y2z3",
+                "new_content": "updated fact",
+                "tags": ["project"],
+                "importance": 0.9,
+                "confidence": 0.85
+            })
+
+        assert "Updated" in result[0].text
+        call_payload = mock_api.call_args[0][2]
+        assert call_payload["tags"] == ["project"]
+        assert call_payload["importance"] == 0.9
+        assert call_payload["confidence"] == 0.85
 
     @pytest.mark.asyncio
     async def test_update_memory_not_found(self, tool_handler):
@@ -565,8 +584,8 @@ class TestToolHandlers:
         with patch.object(server_module, '_ensure_server_running', return_value=True), \
              patch.object(server_module, '_api_call', mock_api):
             result = await tool_handler("update_memory", {
-                "old_content": "nonexistent",
-                "new_content": "new"
+                "id": "memory_bank_invalid",
+                "new_content": "new content"
             })
 
         assert "not found" in result[0].text
@@ -751,8 +770,19 @@ class TestToolRegistration:
             async def run(self, *a, **kw):
                 pass
 
-        with patch('roampal.mcp.server.Server', FakeServer), \
-             patch('roampal.mcp.server.stdio_server'), \
+        class FakeTool:
+            def __init__(self, **kw):
+                self.__dict__.update(kw)
+
+        class FakeTypes:
+            Prompt = object
+            Resource = object
+            Tool = FakeTool
+            @staticmethod
+            def TextContent(**kw):
+                return type('TextContent', (), kw)()
+
+        with patch.object(server_module, '_get_mcp_server', return_value=(FakeServer, MagicMock(), FakeTypes)), \
              patch.object(server_module, '_start_fastapi_server'), \
              patch('asyncio.run'):
             server_module.run_mcp_server(dev=False)

@@ -260,7 +260,7 @@ class TestMemoryBankAPI:
         # Mock memory bank service
         ums._memory_bank_service = MagicMock()
         ums._memory_bank_service.store = AsyncMock(return_value="memory_bank_123")
-        ums._memory_bank_service.update = AsyncMock(return_value="memory_bank_123")
+        ums._memory_bank_service.update_by_id = AsyncMock(return_value="memory_bank_123")
         ums._memory_bank_service.archive = AsyncMock(return_value=True)
         ums._memory_bank_service.search = AsyncMock(return_value=[])
 
@@ -283,13 +283,27 @@ class TestMemoryBankAPI:
 
     @pytest.mark.asyncio
     async def test_update_memory_bank(self, mock_ums):
-        """Should delegate update."""
-        await mock_ums.update_memory_bank(
-            old_content="old text",
-            new_content="new text"
+        """v0.5.6: delegates to update_by_id with the exact doc_id."""
+        result = await mock_ums.update_memory_bank(
+            doc_id="memory_bank_abcdef12",
+            new_content="new text",
         )
 
-        mock_ums._memory_bank_service.update.assert_called_once()
+        assert result == "memory_bank_123"
+        mock_ums._memory_bank_service.update_by_id.assert_called_once()
+        kwargs = mock_ums._memory_bank_service.update_by_id.call_args.kwargs
+        assert kwargs["doc_id"] == "memory_bank_abcdef12"
+        assert kwargs["new_content"] == "new text"
+
+    @pytest.mark.asyncio
+    async def test_update_memory_bank_returns_none_when_not_found(self, mock_ums):
+        """v0.5.6: bubble up None from update_by_id when doc_id is unknown."""
+        mock_ums._memory_bank_service.update_by_id = AsyncMock(return_value=None)
+        result = await mock_ums.update_memory_bank(
+            doc_id="memory_bank_deadbeef",
+            new_content="should not write",
+        )
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_delete_memory_bank(self, mock_ums):
@@ -917,7 +931,6 @@ class TestV052PerformanceFixes:
         ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
         ums.initialized = True
         ums._memory_bank_service = MagicMock()
-        ums._memory_bank_service.get_always_inject.return_value = []
         ums._memory_bank_service.list_all.return_value = []
 
         call_windows = []
@@ -1182,6 +1195,46 @@ class TestV053FactDedup:
 
         assert result_id != existing_id, "Similar but not identical facts should not dedup"
 
+    @pytest.mark.asyncio
+    async def test_dedup_logs_info_on_skip(self, tmp_path, caplog):
+        """v0.5.6: Dedup skip emits an INFO log with tier, distance, and matched id."""
+        import uuid as _uuid
+
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        mock_embedding = [0.1] * 768
+        async def mock_embed(text):
+            return mock_embedding
+        ums._embedding_service.embed_text = mock_embed
+
+        existing_id = f"working_{_uuid.uuid4().hex[:8]}"
+        await ums.collections["working"].upsert_vectors(
+            ids=[existing_id],
+            vectors=[mock_embedding],
+            metadatas=[{
+                "text": "Logan is a data scientist",
+                "content": "Logan is a data scientist",
+                "score": 0.5,
+                "uses": 0,
+                "created_at": datetime.now().isoformat(),
+                "memory_type": "fact",
+            }]
+        )
+
+        caplog.set_level("INFO")
+        await ums.store(
+            text="Logan is a data scientist",
+            collection="working",
+            metadata={"memory_type": "fact"},
+        )
+
+        # Verify an INFO-level dedup log was emitted with tier and distance info
+        assert any("[DEDUP]" in r.message for r in caplog.records if r.levelname == "INFO")
+        log_msg = next(r.message for r in caplog.records if r.levelname == "INFO" and "[DEDUP]" in r.message)
+        assert "skip=working" in log_msg
+        assert "distance=" in log_msg
+
 
 @pytest.mark.skipif(
     sys.version_info < (3, 11),
@@ -1261,7 +1314,7 @@ class TestV053MemoryBankDedup:
         )
 
         # Mock memory_bank_service.store to return the existing_id (simulating dedup)
-        async def fake_store(text, tags, importance=0.7, confidence=0.7, always_inject=False, embedding=None):
+        async def fake_store(text, tags, importance=0.7, confidence=0.7, embedding=None):
             return existing_id
 
         ums._memory_bank_service.store = fake_store
@@ -1355,6 +1408,251 @@ class TestStartupPhantomMigration:
         await ums._startup_cleanup()
 
         mock_coll.delete_vectors.assert_not_called()
+
+
+class TestStartupCleanupStatusBackfill:
+    """v0.5.6: _startup_cleanup backfills status=active on legacy memory_bank entries."""
+
+    @pytest.mark.asyncio
+    async def test_backfill_sets_status_on_legacy_entries(self, tmp_path):
+        """Entries without status field get status=active added."""
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        mock_coll = MagicMock()
+        mock_coll.list_all_ids = MagicMock(return_value=[
+            "memory_bank_legacy1",
+            "memory_bank_legacy2",
+        ])
+        # Outer loop: 2 get_fragment calls for legacy entries
+        # update_fragment_metadata internally also calls get_fragment, so it consumes more values.
+        # Return the same fragment for each ID on any call (outer + inner).
+        def get_frag_side_effect(doc_id):
+            return {
+                "memory_bank_legacy1": {"content": "legacy fact 1", "metadata": {"text": "legacy fact 1"}},
+                "memory_bank_legacy2": {"content": "legacy fact 2", "metadata": {"text": "legacy fact 2"}},
+            }.get(doc_id, {})
+
+        mock_coll.get_fragment = MagicMock(side_effect=get_frag_side_effect)
+        mock_coll.delete_vectors = MagicMock()
+        mock_coll.update_fragment_metadata = MagicMock()
+
+        ums._memory_bank_service.collection = mock_coll
+
+        await ums._startup_cleanup()
+
+        # Should have backfilled 2 entries (both lack status field)
+        assert mock_coll.update_fragment_metadata.call_count == 2
+        calls = mock_coll.update_fragment_metadata.call_args_list
+        assert calls[0][0] == ("memory_bank_legacy1", {"status": "active"})
+        assert calls[1][0] == ("memory_bank_legacy2", {"status": "active"})
+
+    @pytest.mark.asyncio
+    async def test_backfill_skips_entries_with_status(self, tmp_path):
+        """Entries already having status=active are not touched."""
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        mock_coll = MagicMock()
+        mock_coll.list_all_ids = MagicMock(return_value=["memory_bank_modern"])
+        mock_coll.get_fragment = MagicMock(return_value={
+            "content": "modern fact",
+            "metadata": {"text": "modern fact", "status": "active"},
+        })
+        mock_coll.delete_vectors = MagicMock()
+        mock_coll.update_fragment_metadata = MagicMock()
+
+        ums._memory_bank_service.collection = mock_coll
+
+        await ums._startup_cleanup()
+
+        mock_coll.update_fragment_metadata.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_backfill_handles_empty_collection(self, tmp_path):
+        """No-op when collection has no entries."""
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        mock_coll = MagicMock()
+        mock_coll.list_all_ids = MagicMock(return_value=[])
+        mock_coll.delete_vectors = MagicMock()
+        mock_coll.update_fragment_metadata = MagicMock()
+
+        ums._memory_bank_service.collection = mock_coll
+
+        await ums._startup_cleanup()
+
+        mock_coll.update_fragment_metadata.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_backfill_skips_phantom_entries(self, tmp_path):
+        """Phantoms (get_fragment returns None) are skipped during backfill."""
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        mock_coll = MagicMock()
+        mock_coll.list_all_ids = MagicMock(return_value=[
+            "memory_bank_legacy1",
+            "memory_bank_phantom",
+            "memory_bank_modern",
+        ])
+        def get_frag_side_effect(doc_id):
+            if doc_id == "memory_bank_legacy1":
+                return {"content": "legacy", "metadata": {"text": "legacy"}}  # no status → backfill
+            elif doc_id == "memory_bank_phantom":
+                return None  # phantom → skip
+            else:
+                return {"content": "modern", "metadata": {"status": "active"}}  # has status → skip
+
+        mock_coll.get_fragment = MagicMock(side_effect=get_frag_side_effect)
+        mock_coll.delete_vectors = MagicMock()
+        mock_coll.update_fragment_metadata = MagicMock()
+
+        ums._memory_bank_service.collection = mock_coll
+
+        await ums._startup_cleanup()
+
+        # Only legacy1 gets backfilled; phantom and modern are skipped
+        assert mock_coll.update_fragment_metadata.call_count == 1
+        mock_coll.update_fragment_metadata.assert_called_with(
+            "memory_bank_legacy1", {"status": "active"}
+        )
+
+
+class TestStartupSweepAllTiers:
+    """v0.5.6 Item 32: _startup_cleanup sweeps phantoms across working/history/patterns,
+    not just memory_bank.
+
+    Marcus's documented workaround for issue #8 ("restart core after a bulk delete to
+    clean up phantoms") only fully works when the startup sweep covers every collection
+    that the desktop GUI's bulk-delete tab can poison. Pre-v0.5.6 only memory_bank was
+    swept — leaving phantoms in working/history/patterns invisible to the workaround.
+    """
+
+    @pytest.mark.asyncio
+    async def test_phantoms_swept_from_working_history_patterns(self, tmp_path):
+        """Phantoms (list_all_ids returns id, get_fragment returns None) get delete_vectors'd
+        for working, history, and patterns adapters."""
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        # Memory_bank: clean (covered by other tests)
+        mb_coll = MagicMock()
+        mb_coll.list_all_ids = MagicMock(return_value=[])
+        mb_coll.get_fragment = MagicMock(return_value=None)
+        mb_coll.delete_vectors = MagicMock()
+        mb_coll.update_fragment_metadata = MagicMock()
+        ums._memory_bank_service.collection = mb_coll
+
+        # working: 1 real + 2 phantoms
+        working_adapter = MagicMock()
+        working_adapter.list_all_ids = MagicMock(return_value=["working_real", "working_p1", "working_p2"])
+        working_adapter.get_fragment = MagicMock(side_effect=lambda doc_id: (
+            {"content": "ok"} if doc_id == "working_real" else None
+        ))
+        working_adapter.delete_vectors = MagicMock()
+        ums.collections["working"] = working_adapter
+
+        # history: 1 phantom
+        history_adapter = MagicMock()
+        history_adapter.list_all_ids = MagicMock(return_value=["history_p1"])
+        history_adapter.get_fragment = MagicMock(return_value=None)
+        history_adapter.delete_vectors = MagicMock()
+        ums.collections["history"] = history_adapter
+
+        # patterns: clean (no phantoms)
+        patterns_adapter = MagicMock()
+        patterns_adapter.list_all_ids = MagicMock(return_value=["patterns_real"])
+        patterns_adapter.get_fragment = MagicMock(return_value={"content": "ok"})
+        patterns_adapter.delete_vectors = MagicMock()
+        ums.collections["patterns"] = patterns_adapter
+
+        await ums._startup_cleanup()
+
+        # Sweep called delete_vectors with the phantom IDs (other startup steps may also
+        # delete from the same adapter — assert_any_call is the right check).
+        working_adapter.delete_vectors.assert_any_call(["working_p1", "working_p2"])
+        history_adapter.delete_vectors.assert_any_call(["history_p1"])
+        # patterns has no phantoms, so the sweep didn't fire delete_vectors with phantom args.
+        # (Garbage cleanup may still call it with low-score items, but here all fragments
+        # are valid with no score field, so no garbage either.)
+        for call_args in patterns_adapter.delete_vectors.call_args_list:
+            assert call_args[0][0] != ["patterns_real"], "patterns sweep should not delete the real entry"
+
+    @pytest.mark.asyncio
+    async def test_sweep_handles_missing_adapter(self, tmp_path):
+        """If a tier adapter is None or missing from collections, the sweep skips it
+        gracefully rather than crashing."""
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        # No-op memory_bank
+        mb_coll = MagicMock()
+        mb_coll.list_all_ids = MagicMock(return_value=[])
+        mb_coll.get_fragment = MagicMock(return_value=None)
+        mb_coll.delete_vectors = MagicMock()
+        mb_coll.update_fragment_metadata = MagicMock()
+        ums._memory_bank_service.collection = mb_coll
+
+        # Drop history entirely
+        ums.collections.pop("history", None)
+        ums.collections["working"] = None  # Edge case: explicitly None
+
+        # patterns clean
+        patterns_adapter = MagicMock()
+        patterns_adapter.list_all_ids = MagicMock(return_value=[])
+        patterns_adapter.get_fragment = MagicMock(return_value=None)
+        patterns_adapter.delete_vectors = MagicMock()
+        ums.collections["patterns"] = patterns_adapter
+
+        await ums._startup_cleanup()  # Must not raise
+
+        patterns_adapter.delete_vectors.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sweep_continues_when_one_tier_errors(self, tmp_path):
+        """An exception sweeping one tier must not block the other tiers."""
+        ums = UnifiedMemorySystem(data_path=str(tmp_path / "data"))
+        await ums.initialize()
+
+        mb_coll = MagicMock()
+        mb_coll.list_all_ids = MagicMock(return_value=[])
+        mb_coll.get_fragment = MagicMock(return_value=None)
+        mb_coll.delete_vectors = MagicMock()
+        mb_coll.update_fragment_metadata = MagicMock()
+        ums._memory_bank_service.collection = mb_coll
+
+        # working: raises on list_all_ids
+        working_adapter = MagicMock()
+        working_adapter.list_all_ids = MagicMock(side_effect=RuntimeError("simulated chroma error"))
+        working_adapter.delete_vectors = MagicMock()
+        ums.collections["working"] = working_adapter
+
+        # history: still runs and gets cleaned
+        history_adapter = MagicMock()
+        history_adapter.list_all_ids = MagicMock(return_value=["history_p1"])
+        history_adapter.get_fragment = MagicMock(return_value=None)
+        history_adapter.delete_vectors = MagicMock()
+        ums.collections["history"] = history_adapter
+
+        patterns_adapter = MagicMock()
+        patterns_adapter.list_all_ids = MagicMock(return_value=[])
+        patterns_adapter.get_fragment = MagicMock(return_value=None)
+        patterns_adapter.delete_vectors = MagicMock()
+        ums.collections["patterns"] = patterns_adapter
+
+        await ums._startup_cleanup()  # Must not raise
+
+        # working raised before reaching delete_vectors in our sweep — but promotion_service
+        # also iterates working and may surface its own delete calls. The invariant we care
+        # about: our sweep didn't proceed past the raise (no phantom-batch delete call).
+        for call_args in working_adapter.delete_vectors.call_args_list:
+            # Any call from sweep would be the full phantom list; tolerate single-id
+            # garbage/promotion calls but not a phantom batch.
+            assert len(call_args[0][0]) <= 1, "sweep should not have batch-deleted on the erroring tier"
+        # history sweep ran successfully and deleted its phantom.
+        history_adapter.delete_vectors.assert_any_call(["history_p1"])
 
 
 if __name__ == "__main__":
