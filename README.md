@@ -22,7 +22,7 @@
 
 ## Benchmarks
 
-**85.8% on LoCoMo** (non-adversarial, end-to-end answer accuracy) — validated on 1,986 questions across 10 conversations with dual grading.
+**85.8% on the corrected LoCoMo benchmark** (non-adversarial, end-to-end answer accuracy) — validated on 1,986 questions across 10 conversations with dual grading. All figures in this section are sourced from the paper and [roampal-labs](https://github.com/roampal-ai/roampal-labs) (see citations at the bottom of this section).
 
 | Result | Score |
 |--------|-------|
@@ -66,6 +66,8 @@ The core loop is identical — both platforms inject context, capture exchanges,
 
 Claude Code prompts the main LLM to score each exchange via the `score_memories` tool. OpenCode never self-scores — an independent sidecar (a separate API call) reviews each exchange as a third party, removing self-assessment bias. The `score_memories` tool is not registered on OpenCode. Scoring is disabled by default until you explicitly configure it via `roampal sidecar setup`. During setup, Roampal detects local models (Ollama, LM Studio, etc.) and lets you choose a scoring model. Zen free models are available as an explicit opt-in choice for users without a local model or API key — they route through OpenCode's proxy which may log data. A cheap or local model works great — scoring doesn't need a powerful model.
 
+> **v0.5.7:** Startup garbage collection for the MCP hook's `_completion_state.json`. The file accumulated one entry per `conversation_id` ever seen with no cleanup, driving I/O amplification on every write and leaving stuck `scored_this_turn=True` flags that could poison the cross-session scoring fallback. New `_cleanup_completion_state` pass drops entries older than 30 days or with no matching transcript, enforces a 500-entry hard ceiling, and writes atomically. JSONL transcript TTL bumped 7 → 30 days to stay in lockstep with the state-file TTL. Ships paired with Roampal Desktop v0.3.3.
+>
 > **v0.5.6:** Hardening release — closes remaining coverage gaps from the v0.5.5.x verification audit. Phantom sweep after archived cleanup, auto-cleanup under capacity pressure, dedup observability, hardened delete permissions, archive-then-add cycle tests, sidecar prompt alignment with benchmark, async scoring queue (per-session deferred retry), MCP tool definition quality rewrite (TDQS), OpenCode Go auto-detect in sidecar setup wizard, and user name extraction fix.
 >
 > **v0.5.5.2:** Hotfix — Windows plugin install now verifies copy succeeded (post-copy size check + manual read/write fallback for OneDrive/antivirus interference). Also installs to `%APPDATA%\opencode\plugins` as fallback since some Electron apps resolve config paths differently on Windows. Fixes remaining cases of issue #11 where `roampal init --force` reported success but the plugin was empty or in the wrong directory.

@@ -51,15 +51,18 @@ class SessionManager:
         # Completion state file (persists across hook invocations)
         self._state_file = self.sessions_dir / "_completion_state.json"
 
-        # v0.3.5: Cleanup old session transcripts (7-day TTL)
-        self._cleanup_old_transcripts(max_age_days=7)
+        # v0.3.5: Cleanup old session transcripts (30-day TTL since v0.5.7)
+        self._cleanup_old_transcripts(max_age_days=30)
 
         # v0.3.7: Cleanup stale exchange cache entries (keep max 50)
         self._cleanup_exchange_cache(max_entries=50)
 
+        # v0.5.7: Prune stale _completion_state.json entries
+        self._cleanup_completion_state(max_age_days=30, max_entries=500)
+
         logger.info(f"SessionManager initialized: {self.sessions_dir}")
 
-    def _cleanup_old_transcripts(self, max_age_days: int = 7) -> int:
+    def _cleanup_old_transcripts(self, max_age_days: int = 30) -> int:
         """
         Delete session JSONL transcripts older than max_age_days.
 
@@ -67,7 +70,7 @@ class SessionManager:
         has been captured in memory (working -> history -> patterns).
 
         Args:
-            max_age_days: Delete files older than this (default 7)
+            max_age_days: Delete files older than this (default 30)
 
         Returns:
             Number of files deleted
@@ -121,6 +124,99 @@ class SessionManager:
             logger.info(f"Exchange cache cleanup: evicted {evicted} stale entries")
 
         return evicted
+
+    def _cleanup_completion_state(
+        self, max_age_days: int = 30, max_entries: int = 500
+    ) -> int:
+        """
+        Prune stale entries from _completion_state.json.
+
+        v0.5.7: The state file accumulates one entry per conversation_id ever seen,
+        with no GC. Stuck `scored_this_turn=True` flags from long-dead sessions can
+        poison the cross-session fallback in `server/main.py` and falsely mark live
+        turns as already-scored. Also drives I/O amplification (full-file rewrite
+        on every mutation) as the file grows.
+
+        Pruning rule:
+          1. Drop entries where `first_message_timestamp` (or `timestamp` if absent)
+             is older than `max_age_days`, OR the matching JSONL no longer exists.
+          2. After the age pass, if count still exceeds `max_entries`, evict the
+             oldest (by `timestamp`) until count <= max_entries.
+
+        Writes once via write_json_atomic at the end (no partial state on crash).
+
+        Returns:
+            Number of entries pruned.
+        """
+        if not self._state_file.exists():
+            return 0
+
+        try:
+            with open(self._state_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Completion state cleanup: could not load state file: {e}")
+            return 0
+
+        if not isinstance(state, dict) or not state:
+            return 0
+
+        cutoff = datetime.now().timestamp() - (max_age_days * 86400)
+        original_count = len(state)
+
+        def entry_timestamp(entry: Dict[str, Any]) -> Optional[float]:
+            """Return unix timestamp from entry, or None if unparseable."""
+            ts_str = entry.get("first_message_timestamp") or entry.get("timestamp")
+            if not ts_str:
+                return None
+            try:
+                return datetime.fromisoformat(ts_str).timestamp()
+            except (ValueError, TypeError):
+                return None
+
+        # Phase 1: age + missing-JSONL prune
+        survivors: Dict[str, Any] = {}
+        for conv_id, entry in state.items():
+            if not isinstance(entry, dict):
+                # Malformed entry — drop it.
+                continue
+
+            ts = entry_timestamp(entry)
+            if ts is not None and ts < cutoff:
+                continue  # stale by age
+
+            session_file = self._get_session_file(conv_id)
+            if not session_file.exists():
+                continue  # transcript gone
+
+            survivors[conv_id] = entry
+
+        # Phase 2: hard ceiling — evict oldest by timestamp until <= max_entries
+        if len(survivors) > max_entries:
+            # Sort by timestamp ascending (oldest first). Entries with no
+            # parseable timestamp sort first (treated as oldest).
+            sorted_items = sorted(
+                survivors.items(),
+                key=lambda kv: entry_timestamp(kv[1]) or 0.0,
+            )
+            # Keep the newest max_entries
+            survivors = dict(sorted_items[-max_entries:])
+
+        pruned = original_count - len(survivors)
+
+        if pruned > 0:
+            try:
+                from roampal.utils.atomic_json import write_json_atomic
+                write_json_atomic(self._state_file, survivors, indent=None)
+            except Exception as e:
+                logger.warning(f"Completion state cleanup: write failed: {e}")
+                return 0
+
+        logger.info(
+            f"Completion state cleanup: pruned {pruned} entries "
+            f"(was {original_count}, now {len(survivors)})"
+        )
+        return pruned
 
     def _get_session_file(self, conversation_id: str) -> Path:
         """Get path to session file."""

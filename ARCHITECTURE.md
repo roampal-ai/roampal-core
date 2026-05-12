@@ -34,7 +34,7 @@ roampal init --opencode   # Or configure explicitly
   OpenCode MCP         hook subprocesses   TypeScript plugin
 ```
 
-**Architecture (v0.5.6):** MCP servers are thin HTTP clients - no ChromaDB or heavy ML frameworks in the MCP process. Embeddings use pure ONNX Runtime (no PyTorch). All access routes through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running. **Per-request profile resolution (v0.5.4):** FastAPI holds a per-profile registry (`_memory_by_profile`, `_session_manager_by_profile`) and resolves the active profile on every request via an `X-Roampal-Profile` header sent by the client. Lazy initialization under an async lock, with a shared `EmbeddingService` keeping ONNX model memory flat (~420MB total regardless of profile count). Every client sends the header: MCP server, OpenCode plugin (reads env > project `opencode.json` > global `opencode.json`), Claude Code / Cursor Python hooks (via `active_profile_name()`). Sidecar LLM handles tag extraction (OpenCode only - Claude Code uses the main LLM via MCP tools). Tag extraction uses LLM only, no regex fallback, routed through `TagService.extract_tags_async()` with an `asyncio.Lock` for GPU OOM prevention. `store_working` auto-extracts tags via TagService when caller omits them. Pre-store fact dedup prevents near-duplicate storage across tiers with tier-scoped checks. Sidecar scoring requires explicit configuration (no automatic Zen/localhost fallback); bare JSON arrays from small local models are handled via server-side shape tolerance.
+**Architecture (v0.5.7):** MCP servers are thin HTTP clients - no ChromaDB or heavy ML frameworks in the MCP process. Embeddings use pure ONNX Runtime (no PyTorch). All access routes through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running. **Per-request profile resolution (v0.5.4):** FastAPI holds a per-profile registry (`_memory_by_profile`, `_session_manager_by_profile`) and resolves the active profile on every request via an `X-Roampal-Profile` header sent by the client. Lazy initialization under an async lock, with a shared `EmbeddingService` keeping ONNX model memory flat (~420MB total regardless of profile count). Every client sends the header: MCP server, OpenCode plugin (reads env > project `opencode.json` > global `opencode.json`), Claude Code / Cursor Python hooks (via `active_profile_name()`). Sidecar LLM handles tag extraction (OpenCode only - Claude Code uses the main LLM via MCP tools). Tag extraction uses LLM only, no regex fallback, routed through `TagService.extract_tags_async()` with an `asyncio.Lock` for GPU OOM prevention. `store_working` auto-extracts tags via TagService when caller omits them. Pre-store fact dedup prevents near-duplicate storage across tiers with tier-scoped checks. Sidecar scoring requires explicit configuration (no automatic Zen/localhost fallback); bare JSON arrays from small local models are handled via server-side shape tolerance.
 
 `roampal start` is available for standalone use (e.g., OpenCode-only setups where no MCP auto-starts the server).
 
@@ -74,18 +74,21 @@ This distinction prevents forcing the LLM to score when the user is just providi
 │    ↓                                                         │
 │ 3. LLM SEES (only if scoring required):                      │
 │    <roampal-score-required>                                  │
-│    Previous: User asked "..." You answered "..."             │
-│    Current user message: "..."                               │
-│    Call score_memories(outcome="...") FIRST                  │
+│    Score the previous exchange before responding.            │
+│    Call score_memories(                                      │
+│      memory_scores={ "doc_id": "worked|failed|partial|..." },│
+│      exchange_summary="<~300 char note>",                    │
+│      exchange_outcome="worked|failed|partial|unknown"        │
+│    )                                                         │
 │    </roampal-score-required>                                 │
 │                                                              │
 │    ═══ KNOWN CONTEXT ═══                                     │
-│    • User preference: Python                                 │
+│    • [id:patterns_xyz] Python preference (4d, 78%)           │
 │    ═══ END CONTEXT ═══                                       │
 │                                                              │
 │    Original user message                                     │
 │    ↓                                                         │
-│ 4. LLM calls score_memories(outcome) then responds           │
+│ 4. LLM calls score_memories(...) then responds               │
 │    ↓                                                         │
 │ 5. HOOK: Stop (calls /api/hooks/stop)                       │
 │    - Stores exchange with doc_id                             │
@@ -101,42 +104,49 @@ This distinction prevents forcing the LLM to score when the user is just providi
 
 ### Completion State Tracking
 
-The `_completion_state.json` file tracks:
-- `completed`: True when Stop hook fires (assistant finished responding)
-- `scoring_required`: True when get-context injected a scoring prompt
+`_completion_state.json` (in `<DATA_PATH>/mcp_sessions/`) holds per-`conversation_id` lifecycle flags that coordinate scoring across hook invocations:
+
+- `completed` — Stop hook sets True when the assistant finishes responding
+- `scoring_required` — get-context sets True when it injected a scoring prompt
+- `scored_this_turn` — record_response sets True when `score_memories` was called this turn
+- `first_message_seen` + `first_message_timestamp` — get-context sets these once it has injected the cold-start user-profile dump for a session
+- `timestamp` — last-mutation marker
 
 This allows the system to distinguish between:
 1. User responding to completed work → scoring required
 2. User interrupting mid-work → no scoring needed
 
+**Startup garbage collection (v0.5.7):** `SessionManager.__init__` runs `_cleanup_completion_state` which drops entries older than 30 days OR with no matching `<conversation_id>.jsonl` transcript, then enforces a 500-entry hard ceiling by evicting the oldest. Single atomic write at the end (no partial state on crash). The JSONL transcript TTL is also 30 days, so the two cleanups stay in lockstep — entries don't get pruned out from under a paused conversation that still has its transcript.
+
 ### What The User Sees vs What The LLM Sees
 
 **User sees:** `Help me fix this auth bug`
 
-**LLM sees:**
+**LLM sees** (the v0.3.5+ lean prompt — previous exchange content is no longer duplicated into the prompt because it's already visible in conversation history):
 ```
 <roampal-score-required>
 Score the previous exchange before responding.
 
-Previous:
-- User asked: "How do I configure TypeScript?"
-- You answered: "You can configure TypeScript using tsconfig.json..."
+Look at your previous response and the user's follow-up below.
+The memories injected last turn had IDs shown in [id:...] tags in KNOWN CONTEXT.
 
-Memories surfaced:
-• [mem_abc123] "User prefers TypeScript, detailed explanations"
-• [mem_def456] "JWT refresh token pattern worked for auth issues"
-• [mem_ghi789] "Random marketing note about features"
+Score each memory:
 
-Current user message: "Help me fix this auth bug"
+Call score_memories(
+    memory_scores={
+        "mb_abc123": "___",
+        "mb_def456": "___",
+        "patterns_ghi789": "___"
+    },
+    exchange_summary="<~300 char summary of the previous exchange>",
+    exchange_outcome="worked|failed|partial|unknown"
+)
 
-Based on the user's current message, evaluate if your previous answer helped:
-- "worked" = user satisfied, says thanks, moves on to new topic
-- "failed" = user corrects you, says no/wrong, repeats question
-- "partial" = lukewarm response, "kind of", "I guess"
-- "unknown" = no clear signal
-
-Call score_memories(outcome="...", related=["doc_ids that were relevant"]) FIRST.
-- related is optional: omit to score all, or list only the memories you actually used
+SCORING GUIDE:
+• worked = this memory was helpful
+• partial = somewhat helpful
+• unknown = didn't use this memory
+• failed = this memory was MISLEADING
 
 Separately, record_response(key_takeaway="...") is OPTIONAL - only for significant learnings.
 </roampal-score-required>
@@ -181,8 +191,7 @@ roampal-core/
 │   │           ├── memory_bank_service.py   # Permanent user facts
 │   │           ├── context_service.py       # Context analysis
 │   │           ├── config.py                # MemoryConfig
-│   │           ├── memory_types.py          # TypedDicts, enums
-│   │           └── tag_service.py          # Noun tag extraction + matching
+│   │           └── memory_types.py          # TypedDicts, enums
 │   │
 │   ├── server/
 │   │   ├── __init__.py
@@ -233,6 +242,8 @@ roampal-core/
 
 **Note:** memory_bank is NOT outcome-scored (unlike working/history/patterns). Facts persist until archived.
 
+**Capacity:** memory_bank enforces `MAX_ITEMS = 500` (`memory_bank_service.py:36`). When active-status entries exceed `ACTIVE_THRESHOLD = 400` (`:395-414`), auto-cleanup archives the oldest until back under threshold. Archived entries don't count toward the active threshold but remain queryable until `cleanup_archived()` removes them.
+
 ### Promotion Flow
 
 ```
@@ -258,18 +269,20 @@ working → history → patterns
 |----------|--------|-------------|
 | `/api/hooks/get-context` | POST | v0.4.5: Two-lane TagCascade retrieval — 4 summaries + 4 facts = 8 memories. Tags-first cascade fills candidate pool, CE reranks, raw CE score as final ranking. Returns `scoring_prompt`, `context_only`, and `formatted_injection`. |
 | `/api/hooks/stop` | POST | Stores exchange, logs if score_memories not called |
+| `/api/hooks/check-scored` | GET | Stop-hook query: was `score_memories` called this turn? |
 | `/api/record-outcome` | POST | Records outcome, updates scores |
 
 ### Memory API
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/search` | POST | Hybrid search (vector + BM25 + Wilson scoring) across collections. Supports `metadata_filters` and `sort_by`. |
-| `/api/memory-bank/add` | POST | Add to memory bank (supports `always_inject` flag) |
+| `/api/search` | POST | TagCascade retrieval + CE rerank across collections. Supports `metadata_filters` and `sort_by`. |
+| `/api/memory-bank/add` | POST | Add to memory bank |
 | `/api/memory-bank/update` | POST | Update memory bank entry |
-| `/api/memory-bank/archive` | POST | Archive memory bank entry |
+| `/api/memory-bank/archive` | POST | Archive memory bank entry (soft delete — `status=archived`) |
+| `/api/memory/update-content` | POST | Update raw content of an existing memory entry |
+| `/api/retag` | POST | Re-extract `noun_tags` on stored memories using current sidecar |
 | `/api/record-response` | POST | Store key takeaway in working memory (MCP tool proxy) |
-| `/api/context-insights` | POST | Get user profile + relevant memories (MCP tool proxy) |
 | `/api/ingest` | POST | Ingest document into books collection |
 | `/api/books` | GET | List all ingested books |
 | `/api/remove-book` | POST | Remove a book by title |
@@ -302,8 +315,9 @@ The MCP server provides these tools for deep memory access:
 ### Recommended Workflow (Claude Code)
 
 ```
-1. Hook injects context + previous exchange for scoring
-2. score_memories(outcome) → Score the previous exchange
+1. Hook injects KNOWN CONTEXT + scoring prompt with cached doc_ids
+2. score_memories(memory_scores, exchange_summary, exchange_outcome, noun_tags)
+   → Scores each cached memory; stores exchange_summary as a new working entry
 3. Respond to user
 4. record_response(key_takeaway) → OPTIONAL, only for significant learnings
 ```
@@ -312,18 +326,21 @@ The MCP server provides these tools for deep memory access:
 
 ```json
 {
-  "outcome": "worked" | "failed" | "partial" | "unknown",
   "memory_scores": {
     "doc_id_1": "worked",
     "doc_id_2": "unknown",
     "doc_id_3": "failed"
-  }
+  },
+  "exchange_summary": "1-3 sentences (~300 chars) describing what happened and what changed",
+  "exchange_outcome": "worked" | "failed" | "partial" | "unknown",
+  "noun_tags": ["topic", "nouns", "names"],
+  "facts": ["optional atomic facts ≤150 chars each"]
 }
 ```
 
-The hook presents the previous exchange, cached memories, and current user message. Based on the user's reaction, score the exchange outcome and each memory individually.
+`memory_scores` is the only schema-required field; the rest are required by the hook prompt and effectively mandatory in practice. The hook presents cached memory IDs in `[id:...]` tags within KNOWN CONTEXT. Based on the user's follow-up, score the exchange outcome and each memory individually.
 
-**Exchange Outcome Detection:**
+**Exchange Outcome Detection (`exchange_outcome`):**
 - `worked` = user satisfied, says thanks, moves on to new topic
 - `failed` = user corrects you, says "no", "that's wrong"
 - `partial` = lukewarm response, "kind of", "I guess"
@@ -339,13 +356,15 @@ The hook presents the previous exchange, cached memories, and current user messa
 Example: 4 memories surfaced, 2 were helpful, 1 was misleading, 1 unused:
 ```
 score_memories(
-  outcome="worked",
   memory_scores={
-    "mem_abc123": "worked",    // +0.20
-    "mem_def456": "worked",    // +0.20
-    "mem_ghi789": "failed",    // -0.30
-    "mem_jkl012": "unknown"    // 0 (skipped)
-  }
+    "mem_abc123": "worked",    # +0.20
+    "mem_def456": "worked",    # +0.20
+    "mem_ghi789": "failed",    # -0.30
+    "mem_jkl012": "unknown"    #  0 (skipped)
+  },
+  exchange_summary="User asked about JWT refresh; previous answer worked, they moved on to auth bug.",
+  exchange_outcome="worked",
+  noun_tags=["jwt", "auth", "refresh-token"]
 )
 ```
 
@@ -391,12 +410,14 @@ The hook prompt lists all cached memories with their doc_ids. The LLM scores eac
 
 ```python
 score_memories(
-    outcome="worked",
     memory_scores={
         "doc_id_1": "worked",   # +0.20 — was helpful
         "doc_id_2": "failed",   # -0.30 — was misleading
         "doc_id_3": "unknown"   #  0    — didn't use
-    }
+    },
+    exchange_summary="<what happened, what changed>",
+    exchange_outcome="worked",
+    noun_tags=["topic", "noun"]
 )
 ```
 
@@ -410,12 +431,13 @@ This ensures:
 
 ## Score Updates
 
-When `score_memories(outcome)` is called:
+When `score_memories(...)` is called, per-memory deltas are applied based on each memory's score in `memory_scores`:
 
-| Outcome | Score Delta | Effect |
+| `memory_scores` value | Score Delta | Effect |
 |---------|-------------|--------|
 | `worked` | +0.20 | Promotes toward patterns |
 | `partial` | +0.05 | Slight boost |
+| `unknown` | -0.05 | Slight demotion (didn't help) |
 | `failed` | -0.30 | Demotes, may delete |
 
 Score range: 0.0 to 1.0
@@ -518,15 +540,15 @@ Named profile registry (v0.5.1):
 
 ---
 
-## Knowledge Graphs
-
-roampal-core shares the same Knowledge Graph data as Roampal Desktop, enabling intelligent routing and learning.
-
-### Knowledge Graph Structure
+## Retrieval
 
 ### TagCascade Retrieval (v0.4.5)
 
-Tags-first cascade retrieval replaces the knowledge graph. Validated on LoCoMo benchmark (tag_cascade_cosine: 27.3% clean, 29.0% poison Hit@1).
+Tags-first cascade retrieval replaced the Knowledge Graph subsystem in v0.4.5. The KG code path was deleted entirely (`unified_memory_system.py:1827-1847`, `config.py:60`); legacy `kg_service` kwargs are accepted and ignored for back-compat.
+
+
+
+Tags-first cascade retrieval replaces the knowledge graph. Validated on the corrected LoCoMo benchmark — `tag_cascade+cosine` won both conditions: **27.3% Hit@1 clean / 29.0% Hit@1 poison** (source: `roampal-labs/paper.md` §5.2.3, table at L790; tags-first cascade beat pure CE by +1.9 Hit@1 clean, p<0.0001 — paper L765).
 
 **Pipeline:**
 1. Match query nouns against known tag index
@@ -541,7 +563,7 @@ Tags-first cascade retrieval replaces the knowledge graph. Validated on LoCoMo b
 
 ### TagCascade `$contains` Fix (v0.5.3)
 
-Tag prefiltering now correctly uses `$contains` operator for tag matching in ChromaDB queries. Previously, tag-based prefiltering was not applied during retrieval, causing irrelevant memories to enter the candidate pool and dilute ranking quality.
+Tag prefiltering was originally written as a ChromaDB `where` clause using `$contains`, but `$contains` is a `where_document` operator (matches document text), not a `where` operator (matches metadata) — the malformed clause caused query rejections rather than silent prefilter skips. v0.5.3 **removed `$contains` from the where clause** and moved tag membership to a Python-side filter pass after over-fetch (`search_service.py:352-397`). Same release also wraps multi-key `metadata_filters` for memory_bank queries in `$and: [...]` (`search_service.py:356-368`) — see Multi-Key Filter Wrapping above.
 
 ---
 
@@ -549,11 +571,14 @@ Tag prefiltering now correctly uses `$contains` operator for tag matching in Chr
 
 ```bash
 # Setup
-roampal init                # Auto-detect and configure installed tools
-roampal init --claude-code  # Configure Claude Code explicitly
-roampal init --opencode     # Configure OpenCode explicitly
-roampal init --no-input     # Non-interactive setup (CI/scripts)
-roampal doctor              # Diagnose installation issues
+roampal init                       # Auto-detect and configure installed tools
+roampal init --claude-code         # Configure Claude Code explicitly
+roampal init --opencode            # Configure OpenCode explicitly
+roampal init --cursor              # Configure Cursor explicitly
+roampal init --scope user|project|both  # Where to write OpenCode MCP/plugin config (default: auto)
+roampal init --force / -f          # Overwrite existing config without prompting
+roampal init --no-input            # Non-interactive setup (CI/scripts)
+roampal doctor                     # Diagnose installation issues
 
 # Server
 roampal start               # Start the HTTP server manually
@@ -571,7 +596,8 @@ roampal summarize           # Summarize long memories
 
 # Scoring (OpenCode)
 roampal sidecar status      # Check scoring model configuration
-roampal sidecar setup       # Configure scoring model
+roampal sidecar setup       # Configure scoring model (interactive)
+roampal sidecar setup --auto # Non-interactive setup (auto-pick first detected local model)
 roampal sidecar test        # Test scoring model response format
 roampal sidecar disable     # Remove scoring model configuration
 
@@ -684,17 +710,20 @@ Automatically detects and configures installed tools. Use `--claude-code` or `--
 
 **Claude Code** (`~/.claude/` detected):
 
-1. Creates `~/.claude/settings.json` with:
-   - UserPromptSubmit hook → `python -m roampal.hooks.user_prompt_submit_hook`
-   - Stop hook → `python -m roampal.hooks.stop_hook`
-   - Auto-allow permissions for all roampal MCP tools
+1. Creates/merges `~/.claude/settings.json` with three hooks:
+   - UserPromptSubmit → `python -m roampal.hooks.user_prompt_submit_hook`
+   - Stop → `python -m roampal.hooks.stop_hook`
+   - SessionStart (matchers: `compact`, `startup`) → `python -m roampal.cli context --recent-exchanges` (compaction-recovery context replay)
+   - Auto-allow permissions for roampal MCP tools
 
-2. Creates `~/.claude/.mcp.json` with roampal-core MCP server
+2. Writes the roampal-core MCP server entry to `~/.claude.json` (user-scope, root-level `mcpServers`). The previous `~/.claude/.mcp.json` location was a v0.2.5 bug — Claude Code does not read that path.
+
+3. Also writes a project-local `.mcp.json` to `cwd()` so per-project Claude Code installs pick up roampal automatically.
 
 **OpenCode** (`~/.config/opencode/` detected):
-1. Creates `opencode.json` with roampal-core MCP server + `PYTHONPATH` env (atomic write — parse errors abort, `.bak` backup preserved)
-2. Installs TypeScript plugin to `~/.config/opencode/plugin/roampal.ts`
-3. Plugin handles context injection (via `chat.message` + `system.transform` hooks) and exchange capture (via `event` hook)
+1. Writes roampal-core MCP server entry into `opencode.json` (atomic write — parse errors abort, `.bak` backup preserved). Scope-aware via `--scope user|project|both`.
+2. Installs TypeScript plugin to `~/.config/opencode/plugins/roampal.ts` (note: plural `plugins/`). On Windows, also installs to `%APPDATA%/opencode/plugins/roampal.ts` as a fallback path.
+3. Plugin handles context injection (via `chat.message` + `experimental.chat.system.transform` + `experimental.chat.messages.transform` hooks) and exchange capture (via `session.idle`).
 
 **All:**
 
@@ -713,20 +742,28 @@ Automatically detects and configures installed tools. Use `--claude-code` or `--
     "UserPromptSubmit": [
       {
         "hooks": [
-          {
-            "type": "command",
-            "command": "python -m roampal.hooks.user_prompt_submit_hook"
-          }
+          { "type": "command", "command": "python -m roampal.hooks.user_prompt_submit_hook" }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          {
-            "type": "command",
-            "command": "python -m roampal.hooks.stop_hook"
-          }
+          { "type": "command", "command": "python -m roampal.hooks.stop_hook" }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          { "type": "command", "command": "python -m roampal.cli context --recent-exchanges" }
+        ]
+      },
+      {
+        "matcher": "startup",
+        "hooks": [
+          { "type": "command", "command": "python -m roampal.cli context --recent-exchanges" }
         ]
       }
     ]
@@ -737,7 +774,6 @@ Automatically detects and configures installed tools. Use `--claude-code` or `--
       "mcp__roampal-core__add_to_memory_bank",
       "mcp__roampal-core__update_memory",
       "mcp__roampal-core__delete_memory",
-      "mcp__roampal-core__get_context_insights",
       "mcp__roampal-core__record_response",
       "mcp__roampal-core__score_memories"
     ]
@@ -765,17 +801,19 @@ Automatically detects and configures installed tools. Use `--claude-code` or `--
 {
   "mcp": {
     "roampal-core": {
-      "command": "python",
-      "args": ["-m", "roampal.mcp.server"],
-      "env": {
-        "PYTHONPATH": "<roampal-core-dir>"
+      "type": "local",
+      "command": ["<python-exe>", "-m", "roampal.mcp.server"],
+      "enabled": true,
+      "environment": {
+        "PYTHONPATH": "<roampal-core-dir>",
+        "ROAMPAL_PLATFORM": "opencode"
       }
     }
   }
 }
 ```
 
-Plugin installed to `~/.config/opencode/plugins/roampal.ts`. Context injection is handled by the plugin (not hooks):
+(`ROAMPAL_DEV=1` added to `environment` when installed in dev mode.) Plugin installed to `~/.config/opencode/plugins/roampal.ts` (plural). Context injection is handled by the plugin (not hooks):
 - `chat.message` → fetches context + caches scoring data
 - `experimental.chat.system.transform` → injects memory context into system prompt
 - `experimental.chat.messages.transform` → injects scoring prompt via deep-cloned user message (clone avoids mutating UI-visible objects)
@@ -833,7 +871,7 @@ The `roampal sidecar status` command now reports both user-global and project-lo
 
 **Solution:**
 - UserPromptSubmit hook injects scoring prompt with previous exchange
-- Hook prompt tells LLM to call score_memories(outcome) FIRST
+- Hook prompt tells LLM to call score_memories(memory_scores, exchange_summary, exchange_outcome) FIRST
 - Stop hook logs warning if not called (soft enforcement)
 - Prompt injection does 95% of the work - no hard blocking needed
 - Separate tools: score_memories (scoring) vs record_response (key takeaways)
@@ -888,7 +926,15 @@ dependencies = [
 
 [project.optional-dependencies]
 # No PyTorch needed — embeddings and cross-encoder both run via ONNX Runtime
-dev = ["pytest>=7.0.0", "pytest-asyncio>=0.21.0", "mypy>=1.0.0"]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-timeout>=2.1.0",
+    "pytest-forked>=1.6.0",
+    "mypy>=1.0.0",
+    "build>=1.0.0",
+    "twine>=4.0.0",
+]
 ```
 
 ---
@@ -909,14 +955,16 @@ The `user_prompt_submit_hook` / `chat.message` fires first every turn — if the
 
 ## Search Pipeline
 
-The `search()` method delegates to `SearchService` which provides a full retrieval pipeline:
+The `search()` method delegates to `SearchService` (`search_service.py`). BM25 hybrid was removed in v0.4.1.2 (`chromadb_adapter.py:313`); the current pipeline is TagCascade with cross-encoder rerank:
 
-1. **Hybrid search**: Vector similarity + BM25 keyword matching with Reciprocal Rank Fusion
-2. **Wilson scoring**: Confidence intervals with dynamic weight shifts (NEW → EMERGING → ESTABLISHED → PROVEN)
-3. **Collection-specific boosts**: patterns priority (0.9x distance), memory_bank cold-start boost (< 3 uses), books recency
-4. **v0.4.5**: Wilson removed from retrieval entirely — metadata only for display/promotion
+1. **Tag matching**: `TagService.match_query_tags()` matches the query's noun tags against the per-collection tag index.
+2. **Tier-filled candidate pool**: fills `CE_CANDIDATE_POOL = 40` candidates (`search_service.py:50`) by walking tags from highest-overlap tier down, cosine distance as the within-tier tiebreaker.
+3. **Cosine fill**: remaining slots fill from unfiltered vector search if the tag-routed pool is short.
+4. **Cross-encoder rerank**: `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` (ONNX) reranks the pool; raw CE score is the final rank — no Wilson blend.
+5. **Wilson metadata only (v0.4.5)**: confidence intervals are surfaced as a trust signal on injected memories (`wilson:N%` tag) but never enter ranking.
+6. **memory_bank cold-start boost** still applies for entries with `<3` uses (`search_service.py:571`).
 
-Falls back to inline vector search + Wilson scoring if SearchService fails or isn't initialized.
+Falls back to inline vector search if SearchService fails or isn't initialized.
 
 ---
 
