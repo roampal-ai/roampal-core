@@ -1,9 +1,9 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "maintainers": ["roampal-ai"],
-  "version": "0.5.6",
-  "pinned_commit": "de387fc",
+  "version": "0.5.7",
+  "pinned_commit": "e572a51",
   "description": "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)",
   "keywords": ["memory", "mcp", "claude-code", "opencode", "ai", "persistent-memory"],
-  "release_notes": "v0.5.6: Hardening release closing v0.5.5.x verification gaps. Memory phantom sweep extended to all collections + cleanup_archived sweep + capacity-pressure auto-trigger; sidecar concurrency reworked into async queues with background self-healing drainers for both scoring and summary writes (no more dropped exchanges when sidecar is slow); sidecar prompts realigned with the labs benchmark (field names, temperature pinning, facts examples, max_tokens); MCP tool descriptions and JSON schemas rewritten against the TDQS rubric; update_memory now requires id (was silently creating duplicates); always_inject removed (dead code); Windows install hardened with hash verification + AppData hardlink, multi-cause error messages, APPDATA-unset warning; OpenCode Go subscription auto-detected in the sidecar setup wizard. 661 unit tests pass (3 skipped); full suite 713 pass."
+  "release_notes": "v0.5.7: Hardening release. Startup garbage collection for the MCP hook's _completion_state.json — the file accumulated one entry per conversation_id ever seen with no cleanup, driving I/O amplification on every write and leaving stuck scored_this_turn=True flags that could poison the cross-session scoring fallback. New SessionManager._cleanup_completion_state pass drops entries older than 30 days or with no matching transcript, enforces a 500-entry hard ceiling, and writes atomically. JSONL transcript TTL bumped 7 -> 30 days to stay in lockstep with the state-file TTL. ARCHITECTURE.md cleanup of accumulated drift across v0.3.5 -> v0.5.6 (dead KG section, BM25 search pipeline, score_memories API shape, init paths, endpoint tables, dev deps) with benchmark numbers now cited inline to roampal-labs/paper.md. Ships paired with Roampal Desktop v0.3.3 which automates the manual workaround at GUI bulk-clear time. 720 tests pass (roampal/ full suite)."
 }
