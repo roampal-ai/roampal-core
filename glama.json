@@ -1,9 +1,18 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
-  "maintainers": ["roampal-ai"],
-  "version": "0.5.7",
-  "pinned_commit": "e572a51",
+  "maintainers": [
+    "roampal-ai"
+  ],
+  "version": "0.5.8",
+  "pinned_commit": "6abb79f",
   "description": "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)",
-  "keywords": ["memory", "mcp", "claude-code", "opencode", "ai", "persistent-memory"],
-  "release_notes": "v0.5.7: Hardening release. Startup garbage collection for the MCP hook's _completion_state.json — the file accumulated one entry per conversation_id ever seen with no cleanup, driving I/O amplification on every write and leaving stuck scored_this_turn=True flags that could poison the cross-session scoring fallback. New SessionManager._cleanup_completion_state pass drops entries older than 30 days or with no matching transcript, enforces a 500-entry hard ceiling, and writes atomically. JSONL transcript TTL bumped 7 -> 30 days to stay in lockstep with the state-file TTL. ARCHITECTURE.md cleanup of accumulated drift across v0.3.5 -> v0.5.6 (dead KG section, BM25 search pipeline, score_memories API shape, init paths, endpoint tables, dev deps) with benchmark numbers now cited inline to roampal-labs/paper.md. Ships paired with Roampal Desktop v0.3.3 which automates the manual workaround at GUI bulk-clear time. 720 tests pass (roampal/ full suite)."
+  "keywords": [
+    "memory",
+    "mcp",
+    "claude-code",
+    "opencode",
+    "ai",
+    "persistent-memory"
+  ],
+  "release_notes": "v0.5.8: Crash-resilience release. Enables SQLite WAL + FULL durability on the ChromaDB catalog so hard terminations (Windows port conflicts, external process kills, power loss) no longer corrupt or empty the database. Rewrites SessionManager.mark_scored() to perform an atomic temp-file replace, guaranteeing the session JSONL transcript survives a crash mid-write. Ships 16 new automated tests covering both fixes and fixes pre-existing test debt that left the full suite red on Windows. No data migration required; WAL applies on the next server start. 733 tests pass (3 skipped on Python 3.10 only for a test-harness teardown path)."
 }

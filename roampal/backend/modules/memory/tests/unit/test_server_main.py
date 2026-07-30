@@ -368,7 +368,11 @@ class TestV052StartServerBanner:
             if args:
                 printed.append(" ".join(str(a) for a in args))
 
+        # v0.5.x fix: mock active_profile_name to avoid reading the system's actual
+        # profile file (which may contain a non-default name like "main" on some machines).
+        default_active = "default" if not profile_name else profile_name
         with patch("roampal.profile_manager.Path.home", return_value=tmp_path), \
+             patch("roampal.profile_manager.active_profile_name", return_value=default_active), \
              patch.object(srv.uvicorn, "run", lambda *a, **kw: None), \
              patch.object(srv, "create_app", lambda: None), \
              patch("builtins.print", side_effect=capture), \

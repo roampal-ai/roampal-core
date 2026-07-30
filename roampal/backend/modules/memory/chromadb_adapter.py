@@ -1,5 +1,6 @@
 import logging
 import os
+import sqlite3
 from typing import List, Dict, Any, Optional
 import chromadb
 import sys
@@ -15,6 +16,40 @@ from .embedding_service import EmbeddingService
 import shutil
 from pathlib import Path
 import time
+
+
+def _configure_sqlite_wal(db_path: str):
+    """Set WAL journal mode + FULL durability on the ChromaDB SQLite file.
+
+    v0.5.8: Prevents catalog corruption during hard crashes (e.g., port conflict, external process kill).
+
+    WAL keeps a write-ahead log so concurrent reads survive interrupted writes.
+    FULL durability forces fsync at every commit point (slightly slower but safe).
+
+    The PRAGMA values are stored in the DB header and persist for all future connections.
+
+    Test-only escape hatch: set ROAMPAL_TEST_DISABLE_WAL=1 to skip WAL configuration.
+    This is needed because pytest-forked (used on Linux CI to keep RAM flat) does not
+    play well with WAL-enabled SQLite databases.
+    """
+    if os.environ.get("ROAMPAL_TEST_DISABLE_WAL"):
+        return
+
+    db_file = os.path.join(db_path, "chroma.sqlite3")
+    if not os.path.exists(db_file):
+        return  # Will be created on first write; we'll configure it then
+
+    try:
+        conn = sqlite3.connect(db_file)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=FULL")
+        conn.commit()
+        conn.close()
+        logger.info(f"SQLite WAL mode + FULL durability enabled for {db_path}")
+    except Exception as e:
+        logger.warning(f"Failed to configure SQLite WAL for {db_path}: {e}")
+
+
 # Simple collection naming for single user
 def get_loopsmith_collection():
     return "loopsmith_memories"
@@ -111,6 +146,14 @@ class ChromaDBAdapter:
                 logger.info(f"ChromaDB client connected to server at localhost:8003")
             else:
                 # Use local embedded mode (for testing only)
+                # v0.5.8: Create a transient client to ensure the SQLite file exists, then
+                # close it before configuring WAL. This avoids applying PRAGMAs while a
+                # PersistentClient connection pool holds the database open, which can leave
+                # ChromaDB's Rust SQLite layer in a corrupted state on some platforms.
+                temp_client = chromadb.PersistentClient(path=self.db_path)
+                temp_client.close()
+                _configure_sqlite_wal(self.db_path)
+
                 self.client = chromadb.PersistentClient(path=self.db_path)
                 logger.info(f"ChromaDB client initialized for local path: {self.db_path}")
 

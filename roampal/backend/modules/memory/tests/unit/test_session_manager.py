@@ -161,3 +161,198 @@ class TestCleanupCompletionState:
         # No stray .tmp files left behind in sessions_dir
         tmp_leftovers = list((tmp_path / "mcp_sessions").glob("*.tmp"))
         assert tmp_leftovers == [], f"Leftover tmp files: {tmp_leftovers}"
+
+
+class TestMarkScoredAtomicRewrite:
+    """v0.5.8 Item 2: atomic transcript rewrite in SessionManager.mark_scored()."""
+
+    def _seed_session(self, data_path: Path, conversation_id: str, lines: list[str]) -> None:
+        """Create a session JSONL file with the given lines."""
+        sessions_dir = data_path / "mcp_sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        safe_id = _safe_id(conversation_id)
+        (sessions_dir / f"{safe_id}.jsonl").write_text("".join(lines))
+
+    async def test_happy_path_marks_last_matching_record(self, tmp_path):
+        """mark_scored updates the last matching assistant record and returns True."""
+        from roampal.hooks.session_manager import SessionManager
+
+        lines = [
+            json.dumps({"role": "user", "content": "hello"}) + "\n",
+            json.dumps({"role": "assistant", "doc_id": "doc_1", "content": "hi back"}) + "\n",
+        ]
+        self._seed_session(tmp_path, "conv1", lines)
+
+        sm = SessionManager(tmp_path)
+        result = await sm.mark_scored("conv1", "doc_1", "worked")
+
+        assert result is True
+        # Verify the assistant record was updated
+        records = [json.loads(line.strip()) for line in open(tmp_path / "mcp_sessions" / "conv1.jsonl")]
+        assistant_record = [r for r in records if r.get("role") == "assistant"][0]
+        assert assistant_record["scored"] is True
+        assert assistant_record["outcome"] == "worked"
+        # User record untouched
+        user_record = [r for r in records if r.get("role") == "user"][0]
+        assert "scored" not in user_record
+
+    async def test_no_tmp_residue_on_success(self, tmp_path):
+        """After a successful mark_scored, no .tmp files are left behind."""
+        from roampal.hooks.session_manager import SessionManager
+
+        lines = [
+            json.dumps({"role": "user", "content": "hello"}) + "\n",
+            json.dumps({"role": "assistant", "doc_id": "doc_1", "content": "hi back"}) + "\n",
+        ]
+        self._seed_session(tmp_path, "conv2", lines)
+
+        sm = SessionManager(tmp_path)
+        await sm.mark_scored("conv2", "doc_1", "partial")
+
+        tmp_leftovers = list((tmp_path / "mcp_sessions").glob("*.tmp"))
+        assert tmp_leftovers == [], f"Leftover tmp files: {tmp_leftovers}"
+
+    async def test_replace_failure_preserves_original(self, tmp_path):
+        """If os.replace fails mid-atomic-write, original file is byte-for-byte intact."""
+        from roampal.hooks.session_manager import SessionManager
+
+        lines = [
+            json.dumps({"role": "user", "content": "hello"}) + "\n",
+            json.dumps({"role": "assistant", "doc_id": "doc_1", "content": "hi back"}) + "\n",
+        ]
+        self._seed_session(tmp_path, "conv3", lines)
+
+        sm = SessionManager(tmp_path)
+        original_bytes = (tmp_path / "mcp_sessions" / "conv3.jsonl").read_bytes()
+
+        with patch(
+            "roampal.hooks.session_manager.os.replace",
+            side_effect=OSError("simulated disk error"),
+        ):
+            result = await sm.mark_scored("conv3", "doc_1", "worked")
+
+        assert result is False
+        # Original file unchanged (atomic write contract)
+        assert (tmp_path / "mcp_sessions" / "conv3.jsonl").read_bytes() == original_bytes
+        # No stray .tmp files left behind
+        tmp_leftovers = list((tmp_path / "mcp_sessions").glob("*.tmp"))
+        assert tmp_leftovers == [], f"Leftover tmp files: {tmp_leftovers}"
+
+    async def test_write_failure_cleans_tmp(self, tmp_path):
+        """If the write phase fails (not replace), original file is intact and tmp is cleaned."""
+        from roampal.hooks.session_manager import SessionManager
+
+        lines = [
+            json.dumps({"role": "user", "content": "hello"}) + "\n",
+            json.dumps({"role": "assistant", "doc_id": "doc_1", "content": "hi back"}) + "\n",
+        ]
+        self._seed_session(tmp_path, "conv4", lines)
+
+        sm = SessionManager(tmp_path)
+        original_bytes = (tmp_path / "mcp_sessions" / "conv4.jsonl").read_bytes()
+
+        with patch(
+            "roampal.hooks.session_manager.os.fdopen",
+            side_effect=OSError("simulated write error"),
+        ):
+            result = await sm.mark_scored("conv4", "doc_1", "worked")
+
+        assert result is False
+        # Original file unchanged
+        assert (tmp_path / "mcp_sessions" / "conv4.jsonl").read_bytes() == original_bytes
+        # No stray .tmp files left behind (inner cleanup ran)
+        tmp_leftovers = list((tmp_path / "mcp_sessions").glob("*.tmp"))
+        assert tmp_leftovers == [], f"Leftover tmp files: {tmp_leftovers}"
+
+    async def test_missing_session_file_returns_false(self, tmp_path):
+        """If the session JSONL doesn't exist, mark_scored returns False without creating anything."""
+        from roampal.hooks.session_manager import SessionManager
+
+        sm = SessionManager(tmp_path)
+        result = await sm.mark_scored("conv5", "doc_1", "worked")
+
+        assert result is False
+        sessions_dir = tmp_path / "mcp_sessions"
+        # No JSONL file created
+        assert not (sessions_dir / "conv5.jsonl").exists()
+        # No .tmp files anywhere
+        if sessions_dir.exists():
+            tmp_leftovers = list(sessions_dir.glob("*.tmp"))
+            assert tmp_leftovers == []
+
+    async def test_doc_id_not_found_no_write(self, tmp_path):
+        """If no matching doc_id is found, mark_scored returns False and performs zero writes."""
+        from roampal.hooks.session_manager import SessionManager
+
+        lines = [
+            json.dumps({"role": "user", "content": "hello"}) + "\n",
+            json.dumps({"role": "assistant", "doc_id": "doc_1", "content": "hi back"}) + "\n",
+        ]
+        self._seed_session(tmp_path, "conv6", lines)
+
+        sm = SessionManager(tmp_path)
+        original_bytes = (tmp_path / "mcp_sessions" / "conv6.jsonl").read_bytes()
+
+        # Request a doc_id that doesn't exist in the file
+        result = await sm.mark_scored("conv6", "doc_999", "worked")
+
+        assert result is False
+        # File must be byte-for-byte unchanged (no write path taken)
+        assert (tmp_path / "mcp_sessions" / "conv6.jsonl").read_bytes() == original_bytes
+
+    async def test_corrupt_lines_skipped_and_last_match_wins(self, tmp_path):
+        """mark_scored skips corrupt JSONL lines and updates only the last matching assistant record."""
+        from roampal.hooks.session_manager import SessionManager
+
+        # Two assistant records with same doc_id; one garbage line between them.
+        # mark_scored scans in reverse, so it should find the NEWER (last) match.
+        lines = [
+            json.dumps({"role": "user", "content": "first"}) + "\n",
+            json.dumps({"role": "assistant", "doc_id": "doc_1", "content": "old response"}) + "\n",
+            "THIS IS GARBAGE NOT JSON\n",  # corrupt line — should be skipped
+            json.dumps({"role": "user", "content": "second"}) + "\n",
+            json.dumps({"role": "assistant", "doc_id": "doc_1", "content": "new response"}) + "\n",
+        ]
+        self._seed_session(tmp_path, "conv7", lines)
+
+        sm = SessionManager(tmp_path)
+        result = await sm.mark_scored("conv7", "doc_1", "worked")
+
+        assert result is True
+        # Parse only valid JSON lines to find assistant records
+        all_lines = open(tmp_path / "mcp_sessions" / "conv7.jsonl").readlines()
+        assistants = []
+        for line in all_lines:
+            try:
+                rec = json.loads(line.strip())
+                if rec.get("role") == "assistant":
+                    assistants.append(rec)
+            except json.JSONDecodeError:
+                pass  # garbage lines are skipped by parsing, preserved in file
+        # Only the last (newest) assistant record should be marked scored
+        assert len(assistants) == 2
+        assert not assistants[0].get("scored"), "Older match must NOT be updated"
+        assert assistants[1]["scored"] is True, "Newer match MUST be updated"
+        assert assistants[1]["outcome"] == "worked"
+        # Garbage line preserved verbatim in the file (atomic rewrite writes all lines back)
+        raw_content = open(tmp_path / "mcp_sessions" / "conv7.jsonl").read()
+        assert "THIS IS GARBAGE NOT JSON" in raw_content
+
+    async def test_cache_flags_updated(self, tmp_path):
+        """mark_scored updates _last_exchange_cache when doc_id matches (regression guard)."""
+        from roampal.hooks.session_manager import SessionManager
+
+        lines = [
+            json.dumps({"role": "user", "content": "hello"}) + "\n",
+            json.dumps({"role": "assistant", "doc_id": "doc_1", "content": "hi back"}) + "\n",
+        ]
+        self._seed_session(tmp_path, "conv8", lines)
+
+        sm = SessionManager(tmp_path)
+        # Pre-seed the cache with a matching entry (simulates an in-flight exchange)
+        sm._last_exchange_cache["conv8"] = {"doc_id": "doc_1"}
+
+        await sm.mark_scored("conv8", "doc_1", "worked")
+
+        assert sm._last_exchange_cache["conv8"]["scored"] is True
+        assert sm._last_exchange_cache["conv8"]["outcome"] == "worked"

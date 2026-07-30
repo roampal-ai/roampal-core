@@ -10,6 +10,7 @@ Stores exchanges in JSONL files so the Stop hook can:
 import json
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 from datetime import datetime
@@ -450,10 +451,27 @@ class SessionManager:
                     continue
 
             if updated:
-                with open(session_file, "w", encoding="utf-8") as f:
-                    f.writelines(lines)
-                logger.info(f"Marked {doc_id} as scored with outcome={outcome}")
-                return True
+                # v0.5.8-hotfix: atomic rewrite so a crash mid-write doesn't
+                # truncate the session transcript.
+                parent = session_file.parent
+                fd, tmp_name = tempfile.mkstemp(dir=str(parent), suffix=".tmp")
+                tmp_path = Path(tmp_name)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.writelines(lines)
+                    os.replace(tmp_path, session_file)
+                    logger.info(f"Marked {doc_id} as scored with outcome={outcome}")
+                    return True
+                except Exception:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+                    raise
 
         except Exception as e:
             logger.error(f"Error marking scored: {e}")

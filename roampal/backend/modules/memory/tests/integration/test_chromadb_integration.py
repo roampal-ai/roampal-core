@@ -534,5 +534,100 @@ class TestPhantomFiltering:
         await adapter.cleanup()
 
 
+@pytest.mark.wal
+class TestSqliteWalIntegration:
+    """v0.5.8 Item 1: integration tests for WAL mode with real ChromaDBAdapter."""
+
+    @pytest.fixture
+    def temp_db_path(self):
+        """Create temporary directory for ChromaDB (reuse pattern from existing class)."""
+        temp_dir = tempfile.mkdtemp(prefix="roampal_test_wal_")
+        yield temp_dir
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception:
+            pass
+
+    @pytest.fixture
+    async def adapter(self, temp_db_path):
+        """Create initialized ChromaDBAdapter (reuses existing fixture pattern)."""
+        from roampal.backend.modules.memory.chromadb_adapter import ChromaDBAdapter
+
+        adapter = ChromaDBAdapter(
+            persistence_directory=temp_db_path,
+            use_server=False
+        )
+        await adapter.initialize(collection_name="wal_test_collection")
+        yield adapter
+        await adapter.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_adapter_initialization_enables_wal(self, temp_db_path):
+        """Real ChromaDBAdapter.initialize() triggers _configure_sqlite_wal — journal_mode becomes 'wal'.
+
+        This is the primary acceptance test: proves the helper fires from initialize(),
+        not just in isolation. PersistentClient creates chroma.sqlite3 at client-creation
+        time, so the helper's missing-file branch should NOT trigger here; if it does
+        (file absent → mode stays 'delete'), that is a real bug to report.
+        """
+        import sqlite3
+
+        from roampal.backend.modules.memory.chromadb_adapter import ChromaDBAdapter
+
+        adapter = ChromaDBAdapter(
+            persistence_directory=temp_db_path,
+            use_server=False
+        )
+        await adapter.initialize(collection_name="wal_test_collection")
+
+        # Verify WAL mode via direct SQLite connection (not through the adapter)
+        db_file = os.path.join(temp_db_path, "chroma.sqlite3")
+        assert os.path.exists(db_file), "ChromaDB should create chroma.sqlite3 on init"
+
+        conn = sqlite3.connect(db_file)
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        sync_val = conn.execute("PRAGMA synchronous").fetchone()[0]
+        conn.close()
+
+        assert mode == "wal", f"Expected 'wal' but got '{mode}' — _configure_sqlite_wal may not have fired"
+        assert sync_val == 2, f"Expected synchronous=FULL (2) but got {sync_val}"
+
+        await adapter.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_normal_ops_regression_under_wal(self, adapter):
+        """WAL mode doesn't break normal upsert/query/delete operations.
+
+        Mirrors release-notes acceptance criterion: no regression in query/upsert/delete paths.
+        This is a small explicit canary so the WAL acceptance mapping is self-contained.
+        """
+        # Upsert two vectors with very different values for clean separation
+        vec1 = [0.0] * 384 + [1.0] * 384
+        vec2 = [1.0] * 768
+
+        await adapter.upsert_vectors(
+            ids=["wal_1", "wal_2"],
+            vectors=[vec1, vec2],
+            metadatas=[{"text": "first"}, {"text": "second"}]
+        )
+
+        # Query one back — top_k=1 ensures only exact match returns
+        results = await adapter.query_vectors(vec1, top_k=1)
+        assert len(results) == 1
+        assert results[0]["id"] == "wal_1"
+
+        # Delete one
+        adapter.delete_vectors(["wal_2"])
+
+        # Verify count
+        count = await adapter.get_collection_count()
+        assert count == 1
+
+        # Remaining vector still queryable
+        remaining_ids = adapter.list_all_ids()
+        assert "wal_1" in remaining_ids
+        assert "wal_2" not in remaining_ids
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -28,6 +28,12 @@ jobs:
 
       - name: Run tests
         timeout-minutes: 10
+        env:
+          # WAL-enabled SQLite does not survive os.fork() cleanly on the GH
+          # Actions Linux runners (inherited fd/shared-memory mappings cause
+          # disk I/O errors during ChromaDB compaction). WAL tests run in a
+          # separate in-process job below.
+          ROAMPAL_TEST_DISABLE_WAL: "1"
         # --forked: each test in its own subprocess so RAM (esp. ONNX models
         # at ~420MB each) is fully released between tests. Without this the
         # 27+ tests that call await ums.initialize() in test_unified_memory_system.py
@@ -35,7 +41,28 @@ jobs:
         # the 80% mark. Linux/macOS only (uses os.fork); Windows local runs
         # use the standard in-process pytest path.
         # --timeout=60: per-test cap so a hung test self-reports with a name.
-        run: pytest --tb=short -q --timeout=60 --forked
+        # -m "not wal": WAL tests run in the dedicated wal-tests job.
+        run: pytest --tb=short -q --timeout=60 --forked -m "not wal"
+
+  wal-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Run WAL tests
+        timeout-minutes: 10
+        # In-process only: WAL + fork causes SQLite I/O errors on Linux CI.
+        run: pytest --tb=short -q --timeout=60 -m "wal"
 
   plugin-parse:
     runs-on: ubuntu-latest
