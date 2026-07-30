@@ -442,14 +442,6 @@ When `score_memories(...)` is called, per-memory deltas are applied based on eac
 
 Score range: 0.0 to 1.0
 
-### Time Weighting
-
-Recent memories get stronger score updates:
-```python
-time_weight = 1.0 / (1 + age_days / 30)  # Decay over month
-score_delta = base_delta * time_weight
-```
-
 ---
 
 ## Data Storage
@@ -654,8 +646,6 @@ Books are stored in the `books` ChromaDB collection with these operations:
 **Book Removal Flow:**
 1. Find all chunks with matching title
 2. Delete from ChromaDB `books` collection
-3. Clean `context_action_effectiveness` examples referencing those doc_ids
-4. Save knowledge_graph.json
 
 **Note:** Removal is by title (not UUID) - simpler for CLI. Duplicate titles get removed together.
 
