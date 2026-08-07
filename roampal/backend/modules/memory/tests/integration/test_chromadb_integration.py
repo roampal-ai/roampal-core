@@ -12,6 +12,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 import pytest
 import tempfile
 import shutil
+import subprocess
+import time
 from typing import List
 
 # Ensure embedded mode for tests
@@ -590,7 +592,9 @@ class TestSqliteWalIntegration:
         conn.close()
 
         assert mode == "wal", f"Expected 'wal' but got '{mode}' — _configure_sqlite_wal may not have fired"
-        assert sync_val == 2, f"Expected synchronous=FULL (2) but got {sync_val}"
+        # This observes the effective setting from a fresh SQLite connection.
+        # ChromaDB 1.5.x uses Rust SQLite and does not expose its connection.
+        assert sync_val == 2, f"Expected effective synchronous=FULL (2) but got {sync_val}"
 
         await adapter.cleanup()
 
@@ -627,6 +631,91 @@ class TestSqliteWalIntegration:
         remaining_ids = adapter.list_all_ids()
         assert "wal_1" in remaining_ids
         assert "wal_2" not in remaining_ids
+
+    @pytest.mark.crash
+    @pytest.mark.asyncio
+    async def test_chromadb_catalog_survives_hard_kill(self, temp_db_path):
+        """A killed Chroma writer must not lose previously committed metadata.
+
+        This exercises the production persistence path rather than a synthetic
+        SQLite table: a child PersistentClient is killed while performing a
+        large catalog write, then a fresh client verifies recovery.
+        """
+        import chromadb
+        import sqlite3
+
+        from roampal.backend.modules.memory.chromadb_adapter import ChromaDBAdapter
+
+        adapter = ChromaDBAdapter(
+            persistence_directory=temp_db_path,
+            use_server=False,
+        )
+        await adapter.initialize(collection_name="crash_test_collection")
+        baseline_vector = [0.25] * 32
+        await adapter.upsert_vectors(
+            ids=["baseline"],
+            vectors=[baseline_vector],
+            metadatas=[{"text": "committed baseline metadata"}],
+        )
+        await adapter.cleanup()
+
+        marker_file = os.path.join(temp_db_path, "writer-ready")
+        child_code = r'''
+import os
+import sqlite3
+import sys
+import time
+import chromadb
+
+db_path, marker_path = sys.argv[1:]
+client = chromadb.PersistentClient(path=db_path)
+collection = client.get_collection(name="crash_test_collection")
+open(marker_path, "w").close()
+
+ids = ["inflight_" + str(i) for i in range(5000)]
+vectors = [[0.75] * 32 for _ in ids]
+metadatas = [{"text": "in-flight catalog metadata " + ("x" * 2048)} for _ in ids]
+collection.upsert(ids=ids, embeddings=vectors, metadatas=metadatas)
+time.sleep(30)
+'''
+        child = subprocess.Popen([
+            sys.executable,
+            "-c",
+            child_code,
+            temp_db_path,
+            marker_file,
+        ])
+        try:
+            deadline = time.monotonic() + 30
+            while not os.path.exists(marker_file) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert os.path.exists(marker_file), "Chroma writer did not initialize"
+
+            # Allow the child to enter the large upsert before terminating it.
+            time.sleep(0.1)
+            child.kill()  # SIGKILL on POSIX; TerminateProcess on Windows
+            child.wait(timeout=30)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=30)
+
+        db_file = os.path.join(temp_db_path, "chroma.sqlite3")
+        conn = sqlite3.connect(db_file)
+        try:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+            assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        finally:
+            conn.close()
+
+        recovered = chromadb.PersistentClient(path=temp_db_path)
+        try:
+            collection = recovered.get_collection(name="crash_test_collection")
+            result = collection.get(ids=["baseline"], include=["metadatas"])
+            assert result["ids"] == ["baseline"]
+            assert result["metadatas"][0]["text"] == "committed baseline metadata"
+        finally:
+            recovered.close()
 
 
 if __name__ == "__main__":

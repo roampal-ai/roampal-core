@@ -31,19 +31,19 @@ On a prod install after ~30 days of usage:
 
 Windows Event Viewer showed `eos.exe` and `LM Studio` crashes around the same timestamps as Roampal terminations. These external processes held conflicting ports/resources on port 27182. The Roampal server subprocess output was sent to `DEVNULL`, hiding crash errors from logs. No Roampal code or packages changed since December (v0.5.6).
 
-### Fix — WAL journal mode + FULL durability at startup
+### Fix — WAL journal mode and durability configuration at startup
 
 In `chromadb_adapter.py`, new `_configure_sqlite_wal(db_path)` function runs immediately after `PersistentClient` creation:
 - Opens a brief connection to the SQLite file
 - Executes `PRAGMA journal_mode=WAL` and `PRAGMA synchronous=FULL`
-- Commits and closes — these PRAGMAs are stored in the DB header and persist for all future connections
+- Commits and closes. WAL is stored in the DB header and persists for future connections. `synchronous=FULL` is requested on the configuration connection, but SQLite treats it as connection-local and ChromaDB's Rust backend does not expose a public connection-level PRAGMA hook.
 
-WAL (Write-Ahead Logging) keeps modifications in a separate `.wal` file until commit, so reads never block on writes and interrupted writes leave the main database intact. FULL durability forces `fsync()` at every commit point — slightly slower but prevents data loss on power failure or hard kill.
+WAL (Write-Ahead Logging) keeps modifications in a separate `.wal` file until commit, so reads never block on writes and interrupted writes can be recovered without leaving the main database partially written. The helper requests FULL durability on its brief configuration connection, but ChromaDB's Rust backend does not expose a supported way to verify or set that option on its own connection.
 
 ### Acceptance criteria
 
 - Journal mode changes from `delete` to `wal` on first PersistentClient init
-- PRAGMA values persist across all connections (stored in DB header)
+- WAL persists across all connections (stored in DB header)
 - No regression in query/upsert/delete paths
 - Silent no-op if SQLite file doesn't exist yet (e.g., fresh install before first write)
 
@@ -62,7 +62,7 @@ WAL (Write-Ahead Logging) keeps modifications in a separate `.wal` file until co
 
 ### Why this matters
 
-Without WAL mode, every hard crash risks total metadata loss — collections become empty even though binary data survives on disk. This is not a rare edge case: Windows port conflicts with other Python processes (LM Studio, eos.exe) caused 30+ days of accumulated memory to be lost in May 2026. With WAL mode + FULL durability, the database catalog survives hard terminations and recovers cleanly on restart at the cost of ~5–10ms extra latency per write batch (negligible compared to embedding generation which takes seconds).
+Without WAL mode, every hard crash risks total metadata loss — collections become empty even though binary data survives on disk. This is not a rare edge case: Windows port conflicts with other Python processes (LM Studio, eos.exe) caused 30+ days of accumulated memory to be lost in May 2026. WAL mode gives the SQLite catalog a crash-recovery path at the cost of ~5–10ms extra latency per write batch (negligible compared to embedding generation which takes seconds).
 
 ---
 
@@ -72,7 +72,7 @@ Implemented and verified 2026-05-27.
 
 - `_configure_sqlite_wal(db_path)` added at `chromadb_adapter.py:21-43`, called from `initialize()` after PersistentClient creation at line 146.
 - Verified journal mode change on test database: `delete` → `wal`.
-- Verified PRAGMA persists across connections — second connection reads `wal` as current mode without re-applying.
+- Verified WAL persists across connections — second connection reads `wal` as current mode without re-applying. `synchronous=FULL` is verified only on the connection where it is requested because SQLite treats it as connection-local.
 - Defensive: returns silently if SQLite file doesn't exist yet (fresh install). Logs warning on failure but doesn't block startup.
 
 ## Verification
@@ -86,7 +86,7 @@ v0.5.8 ships with 16 new automated tests covering both fixes:
 
 | Test file | Class | Tests | Coverage |
 |---|---|---|---|
-| `tests/unit/test_sqlite_wal.py` | `TestConfigureSqliteWal` | 6 | WAL mode applied, header persistence across connections, synchronous=FULL, missing-file no-op, failure logs warning (doesn't raise), uncommitted write rollback integrity |
+| `tests/unit/test_sqlite_wal.py` | `TestConfigureSqliteWal` | 6 | WAL mode applied, header persistence across connections, FULL durability requested on the configuration connection, missing-file no-op, failure logs warning (doesn't raise), uncommitted write rollback integrity |
 | `tests/unit/test_session_manager.py` | `TestMarkScoredAtomicRewrite` | 8 | Happy path marks last matching record, no .tmp residue on success, os.replace failure preserves original, fdopen write failure cleans tmp and preserves original, missing session file returns False, doc_id not found performs zero writes, corrupt JSONL lines skipped with last-match-wins semantics, cache flags updated |
 | `tests/integration/test_chromadb_integration.py` | `TestSqliteWalIntegration` | 2 | Real ChromaDBAdapter.initialize() enables WAL (primary acceptance test), normal upsert/query/delete ops regression under WAL |
 

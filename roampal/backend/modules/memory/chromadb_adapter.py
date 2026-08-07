@@ -24,9 +24,11 @@ def _configure_sqlite_wal(db_path: str):
     v0.5.8: Prevents catalog corruption during hard crashes (e.g., port conflict, external process kill).
 
     WAL keeps a write-ahead log so concurrent reads survive interrupted writes.
-    FULL durability forces fsync at every commit point (slightly slower but safe).
+    Requests FULL durability on the configuration connection. SQLite's
+    synchronous setting is connection-local; ChromaDB owns its Rust SQLite
+    connection and does not expose a public PRAGMA configuration hook.
 
-    The PRAGMA values are stored in the DB header and persist for all future connections.
+    WAL is stored in the database header and persists for future connections.
 
     Test-only escape hatch: set ROAMPAL_TEST_DISABLE_WAL=1 to skip WAL configuration.
     This is needed because pytest-forked (used on Linux CI to keep RAM flat) does not

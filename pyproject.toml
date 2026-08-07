@@ -65,6 +65,7 @@ asyncio_mode = "auto"
 testpaths = ["roampal"]
 markers = [
     "wal: WAL-specific tests that must run in-process (not forked)",
+    "crash: subprocess force-termination and recovery tests",
 ]
 
 [tool.mypy]
