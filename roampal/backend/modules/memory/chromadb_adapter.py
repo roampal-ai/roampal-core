@@ -153,7 +153,12 @@ class ChromaDBAdapter:
                 # PersistentClient connection pool holds the database open, which can leave
                 # ChromaDB's Rust SQLite layer in a corrupted state on some platforms.
                 temp_client = chromadb.PersistentClient(path=self.db_path)
-                temp_client.close()
+                # close() only exists on chromadb >= ~1.5.x; older 1.x within
+                # the supported pin (>=1.0.0,<2.0.0) lacks it. Skipping keeps
+                # adapter init working on those versions (WAL config then
+                # behaves as in v0.5.7); GC reclaims the temp client either way.
+                if hasattr(temp_client, "close"):
+                    temp_client.close()
                 _configure_sqlite_wal(self.db_path)
 
                 self.client = chromadb.PersistentClient(path=self.db_path)

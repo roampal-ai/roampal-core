@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roampal"
-version = "0.5.8"
+version = "0.5.9"
 description = "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -66,6 +66,7 @@ testpaths = ["roampal"]
 markers = [
     "wal: WAL-specific tests that must run in-process (not forked)",
     "crash: subprocess force-termination and recovery tests",
+    "slow: long-running integration gates (RSS soak, real-model runs)",
 ]
 
 [tool.mypy]

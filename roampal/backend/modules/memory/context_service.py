@@ -179,7 +179,7 @@ class ContextService:
 
         try:
             # Get embedding
-            query_vector = await self.embed_fn(current_message)
+            query_vector = await self.embed_fn(current_message, role="query")
 
             # Search working memory
             working_items = await self.collections["working"].query_vectors(

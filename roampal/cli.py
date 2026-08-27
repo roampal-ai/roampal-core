@@ -4238,6 +4238,47 @@ def cmd_profile(args):
     return 1
 
 
+def cmd_reembed(args):
+    """Re-embed stored vectors after an embedder model change (v0.5.9 Item 2a)."""
+    import asyncio
+    from pathlib import Path
+    from roampal.backend.modules.memory import UnifiedMemorySystem
+    from roampal.profile_manager import active_profile_name, resolve_data_path
+    import roampal.backend.modules.memory.embedding_service as es
+
+    profile_flag = getattr(args, "profile", None)
+    if profile_flag:
+        os.environ["ROAMPAL_PROFILE"] = profile_flag
+    # This process is the intended migration runner: suppress the UMS
+    # auto-scheduler so initialize() doesn't spawn a background task that
+    # races this call for the single-runner lock (post-review fix 2026-08-27).
+    os.environ["ROAMPAL_REEMBED_DISABLE"] = "1"
+    profile_name = active_profile_name()
+    data_path = Path(resolve_data_path(profile_name))
+
+    async def do_reembed():
+        mem = UnifiedMemorySystem(data_path=data_path)
+        await mem.initialize()
+        from roampal.backend.modules.memory.embedding_migrator import migrate_profile
+        n = await migrate_profile(
+            mem, data_path,
+            model=es.HF_REPO, onnx_file=es.ONNX_FILE,
+            force=getattr(args, "force", False),
+            dry_run=getattr(args, "dry_run", False),
+            only_collection=getattr(args, "collection", None),
+        )
+        return n
+
+    n = asyncio.run(do_reembed())
+    if getattr(args, "dry_run", False):
+        print(f"{YELLOW}Dry run complete for profile '{profile_name}': "
+              f"{n} record(s) would be re-embedded.{RESET}")
+    else:
+        print(f"{GREEN}Re-embed complete for profile '{profile_name}': "
+              f"{n} record(s) updated.{RESET}")
+    return 0
+
+
 def main():
     """Main CLI entry point."""
     from roampal import __version__
@@ -4590,6 +4631,16 @@ examples:
     )
 
     # help command (alias for --help)
+    reembed_parser = subparsers.add_parser(
+        "reembed", help="Re-embed stored vectors after an embedder model change"
+    )
+    reembed_parser.add_argument("--profile", help="Target profile (default: active)")
+    reembed_parser.add_argument("--collection", help="Only re-embed this collection")
+    reembed_parser.add_argument("--force", action="store_true",
+                                help="Re-embed even if metadata says up to date")
+    reembed_parser.add_argument("--dry-run", action="store_true",
+                                help="Report what would change without writing")
+
     subparsers.add_parser("help", help="Show this help message")
 
     args = parser.parse_args()
@@ -4632,6 +4683,8 @@ examples:
         exit_code = cmd_doctor(args) or 0
     elif args.command == "profile":
         exit_code = cmd_profile(args) or 0
+    elif args.command == "reembed":
+        exit_code = cmd_reembed(args) or 0
     elif args.command == "help":
         parser.print_help()
     else:

@@ -656,3 +656,72 @@ class TestV052CERerankOffload:
             f"_rerank_with_ce never went through asyncio.to_thread; "
             f"captured calls: {captured}"
         )
+
+
+class TestSharedCrossEncoder:
+    """v0.5.9 Item 3a: exactly ONE InferenceSession regardless of instance or
+    profile count — concurrent loads must share the module-level holder."""
+
+    @pytest.fixture
+    def fake_ort(self, monkeypatch):
+        import onnxruntime as ort
+        from roampal.backend.modules.memory import search_service as ss
+
+        constructed = []
+
+        class _FakeTok:
+            @classmethod
+            def from_file(cls, path):
+                inst = cls()
+                inst.enable_padding = lambda: None
+                inst.enable_truncation = lambda **kw: None
+                return inst
+
+        def fake_session(model_path, sess_options=None, providers=None):
+            constructed.append(model_path)
+            return MagicMock()
+
+        def fake_download(repo_id=None, filename=None, **kw):
+            return f"cached::{filename}"
+
+        monkeypatch.setattr(ort, "InferenceSession", fake_session)
+        monkeypatch.setattr("tokenizers.Tokenizer", _FakeTok)
+        # _load_ce imports hf_hub_download inside the function — patch the package.
+        monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
+        monkeypatch.setattr(ss, "_shared_ce_session", None)
+        monkeypatch.setattr(ss, "_shared_ce_tokenizer", None)
+        return constructed
+
+    @staticmethod
+    def _make():
+        return SearchService(
+            collections={},
+            scoring_service=MagicMock(spec=ScoringService),
+            routing_service=MagicMock(spec=RoutingService),
+            tag_service=MagicMock(spec=TagService),
+            embed_fn=AsyncMock(return_value=[0.1] * 768),
+            config=MemoryConfig(),
+        )
+
+    def test_two_instances_share_one_session(self, fake_ort):
+        a, b = self._make(), self._make()
+        assert a._load_ce() is True
+        assert b._load_ce() is True
+        assert len(fake_ort) == 1, f"constructed {len(fake_ort)} sessions"
+        assert a._ce_session is b._ce_session
+        assert id(a._ce_session) == id(b._ce_session)
+
+    def test_concurrent_loads_construct_exactly_one_session(self, fake_ort):
+        import concurrent.futures
+
+        services = [self._make() for _ in range(4)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            outcomes = list(pool.map(lambda s: s._load_ce(), services))
+
+        assert all(outcomes is not None for outcomes in outcomes)
+        assert all(outcomes for outcomes in outcomes), "a loader failed; fakes broken"
+        assert len(fake_ort) == 1, (
+            f"concurrent loads constructed {len(fake_ort)} sessions"
+        )
+        sessions = {id(s._ce_session) for s in services}
+        assert len(sessions) == 1

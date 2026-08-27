@@ -28,7 +28,7 @@ from .context_service import ContextService
 from .promotion_service import PromotionService
 from .routing_service import RoutingService
 from .tag_service import TagService
-from .search_service import SearchService
+from .search_service import SearchService, EmbedderUnavailable
 
 # v0.4.9: Import sidecar service for LLM tag extraction (OpenCode only).
 # Claude Code doesn't use a sidecar — the main LLM handles tags via MCP tools.
@@ -307,6 +307,11 @@ class UnifiedMemorySystem:
         # back-to-back. Per-instance (not module-global) so multi-profile
         # FastAPI servers still migrate each profile correctly.
         self._v056_migrations_done = False
+
+        # v0.5.9 Item 2a/2b: re-embed migration task handle. Defined here (not
+        # just in initialize()) so get_migration_state()/search() can check it
+        # safely even if called before initialize() completes.
+        self._migration_task = None
 
         # Resolution precedence:
         #   1. Explicit data_path arg (constructor caller knows best)
@@ -645,9 +650,123 @@ class UnifiedMemorySystem:
                 self._embedding_service.prewarm(), name="warmup_embedding"
             ),
         ]
+        self._migration_task = None
+
+        # v0.5.9 Item 2a: re-embed stored vectors if the embedder artifact
+        # changed. Fired as a background task; initialize() returns immediately
+        # so startup latency is unchanged and no MCP timeout is risked.
+        await self._maybe_schedule_reembed()
 
         # Startup cleanup: delete garbage memories (score < 0.2)
         await self._startup_cleanup()
+
+    # ------------------------------------------------------------------ #
+    # v0.5.9 Item 2a: background re-embed migration
+    # ------------------------------------------------------------------ #
+    async def _maybe_schedule_reembed(self):
+        """Schedule a background re-embed if the embedder artifact changed."""
+        try:
+            from .embedding_migrator import (
+                read_meta, write_meta, migrate_profile,
+                collection_needs_migration, artifact_key,
+            )
+            import roampal.backend.modules.memory.embedding_service as es
+
+            if os.environ.get("ROAMPAL_REEMBED_DISABLE") == "1":
+                logger.info("[reembed] disabled via ROAMPAL_REEMBED_DISABLE")
+                return
+
+            data_path = self.data_path
+            onnx_file = es.ONNX_FILE
+            model = es.HF_REPO
+            coll_names = list(self.collections.keys())
+
+            meta = read_meta(data_path)
+            has_vectors = any(
+                (self.collections[c].collection and self.collections[c].collection.count() > 0)
+                for c in coll_names
+            )
+            if not meta and not has_vectors:
+                # Fresh install: record artifacts and skip the (empty) migration.
+                write_meta(data_path, model, onnx_file, {c: artifact_key(model, onnx_file) for c in coll_names})
+                return
+            if meta and not any(collection_needs_migration(meta, c, model, onnx_file) for c in coll_names):
+                return
+
+            logger.info("[reembed] artifact change detected; scheduling background re-embed")
+            self._migration_task = asyncio.create_task(
+                self._run_reembed(data_path, model, onnx_file), name="reembed"
+            )
+        except Exception as e:
+            logger.warning(f"[reembed] failed to schedule migration: {e}")
+
+    async def _run_reembed(self, data_path, model, onnx_file, force=False, dry_run=False):
+        from .embedding_migrator import migrate_profile
+        try:
+            await migrate_profile(
+                self, data_path, model=model, onnx_file=onnx_file,
+                force=force, dry_run=dry_run,
+            )
+        except Exception as e:
+            logger.error(f"[reembed] migration failed: {e}", exc_info=True)
+        finally:
+            self._migration_task = None
+
+    # ------------------------------------------------------------------ #
+    # v0.5.9 Item 2b: migration visibility
+    # ------------------------------------------------------------------ #
+    def get_migration_state(self) -> dict:
+        """Return re-embed migration status for health/search endpoints.
+
+        `migrated` collections have vectors in the current embedder space and
+        are safe to search; `pending` ones are still (partially) in the old
+        space and are excluded from search while a migration is active.
+        """
+        try:
+            from .embedding_migrator import read_meta, collection_needs_migration
+            import roampal.backend.modules.memory.embedding_service as es
+
+            meta = read_meta(self.data_path)
+            onnx_file = es.ONNX_FILE
+            model = es.HF_REPO
+            migrated, pending = [], []
+            for c in self.collections:
+                if meta and not collection_needs_migration(meta, c, model, onnx_file):
+                    migrated.append(c)
+                else:
+                    pending.append(c)
+            active = self._migration_task is not None and not self._migration_task.done()
+            return {
+                "active": active,
+                "onnx_file": onnx_file,
+                "migrated": migrated,
+                "pending": pending,
+            }
+        except Exception as e:
+            logger.warning(f"[reembed] failed to read migration state: {e}")
+            return {
+                "active": False,
+                "onnx_file": None,
+                "migrated": [],
+                "pending": list(self.collections.keys()),
+            }
+
+    async def shutdown_background_tasks(self):
+        """Cancel/await warm-up and migration tasks on shutdown (Item 2a/2b/5)."""
+        for t in getattr(self, "_warmup_tasks", []) or []:
+            if t is not None and not t.done():
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+        t = getattr(self, "_migration_task", None)
+        if t is not None and not t.done():
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def _startup_cleanup(self, force_migrations: bool = False):
         """
@@ -792,6 +911,23 @@ class UnifiedMemorySystem:
         if not self.initialized:
             await self.initialize()
 
+        # v0.5.9 Item 2b: while a re-embed migration is in flight, exclude
+        # collections whose vectors are still in the old embedding space. Mixing
+        # spaces corrupts ranking; each collection rejoins search as its
+        # re-embed completes (and is removed from `pending` in the meta file).
+        migrating = self._migration_task is not None and not self._migration_task.done()
+        if migrating:
+            state = self.get_migration_state()
+            pending = set(state.get("pending") or [])
+            if collections is None:
+                collections = list(self.collections.keys())
+            collections = [c for c in collections if c not in pending]
+            if not collections:
+                logger.info(
+                    "[reembed] search skipped: all requested collections still pending migration"
+                )
+                return []
+
         # Delegate to SearchService (TagCascade + cross-encoder)
         if self._search_service:
             try:
@@ -845,6 +981,10 @@ class UnifiedMemorySystem:
                     # Default: already sorted by final_rank_score from SearchService
                     return all_results[: limit * 2]
 
+            except EmbedderUnavailable:
+                # v0.5.9 Item 7: surface explicitly; don't fall back to an inline
+                # search that will also fail to embed the query.
+                raise
             except Exception as e:
                 logger.warning(
                     f"SearchService search failed, falling back to inline: {e}"
@@ -854,7 +994,13 @@ class UnifiedMemorySystem:
         if collections is None:
             collections = list(self.collections.keys())
 
-        query_vector = await self._embedding_service.embed_text(query)
+        # Inline fallback also depends on the embedder; signal the same way.
+        try:
+            query_vector = await self._embedding_service.embed_text(query, role="query")
+        except Exception as e:
+            raise EmbedderUnavailable(
+                f"Embedding service unavailable for query '{query}': {e}"
+            )
 
         all_results = []
         for coll_name in collections:
@@ -970,7 +1116,7 @@ class UnifiedMemorySystem:
                 "timestamp": datetime.now().isoformat(),
                 **(metadata or {}),
             }
-            embedding = await self._embedding_service.embed_text(text)
+            embedding = await self._embedding_service.embed_text(text, role="passage")
 
             # v0.5.3: Pre-store dedup for fact-type writes (all 4 tiers).
             if metadata and metadata.get("memory_type") == "fact":
@@ -1019,7 +1165,7 @@ class UnifiedMemorySystem:
 
         # v0.5.3: Pre-store dedup — memory_bank scans only within its own tier.
         # A permanent write must NEVER be blocked by an ephemeral working-tier copy.
-        embedding = await self._embedding_service.embed_text(text)
+        embedding = await self._embedding_service.embed_text(text, role="passage")
         dup_id = await self._find_duplicate_fact(embedding, tiers=("memory_bank",))
         if dup_id is not None:
             logger.debug(f"[DEDUP] memory_bank duplicate found: {dup_id}, skipping write")
@@ -1522,7 +1668,7 @@ class UnifiedMemorySystem:
         base_id = f"books_{uuid.uuid4().hex[:8]}"
 
         # v0.2.0: Batch embed all chunks at once (much faster for large books)
-        embeddings = await self._embedding_service.embed_texts(chunks)
+        embeddings = await self._embedding_service.embed_texts(chunks, role="passage")
 
         # Build all document IDs and metadata
         doc_ids = []
@@ -1694,7 +1840,7 @@ class UnifiedMemorySystem:
             await self.initialize()
 
         doc_id = f"working_{uuid.uuid4().hex[:8]}"
-        embedding = await self._embedding_service.embed_text(content)
+        embedding = await self._embedding_service.embed_text(content, role="passage")
 
         # v0.5.3: Pre-store dedup for fact-type writes (all 4 tiers).
         if metadata and metadata.get("memory_type") == "fact":

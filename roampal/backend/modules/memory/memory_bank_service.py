@@ -38,7 +38,7 @@ class MemoryBankService:
     def __init__(
         self,
         collection: Any,
-        embed_fn: Callable[[str], Awaitable[List[float]]],
+        embed_fn: Callable[..., Awaitable[List[float]]],
         search_fn: Optional[Callable] = None,
         config: Optional[MemoryConfig] = None
     ):
@@ -98,7 +98,7 @@ class MemoryBankService:
 
         # Generate embedding (use caller-provided if available to avoid double-embed)
         if embedding is None:
-            embedding = await self.embed_fn(text)
+            embedding = await self.embed_fn(text, role="passage")
 
         # Build metadata
         metadata = {
@@ -151,7 +151,7 @@ class MemoryBankService:
             return await self.store(new_text, tags=["updated"])
 
         # Update in-place (no archive copy)
-        new_embedding = await self.embed_fn(new_text)
+        new_embedding = await self.embed_fn(new_text, role="passage")
         old_metadata = old_doc.get("metadata", {})
 
         await self.collection.upsert_vectors(
@@ -193,7 +193,7 @@ class MemoryBankService:
             return None
 
         old_meta = old_doc.get("metadata", {})
-        new_embedding = await self.embed_fn(new_content)
+        new_embedding = await self.embed_fn(new_content, role="passage")
         patched_meta = {
             **old_meta,
             "text": new_content,

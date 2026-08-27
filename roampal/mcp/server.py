@@ -450,6 +450,22 @@ def run_mcp_server(dev: bool = False):
     global _dev_mode
     _dev_mode = dev
 
+    # v0.5.9 Item 5: console + rotating, PID-scoped file logging and an RSS
+    # heartbeat thread for out-of-memory diagnosis.
+    try:
+        from roampal.backend.modules.memory.search_service import (
+            configure_logging,
+            start_rss_heartbeat,
+            log_memory_error,
+            _contains_memory_error,
+        )
+    except Exception:
+        configure_logging = start_rss_heartbeat = log_memory_error = _contains_memory_error = None
+
+    if configure_logging:
+        configure_logging("mcp")
+        start_rss_heartbeat(logger)
+
     if dev:
         os.environ["ROAMPAL_DEV"] = "1"
         logger.info("MCP Server running in DEV mode")
@@ -1041,6 +1057,36 @@ ERRORS
                         id_str = f" [id:{result_doc_id}]" if result_doc_id else ""
                         text += f"{i}. [{collection}]{meta_str}{id_str} {content}\n\n"
 
+                # v0.5.9 Item 2b/7: surface degraded-state notices to the user.
+                if isinstance(result, dict):
+                    # Migration progress (2b)
+                    migration = result.get("migration")
+                    if migration and migration.get("active"):
+                        done = len(migration.get("migrated", []))
+                        total = done + len(migration.get("pending", []))
+                        text = (
+                            f"[Roampal] Re-embedding stored memory after the model update "
+                            f"({done}/{total} collections done). Some memories are temporarily "
+                            f"unavailable and will return as each collection finishes.\n\n"
+                            + text
+                        )
+                    # Embedder down (7): explicit message, never a bare "no results".
+                    degraded = result.get("degraded")
+                    if degraded and degraded.get("embedder_unavailable"):
+                        msg = degraded.get("message") or (
+                            "Memory search is temporarily unavailable because the "
+                            "embedding service is down."
+                        )
+                        text = f"[Roampal] {msg}\n\n" + text
+                    # Reranker down (7): annotate that results are cosine-only.
+                    if result.get("rerank_skipped"):
+                        text = (
+                            "[Roampal] Note: the cross-encoder reranker is unavailable, "
+                            "so these results are ranked by cosine similarity only "
+                            "(not reranked for relevance).\n\n"
+                            + text
+                        )
+
                 return [types.TextContent(type="text", text=text)]
 
             elif name == "add_to_memory_bank":
@@ -1194,7 +1240,15 @@ ERRORS
             await server.run(read_stream, write_stream, server.create_initialization_options())
 
     print("[roampal-mcp] starting asyncio.run(main())", file=sys.stderr, flush=True)
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except BaseException as e:
+        # v0.5.9 Item 5: log a fatal MemoryError (incl. when wrapped in an
+        # ExceptionGroup) before the process exits.
+        if _contains_memory_error and _contains_memory_error(e):
+            log_memory_error(logger, e)
+            sys.exit(1)
+        raise
 
 
 if __name__ == "__main__":
@@ -1215,6 +1269,7 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    logging.basicConfig(level=logging.INFO)
-    print("[roampal-mcp] calling run_mcp_server()", file=_sys.stderr, flush=True)
+    # Logging (console + rotating PID-scoped file) is configured inside
+    # run_mcp_server() for v0.5.9 Item 5.
+    print("[roampal-mcp] calling run_mcp_server()", file=sys.stderr, flush=True)
     run_mcp_server(dev=is_dev)

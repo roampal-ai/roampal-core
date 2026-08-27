@@ -124,6 +124,7 @@ channels/
 %TEMP%*
 roampal-core*
 test_data/
+test_data_*/
 test_env/
 
 # Debug/temp files (never commit — may contain PII or memory content)

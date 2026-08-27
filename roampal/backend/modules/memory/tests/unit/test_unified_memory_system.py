@@ -148,7 +148,7 @@ class TestStoreWorking:
         """Should embed the text."""
         await mock_ums.store_working("test text")
 
-        mock_ums._embedding_service.embed_text.assert_called_with("test text")
+        mock_ums._embedding_service.embed_text.assert_called_with("test text", role="passage")
 
 
 class TestSearch:
@@ -448,7 +448,7 @@ class TestStoreBook:
         # Mock embedding - v0.2.0: Use embed_texts for batch embedding
         ums._embedding_service = MagicMock()
         ums._embedding_service.embed_text = AsyncMock(return_value=[0.1] * 768)
-        ums._embedding_service.embed_texts = AsyncMock(side_effect=lambda texts: [[0.1] * 768 for _ in texts])
+        ums._embedding_service.embed_texts = AsyncMock(side_effect=lambda texts, **kwargs: [[0.1] * 768 for _ in texts])
 
         return ums
 
@@ -995,7 +995,7 @@ class TestV053FactDedup:
         # Mock embedding service to return consistent vectors for dedup matching
         mock_embedding = [0.1] * 768
         original_embed_text = ums._embedding_service.embed_text
-        async def mock_embed(text):
+        async def mock_embed(text, **kwargs):
             return mock_embedding
         ums._embedding_service.embed_text = mock_embed
 
@@ -1032,7 +1032,7 @@ class TestV053FactDedup:
         await ums.initialize()
 
         mock_embedding = [0.1] * 768
-        async def mock_embed(text):
+        async def mock_embed(text, **kwargs):
             return mock_embedding
         ums._embedding_service.embed_text = mock_embed
 
@@ -1067,7 +1067,7 @@ class TestV053FactDedup:
         await ums.initialize()
 
         mock_embedding = [0.1] * 768
-        async def mock_embed(text):
+        async def mock_embed(text, **kwargs):
             return mock_embedding
         ums._embedding_service.embed_text = mock_embed
 
@@ -1102,7 +1102,7 @@ class TestV053FactDedup:
         await ums.initialize()
 
         mock_embedding = [0.1] * 768
-        async def mock_embed(text):
+        async def mock_embed(text, **kwargs):
             return mock_embedding
         ums._embedding_service.embed_text = mock_embed
 
@@ -1204,7 +1204,7 @@ class TestV053FactDedup:
         await ums.initialize()
 
         mock_embedding = [0.1] * 768
-        async def mock_embed(text):
+        async def mock_embed(text, **kwargs):
             return mock_embedding
         ums._embedding_service.embed_text = mock_embed
 
@@ -1293,7 +1293,7 @@ class TestV053MemoryBankDedup:
         await ums.initialize()
 
         mock_embedding = [0.1] * 768
-        async def mock_embed(text):
+        async def mock_embed(text, **kwargs):
             return mock_embedding
         ums._embedding_service.embed_text = mock_embed
 

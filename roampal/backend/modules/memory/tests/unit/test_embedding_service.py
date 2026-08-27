@@ -176,5 +176,26 @@ class TestPrewarm:
         # No error means success — session property was accessed
 
 
+class TestPrefixGating:
+    """v0.5.9 Item 2: e5-family repos require query:/passage: prefixes; other
+    repos (mpnet, the shipping default) must receive untouched text. The
+    gate reads HF_REPO at call time so a ROAMPAL_EMBED_MODEL rollback
+    disables prefixing automatically."""
+
+    def test_e5_repo_gets_prefixes(self, monkeypatch):
+        from roampal.backend.modules.memory import embedding_service as es
+        monkeypatch.setattr(es, "HF_REPO", "intfloat/multilingual-e5-base")
+        assert es._apply_prefix("query", "hello") == "query: hello"
+        assert es._apply_prefix("passage", "hello") == "passage: hello"
+
+    def test_mpnet_repo_untouched(self, monkeypatch):
+        from roampal.backend.modules.memory import embedding_service as es
+        monkeypatch.setattr(
+            es, "HF_REPO",
+            "sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
+        assert es._apply_prefix("query", "hello") == "hello"
+        assert es._apply_prefix("passage", "hello") == "hello"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

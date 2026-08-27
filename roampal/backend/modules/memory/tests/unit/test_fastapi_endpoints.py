@@ -236,6 +236,29 @@ class TestGetContextEndpoint:
     """Test /api/hooks/get-context endpoint."""
 
     @pytest.mark.asyncio
+    async def test_embedder_down_returns_visible_marker_not_500(self, async_client):
+        """v0.5.9 hook-path decision (2026-08-27): embedder-down must be
+        visible to the MODEL. Returns 200 with an explicit degraded marker
+        instead of HTTP 500 (which the plugin swallows — model never knew)
+        or a silent empty injection (model believes no memories exist)."""
+        from roampal.backend.modules.memory.search_service import EmbedderUnavailable
+
+        ac, mock_mem, _ = async_client
+        mock_mem.get_context_for_injection = AsyncMock(
+            side_effect=EmbedderUnavailable("embedding model down"))
+
+        response = await ac.post("/api/hooks/get-context", json={
+            "query": "anything",
+            "conversation_id": "degraded_test"
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert "memory search unavailable" in data["formatted_injection"]
+        assert "do not claim memories were checked" in data["context_only"]
+        assert data["relevant_memories"] == []
+        assert data["scoring_required"] is False
+
+    @pytest.mark.asyncio
     async def test_basic_context_request(self, async_client):
         """Basic context request returns formatted injection."""
         ac, mock_mem, _ = async_client

@@ -12,7 +12,11 @@ v0.4.5: Tags-first cascade retrieval (benchmark-validated, Section 5.2.3).
 import asyncio
 import json
 import logging
+import logging.handlers
 import math
+import os
+import sys
+import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Literal, Optional, Union
 
@@ -22,6 +26,32 @@ from .routing_service import RoutingService, ALL_COLLECTIONS
 from .tag_service import TagService
 
 logger = logging.getLogger(__name__)
+
+
+class EmbedderUnavailable(Exception):
+    """Raised when the embedding service cannot produce a query vector.
+
+    v0.5.9 Item 7: lets callers distinguish 'no results' from 'search is
+    temporarily down' so they can surface an explicit degraded message
+    instead of a bare empty list.
+    """
+
+
+# v0.5.9 Item 3a: a single shared cross-encoder InferenceSession across every
+# SearchService instance / profile. The weights are identical per repo, so N
+# profiles must not mean N x ~156 MB resident copies. Loaded once under a lock;
+# the per-instance _ce_loaded flag still gates re-entry for each instance.
+_shared_ce_session = None
+_shared_ce_tokenizer = None
+_shared_ce_lock = threading.Lock()
+
+
+def _reset_shared_cross_encoder():
+    """Test helper: drop the shared CE session so each case loads fresh."""
+    global _shared_ce_session, _shared_ce_tokenizer
+    _shared_ce_session = None
+    _shared_ce_tokenizer = None
+
 
 
 # Type aliases
@@ -45,7 +75,9 @@ class SearchService:
     # but with XLM-R vocabulary for 14+ language support. Loaded via ONNX Runtime
     # (no PyTorch/sentence-transformers needed).
     CE_HF_REPO = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
-    CE_ONNX_FILE = "onnx/model_O4.onnx"
+    # v0.5.9 Item 3b: INT8 export — same model, same repo, ~120 MB smaller
+    # resident and faster rerank than the FP16 model_O4 the code loaded before.
+    CE_ONNX_FILE = os.environ.get("ROAMPAL_CE_ONNX_FILE", "onnx/model_qint8_avx512_vnni.onnx")
     CE_TOKENIZER_FILE = "tokenizer.json"
     CE_CANDIDATE_POOL = 40  # How many candidates to rerank (matches benchmark)
 
@@ -55,7 +87,7 @@ class SearchService:
         scoring_service: ScoringService,
         routing_service: RoutingService,
         tag_service: TagService,
-        embed_fn: Callable[[str], Any],  # Async function to embed text
+        embed_fn: Callable[..., Any],  # Async function to embed text (accepts role kwarg)
         config: Optional[MemoryConfig] = None,
         **kwargs,  # Accept and ignore kg_service for backward compat
     ):
@@ -74,37 +106,61 @@ class SearchService:
         # Cache for doc_ids per session (for outcome scoring)
         self._cached_doc_ids: Dict[str, List[str]] = {}
 
+        # v0.5.9 Item 7: tracks whether the last search fell back to cosine-only
+        # because the cross-encoder reranker was unavailable (read by status endpoints).
+        self._rerank_skipped = False
+
     def _load_ce(self):
-        """Lazy-load cross-encoder ONNX model on first use."""
+        """Lazy-load cross-encoder ONNX model on first use (shared across instances)."""
+        global _shared_ce_session, _shared_ce_tokenizer
+        # Already attempted for this instance: report whether we got a session.
         if self._ce_loaded:
             return self._ce_session is not None
-        self._ce_loaded = True
-        try:
-            import onnxruntime as ort
-            from tokenizers import Tokenizer
-            from huggingface_hub import hf_hub_download
+        with _shared_ce_lock:
+            # A concurrent caller may have finished loading while we waited.
+            if _shared_ce_session is not None:
+                self._ce_session = _shared_ce_session
+                self._ce_tokenizer = _shared_ce_tokenizer
+                self._ce_loaded = True
+                return True
+            try:
+                import onnxruntime as ort
+                from tokenizers import Tokenizer
+                from huggingface_hub import hf_hub_download
 
-            model_path = hf_hub_download(repo_id=self.CE_HF_REPO, filename=self.CE_ONNX_FILE)
-            tokenizer_path = hf_hub_download(repo_id=self.CE_HF_REPO, filename=self.CE_TOKENIZER_FILE)
+                model_path = hf_hub_download(repo_id=self.CE_HF_REPO, filename=self.CE_ONNX_FILE)
+                tokenizer_path = hf_hub_download(repo_id=self.CE_HF_REPO, filename=self.CE_TOKENIZER_FILE)
 
-            opts = ort.SessionOptions()
-            opts.inter_op_num_threads = 1
-            opts.intra_op_num_threads = 0  # auto-detect
+                opts = ort.SessionOptions()
+                opts.inter_op_num_threads = 1
+                opts.intra_op_num_threads = int(os.environ.get("ROAMPAL_ORT_THREADS", "0"))  # 0 = auto
+                # v0.5.9 Item 1: disable arena + mem-pattern so per-shape CE scratch
+                # is returned to the OS instead of ratcheting working set.
+                opts.enable_cpu_mem_arena = False
+                opts.enable_mem_pattern = False
 
-            self._ce_session = ort.InferenceSession(
-                model_path, sess_options=opts, providers=["CPUExecutionProvider"]
-            )
-            self._ce_tokenizer = Tokenizer.from_file(tokenizer_path)
-            self._ce_tokenizer.enable_padding()
-            self._ce_tokenizer.enable_truncation(max_length=256)
+                session = ort.InferenceSession(
+                    model_path, sess_options=opts, providers=["CPUExecutionProvider"]
+                )
+                tokenizer = Tokenizer.from_file(tokenizer_path)
+                tokenizer.enable_padding()
+                tokenizer.enable_truncation(max_length=256)
 
-            logger.info(f"Cross-encoder loaded (ONNX): {self.CE_HF_REPO}")
-            return True
-        except Exception as e:
-            logger.warning(f"Cross-encoder unavailable: {e}. Falling back to cosine-only.")
-            self._ce_session = None
-            self._ce_tokenizer = None
-            return False
+                # Publish to the module-level holder BEFORE marking loaded, so a
+                # concurrent caller that wins the race sees a complete session.
+                _shared_ce_session = session
+                _shared_ce_tokenizer = tokenizer
+                self._ce_session = session
+                self._ce_tokenizer = tokenizer
+                self._ce_loaded = True
+                logger.info(f"Cross-encoder loaded (ONNX): {self.CE_HF_REPO}")
+                return True
+            except Exception as e:
+                logger.warning(f"Cross-encoder unavailable: {e}. Falling back to cosine-only.")
+                self._ce_session = None
+                self._ce_tokenizer = None
+                self._ce_loaded = True
+                return False
 
     def _ce_predict(self, pairs: List[List[str]]) -> List[float]:
         """Run cross-encoder inference on query-document pairs via ONNX."""
@@ -137,7 +193,11 @@ class SearchService:
         No Wilson blend — benchmark showed Wilson hurts retrieval at every stage
         (p<0.001 in all configs). Wilson stays as metadata for display only.
         """
-        if not self._load_ce() or not results:
+        if not results:
+            return results
+        if not self._load_ce():
+            # v0.5.9 Item 7: CE unavailable -> cosine-only fallback, flag it.
+            self._rerank_skipped = True
             return results
 
         # Take top candidates for CE (don't rerank everything)
@@ -150,7 +210,9 @@ class SearchService:
             ce_scores = self._ce_predict(pairs)
         except Exception as e:
             logger.warning(f"Cross-encoder scoring failed: {e}")
+            self._rerank_skipped = True
             return results
+        self._rerank_skipped = False
 
         for i, r in enumerate(candidates):
             r["ce_score"] = ce_scores[i]
@@ -160,6 +222,20 @@ class SearchService:
         candidates.sort(key=lambda x: x.get("final_rank_score", 0), reverse=True)
 
         return candidates + remainder
+
+    def get_status(self) -> dict:
+        """Return reranker status for the /api/status endpoint (v0.5.9 Item 7).
+
+        `available` is True only when the cross-encoder loaded successfully;
+        `skipped_last_search` records whether the most recent search fell back
+        to cosine-only because the reranker was down.
+        """
+        ce_available = bool(self._ce_loaded and self._ce_session is not None)
+        return {
+            "available": ce_available,
+            "skipped_last_search": bool(getattr(self, "_rerank_skipped", False)),
+            "model": self.CE_HF_REPO,
+        }
 
     # =========================================================================
     # Date Filter Helpers (v0.2.0)
@@ -256,12 +332,16 @@ class SearchService:
 
         # Generate embedding
         try:
-            query_embedding = await self.embed_fn(processed_query)
+            query_embedding = await self.embed_fn(processed_query, role="query")
         except Exception as e:
-            logger.error(f"Embedding generation failed for query '{query}': {e}")
-            if return_metadata:
-                return {"results": [], "total": 0, "limit": limit, "offset": offset, "has_more": False}
-            return []
+            # v0.5.9 Item 7: never swallow this into a bare [] — signal it so the
+            # API/MCP layer can return an explicit degraded message.
+            raise EmbedderUnavailable(
+                f"Embedding service unavailable for query '{query}': {e}"
+            )
+
+        # Reset rerank-skip flag for this request (set again if CE is unavailable).
+        self._rerank_skipped = False
 
         # Track search start
         if transparency_context and hasattr(transparency_context, 'track_action'):
@@ -776,7 +856,7 @@ class SearchService:
             where["code_language"] = code_language
 
         try:
-            query_embedding = await self.embed_fn(query)
+            query_embedding = await self.embed_fn(query, role="query")
             results = await self.collections["books"].query_vectors(
                 query_vector=query_embedding,
                 top_k=n_results * 2,
@@ -803,3 +883,105 @@ class SearchService:
         except Exception as e:
             logger.error(f"Book search failed: {e}")
             return []
+
+
+# =========================================================================
+# v0.5.9 Item 5: file logging, MemoryError handling, RSS heartbeat.
+# Shared by the FastAPI server (server/main.py) and the MCP server
+# (mcp/server.py) so both processes get consistent, diagnosable logging.
+# Lives here because this module owns the memory-heavy inference paths
+# (cross-encoder + embedding sessions) where OOM is most likely.
+# =========================================================================
+def _contains_memory_error(exc) -> bool:
+    """True if `exc` is (or wraps, via ExceptionGroup) a MemoryError.
+
+    ExceptionGroup/BaseExceptionGroup exist on Python 3.11+; on 3.10 the
+    `exceptiongroup` backport may provide them. We check structurally so the
+    guard works whether or not the class is importable.
+    """
+    if isinstance(exc, MemoryError):
+        return True
+    groups = getattr(exc, "exceptions", None)
+    if groups:
+        return any(_contains_memory_error(e) for e in groups)
+    return False
+
+
+def log_memory_error(log, exc) -> None:
+    """Log a fatal out-of-memory condition before the process exits."""
+    try:
+        log.error(
+            "FATAL: out-of-memory (MemoryError) detected; logging before exit.",
+            exc_info=exc,
+        )
+    except Exception:
+        sys.stderr.write(f"FATAL MemoryError: {exc}\n")
+
+
+def configure_logging(component: str = "core") -> None:
+    """Add console output + a rotating, PID-scoped log file under ~/.roampal/logs.
+
+    PID-scoped filenames let concurrent roampal processes (server + MCP + many
+    profiles) write without clobbering each other. Idempotent — safe to call
+    more than once. Never raises: logging setup must not break startup.
+    """
+    try:
+        root = logging.getLogger()
+        root.setLevel(logging.INFO)
+        fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+        has_console = any(
+            isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+            for h in root.handlers
+        )
+        if not has_console:
+            sh = logging.StreamHandler()
+            sh.setFormatter(fmt)
+            root.addHandler(sh)
+        if any(
+            isinstance(h, logging.handlers.RotatingFileHandler)
+            for h in root.handlers
+        ):
+            return
+        from pathlib import Path
+
+        log_dir = Path(os.path.expanduser("~")) / ".roampal" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fh = logging.handlers.RotatingFileHandler(
+            log_dir / f"roampal-{component}-{os.getpid()}.log",
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    except Exception as e:
+        sys.stderr.write(f"[roampal] file logging setup failed: {e}\n")
+
+
+def start_rss_heartbeat(log, interval: float = 60.0):
+    """Spawn a daemon thread logging process RSS every `interval` seconds.
+
+    Returns a threading.Event; call .set() to stop. Runs outside the asyncio
+    loop so it keeps ticking even when the loop is busy/contended.
+    """
+    stop = threading.Event()
+
+    def _loop():
+        try:
+            import psutil
+
+            proc = psutil.Process()
+        except Exception:
+            log.warning("[heartbeat] psutil unavailable; RSS heartbeat disabled")
+            return
+        while not stop.is_set():
+            try:
+                rss_mb = proc.memory_info().rss / (1024 * 1024)
+                log.info("[heartbeat] RSS=%.1f MB", rss_mb)
+            except Exception:
+                pass
+            stop.wait(interval)
+
+    t = threading.Thread(target=_loop, name="rss-heartbeat", daemon=True)
+    t.start()
+    return stop

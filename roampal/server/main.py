@@ -643,6 +643,9 @@ async def lifespan(app: FastAPI):
                 if hasattr(adapter, "cleanup"):
                     await adapter.cleanup()
                     logger.debug(f"Cleaned up {name} adapter")
+            # v0.5.9 Item 2a: cancel + await background warm-up / re-embed tasks
+            # so a mid-flight migration batch is not killed hard on shutdown.
+            await mem.shutdown_background_tasks()
         except Exception as e:
             logger.warning(f"Error during adapter cleanup: {e}")
 
@@ -769,6 +772,8 @@ def create_app() -> FastAPI:
         4. User facts from memory_bank
         """
         _memory, _session_manager = await get_profile_context(main_req)
+
+        from roampal.backend.modules.memory.search_service import EmbedderUnavailable
 
         try:
             # Evict stale cache entries (30-minute TTL)
@@ -951,6 +956,31 @@ def create_app() -> FastAPI:
                 context_only="\n".join(context_parts) if context_parts else "",
                 scoring_exchange=scoring_exchange_data,
                 scoring_memories=scoring_memories_data,
+            )
+
+        except EmbedderUnavailable as e:
+            # v0.5.9 hook path (decision 2026-08-27): embedder-down must be
+            # visible to the MODEL, not just the logs. The old behavior was a
+            # silent empty injection (model believes no memories exist); the
+            # intermediate behavior let the generic handler below turn this
+            # into an HTTP 500 the plugin swallows — the model still never
+            # knew. Return 200 with an explicit degraded marker instead.
+            logger.warning(f"Hook get-context degraded (embedder down): {e}")
+            marker = (
+                "[Roampal: memory search unavailable - embedding model is down. "
+                "Proceeding without memory context; do not claim memories "
+                "were checked.]"
+            )
+            return GetContextResponse(
+                formatted_injection=marker,
+                relevant_memories=[],
+                context_summary="roampal memory unavailable",
+                scoring_required=False,
+                scoring_prompt="",
+                scoring_prompt_simple="",
+                context_only=marker,
+                scoring_exchange=None,
+                scoring_memories=None,
             )
 
         except Exception as e:
@@ -1141,6 +1171,8 @@ def create_app() -> FastAPI:
     @app.post("/api/search")
     async def search_memory(request: SearchRequest, main_req: Request = None):
         """Search across memory collections."""
+        from roampal.backend.modules.memory.search_service import EmbedderUnavailable
+
         _memory = await get_memory_for_request(main_req)
 
         try:
@@ -1178,8 +1210,50 @@ def create_app() -> FastAPI:
                     "timestamp": datetime.now().isoformat(),
                 }
 
-            return {"query": request.query, "count": len(results), "results": results}
+            # v0.5.9 Item 2b: include re-embed migration state so clients can
+            # show progress and know why some collections are temporarily absent.
+            migration = None
+            try:
+                state = _memory.get_migration_state()
+                if isinstance(state, dict):
+                    migration = state
+            except Exception:
+                migration = None
 
+            # v0.5.9 Item 7: report whether the last search fell back to
+            # cosine-only because the cross-encoder reranker was unavailable.
+            rerank_skipped = False
+            try:
+                svc = _memory._search_service
+                if svc is not None:
+                    rerank_skipped = bool(getattr(svc, "_rerank_skipped", False))
+            except Exception:
+                rerank_skipped = False
+
+            return {
+                "query": request.query,
+                "count": len(results),
+                "results": results,
+                "migration": migration,
+                "rerank_skipped": rerank_skipped,
+            }
+
+        except EmbedderUnavailable as e:
+            # v0.5.9 Item 7: embedder down -> explicit degraded message, never a
+            # bare [] and never a 500 (the subsystem is degraded, not the server).
+            logger.warning(f"Search degraded (embedder unavailable): {e}")
+            return {
+                "query": request.query,
+                "count": 0,
+                "results": [],
+                "degraded": {
+                    "embedder_unavailable": True,
+                    "message": (
+                        "Memory search is temporarily unavailable because the "
+                        "embedding service is down. Try again shortly."
+                    ),
+                },
+            }
         except Exception as e:
             logger.error(f"Error searching: {e}")
             raise HTTPException(status_code=500, detail=str(e))
@@ -1605,7 +1679,7 @@ def create_app() -> FastAPI:
                                     )
 
                                 embedding = await _memory._embedding_service.embed_text(
-                                    request.exchange_summary
+                                    request.exchange_summary, role="passage"
                                 )
                                 await adapter.upsert_vectors(
                                     ids=[exchange_doc_id],
@@ -1734,7 +1808,7 @@ def create_app() -> FastAPI:
                 metadata["noun_tags"] = json.dumps(request.noun_tags)
 
             # Re-embed with new content
-            embedding = await _memory._embedding_service.embed_text(request.new_content)
+            embedding = await _memory._embedding_service.embed_text(request.new_content, role="passage")
             await adapter.upsert_vectors(
                 ids=[request.doc_id], vectors=[embedding], metadatas=[metadata]
             )
@@ -1994,14 +2068,84 @@ def create_app() -> FastAPI:
                 detail=f"Embedding service unhealthy: {embedding_error or 'not initialized'}",
             )
 
+        # v0.5.9 Item 2b: surface re-embed migration state. Health still
+        # answers (200) during migration; the flag just informs the caller.
+        migration = None
+        for mem in _memory_by_profile.values():
+            if getattr(mem, "initialized", False):
+                try:
+                    state = mem.get_migration_state()
+                    if isinstance(state, dict):
+                        migration = state
+                except Exception:
+                    migration = None
+                break
+
         return {
             "status": "healthy",
             "memory_initialized": len(_memory_by_profile) > 0,
             "session_manager_ready": len(_session_manager_by_profile) > 0,
             "profiles_loaded": len(_memory_by_profile),
             "embedding_ok": embedding_ok,
+            "migration": migration,
             "timestamp": datetime.now().isoformat(),
         }
+
+    @app.get("/api/status")
+    async def system_status():
+        """v0.5.9 Item 7: degraded-state status reporting.
+
+        Aggregates per-subsystem availability (embedder, reranker, migration)
+        so clients can detect when search is running in a degraded mode rather
+        than guessing from an empty result set.
+        """
+        mem = next(
+            (m for m in _memory_by_profile.values() if getattr(m, "initialized", False)),
+            None,
+        )
+        out = {
+            "status": "ok",
+            "embedder": {"available": False, "model": None},
+            "reranker": {"available": False, "skipped_last_search": False, "model": None},
+            "migration": None,
+            "timestamp": datetime.now().isoformat(),
+        }
+        if mem is None:
+            out["status"] = "no_profile"
+            return out
+
+        # Embedder: lightweight probe (mirrors /api/health).
+        embed_ok = False
+        model = None
+        try:
+            es = mem._embedding_service
+            if es is not None:
+                raw_model = getattr(es, "HF_REPO", None) or getattr(es, "model_name", None)
+                model = str(raw_model) if raw_model is not None else None
+                await asyncio.wait_for(es.embed_text("status probe"), timeout=15)
+                embed_ok = True
+        except Exception:
+            embed_ok = False
+        out["embedder"] = {"available": embed_ok, "model": model}
+
+        # Reranker
+        try:
+            svc = mem._search_service
+            if svc is not None and hasattr(svc, "get_status"):
+                out["reranker"] = svc.get_status()
+        except Exception:
+            pass
+
+        # Migration
+        try:
+            state = mem.get_migration_state()
+            if isinstance(state, dict):
+                out["migration"] = state
+        except Exception:
+            pass
+
+        out["status"] = "ok" if embed_ok else "degraded"
+        return out
 
     @app.get("/api/stats")
     async def get_stats(request: Request = None):
@@ -2024,6 +2168,22 @@ def start_server(host: str = "127.0.0.1", port: int = None, dev: bool = False):
     """
     # Determine mode and port
     dev_mode = dev or os.environ.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")
+
+    # v0.5.9 Item 5: console + rotating, PID-scoped file logging, plus an RSS
+    # heartbeat thread for out-of-memory diagnosis.
+    try:
+        from roampal.backend.modules.memory.search_service import (
+            configure_logging,
+            start_rss_heartbeat,
+            log_memory_error,
+            _contains_memory_error,
+        )
+    except Exception:
+        configure_logging = start_rss_heartbeat = log_memory_error = _contains_memory_error = None
+
+    if configure_logging:
+        configure_logging("server")
+        start_rss_heartbeat(logger)
 
     # Set env var so lifespan() can read it
     if dev_mode:
@@ -2066,7 +2226,15 @@ def start_server(host: str = "127.0.0.1", port: int = None, dev: bool = False):
     print("\n" + "\n".join(banner_lines) + "\n")
 
     app = create_app()
-    uvicorn.run(app, host=host, port=port)
+    try:
+        uvicorn.run(app, host=host, port=port)
+    except BaseException as e:
+        # v0.5.9 Item 5: log a fatal MemoryError (incl. when wrapped in an
+        # ExceptionGroup) before the process exits.
+        if _contains_memory_error and _contains_memory_error(e):
+            log_memory_error(logger, e)
+            sys.exit(1)
+        raise
 
 
 if __name__ == "__main__":
@@ -2087,5 +2255,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO)
+    # Logging (console + rotating PID-scoped file) is configured inside
+    # start_server() for v0.5.9 Item 5.
     start_server(host=args.host, port=args.port, dev=args.dev)

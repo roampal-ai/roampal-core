@@ -41,7 +41,7 @@ class PromotionService:
     def __init__(
         self,
         collections: Dict[str, Any],  # ChromaDBAdapter instances
-        embed_fn: Callable[[str], Any],  # Async function to embed text
+        embed_fn: Callable[..., Any],  # Async function to embed text (accepts role kwarg)
         add_relationship_fn: Optional[Callable] = None,  # For evolution tracking
         config: Optional[MemoryConfig] = None,
     ):
@@ -180,7 +180,7 @@ class PromotionService:
         try:
             await self.collections["history"].upsert_vectors(
                 ids=[new_id],
-                vectors=[await self.embed_fn(text_for_embedding)],
+                vectors=[await self.embed_fn(text_for_embedding, role="passage")],
                 metadatas=[metadata]
             )
             logger.info(f"Created history memory: {new_id}")
@@ -236,7 +236,7 @@ class PromotionService:
         try:
             await self.collections["patterns"].upsert_vectors(
                 ids=[new_id],
-                vectors=[await self.embed_fn(text_for_embedding)],
+                vectors=[await self.embed_fn(text_for_embedding, role="passage")],
                 metadatas=[metadata]
             )
         except Exception as e:
@@ -268,7 +268,7 @@ class PromotionService:
         try:
             await self.collections["history"].upsert_vectors(
                 ids=[new_id],
-                vectors=[await self.embed_fn(text_for_embedding)],
+                vectors=[await self.embed_fn(text_for_embedding, role="passage")],
                 metadatas=[{**metadata, "demoted_from": "patterns"}]
             )
         except Exception as e:
@@ -382,7 +382,7 @@ class PromotionService:
 
                     await self.collections["history"].upsert_vectors(
                         ids=[new_id],
-                        vectors=[await self.embed_fn(text_for_embed)],
+                        vectors=[await self.embed_fn(text_for_embed, role="passage")],
                         metadatas=[{
                             **metadata,
                             "original_id": doc_id,  # v0.4.0: so outcome scoring can find promoted docs
@@ -474,7 +474,7 @@ class PromotionService:
             # Store in target collection
             await self.collections[to_collection].upsert_vectors(
                 ids=[new_id],
-                vectors=[await self.embed_fn(text)],
+                vectors=[await self.embed_fn(text, role="passage")],
                 metadatas=[metadata]
             )
 
