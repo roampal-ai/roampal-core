@@ -61,10 +61,10 @@ def _hub_download(repo_id: str, filename: str) -> str:
     CI test children on macOS must not construct an HTTP client (urllib's
     getproxies_macosx_sysconf is not fork-safe and aborts the child once
     huggingface_hub enters its metadata path), and normal startups skip the
-    per-load revision HEAD when the model is already cached — `roampal
-    reembed` and upgrades are the explicit update path. Falls back to the
-    plain network download when the cache misses (first run / fresh
-    install), which surfaces the real error if that fails.
+    per-load revision HEAD when the model is already cached — a cached model
+    is reused until a release changes the filename; that is the update path.
+    Falls back to the plain network download when the cache misses (first
+    run / fresh install), which surfaces the real error if that fails.
     """
     try:
         return hf_hub_download(repo_id=repo_id, filename=filename, local_files_only=True)
