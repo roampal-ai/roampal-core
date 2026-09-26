@@ -13,7 +13,7 @@ step-by-step narration and intermediate test counts are not.
   3.13: 1094 passed, 2 skipped (measured at Task 42). CI (3.12): 1114
   passed, 2 skipped, 10 deselected (-m "not wal").
 - **Task 28 — CI proof: green.** PR #13 (release/v0.6.0 → main). Final run
-  https://github.com/roampal-ai/roampal-core/actions/runs/36263086499
+  https://github.com/roampal-ai/roampal-core/actions/runs/36264245428
   (2026-09-26): all 38 jobs green (test, golden × 3 OS, unit-macos,
   wal, wal-windows, integration, integration-windows × 3.10–3.13,
   plugin-parse). Verified inside the run: the Node plugin decision tests
