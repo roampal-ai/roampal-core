@@ -1,6 +1,6 @@
 # Roampal Core v0.6.0
 
-**Status:** not yet released. All local gates passed 2026-09-26 (CLI smoke, live two-app checks, isolated-home suite); the CI run on a branch/PR (IMPLEMENTATION_TASKS Task 28) is the last step.
+**Status:** CI green (https://github.com/roampal-ai/roampal-core/actions/runs/36263086499); ready to release.
 **Tests:** 1122 passed, 4 skipped, 0 failed (Windows, Python 3.10, whole repo). Python 3.13 measured at 1094 passed, 2 skipped before the final round of fixes.
 **Scope:** no embedder change — mpnet-INT8 and the cross-encoder stay exactly as in v0.5.9 (the e5-base upgrade is deferred; see Known issues).
 
@@ -20,6 +20,7 @@ No data migration: existing memories, profiles and `profiles.json` are read as-i
 - **Folder bindings are new** (`roampal profile bind`). A `ROAMPAL_PROFILE` set in an app's MCP config still overrides them for that app — remove it if you want bindings to apply there; `roampal profile use` already sets your global default.
 - **`roampal score` is removed.** Scoring is automatic in both Claude Code and OpenCode; use `roampal sidecar test` to check your scoring model.
 - **Python 3.10–3.13** are supported; upgrading also upgrades ChromaDB to ≥ 1.5.9 (Item 17).
+- **Model loading is cache-first.** When the model files are already in the local HF cache, startup uses them without a per-load network check; first downloads and `roampal reembed` behave as before.
 
 ---
 

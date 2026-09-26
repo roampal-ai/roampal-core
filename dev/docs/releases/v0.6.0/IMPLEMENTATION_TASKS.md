@@ -7,28 +7,66 @@ step-by-step narration and intermediate test counts are not.
 ## Status (2026-09-26)
 
 - **Done:** Round 1 (Tasks 0a–16), Round 2 (17–37 + review fixes R1–R16),
-  Round 3 (38–46). Nothing is committed yet — the working tree holds the whole
-  release.
+  Round 3 (38–46), **Task 28 (CI proof)**, **Task 34 (final gates)**.
 - **Tests:** whole tree **1122 passed, 4 skipped, 0 failed** (Windows, 3.10).
   Isolated-home run 1120/5 (one extra sanctioned skip, see Task 26). Python
-  3.13: 1094 passed, 2 skipped (measured at Task 42).
-- **Open:**
-  - **Task 28 — CI proof.** `tests.yml` triggers only on `push: [main]` and
-    `pull_request: [main]`, so a release-branch push runs nothing: open a PR
-    to main (or add the branch / `workflow_dispatch`). Confirm in the run:
-    every job green on Ubuntu/Windows/macOS × 3.10–3.13; the Node-executed
-    plugin tests (`test_plugin_server_launch.py`, `test_sidecar_privacy.py`,
-    type-strip parse checks) report **passed, not skipped** (Node 22 was added
-    to the `test` and `unit-tests-macos` jobs because runners ship Node 20,
-    below the 22.13 `stripTypeScriptTypes` gate); the real-model dedup test
-    runs (HF cache step); `plugin-parse` (bun) green; watch the first macOS
-    run for fork-safety crashes (`--forked` after onnxruntime import); observe
-    the integration job go red once on a deliberately failing edit, then
-    revert (carried from 0b).
-  - **Task 34 — final gates:** every local gate passed (below); closes when
-    28 is green.
-  - **After push:** pin `glama.json`'s commit (bumped to 0.6.0, commit
-    dropped until then).
+  3.13: 1094 passed, 2 skipped (measured at Task 42). CI (3.12): 1114
+  passed, 2 skipped, 10 deselected (-m "not wal").
+- **Task 28 — CI proof: green.** PR #13 (release/v0.6.0 → main). Final run
+  https://github.com/roampal-ai/roampal-core/actions/runs/36263086499
+  (2026-09-26): all 38 jobs green (test, golden × 3 OS, unit-macos,
+  wal, wal-windows, integration, integration-windows × 3.10–3.13,
+  plugin-parse). Verified inside the run: the Node plugin decision tests
+  executed under Node v22.23.2 (not skipped), the real-model dedup test ran
+  against the primed HF cache, and the macOS unit suite completed with no
+  fork-safety crashes. Red/green probe: a deliberately failing
+  `test_`-prefixed file under tests/integration/ turned the whole
+  integration matrix red (run 36262855196), and the revert restored all 38
+  green (run 36263086499).
+- **Task 34 — final gates: closed** (all local gates below + CI green).
+- **After push/merge:** pin `glama.json`'s commit (bumped to 0.6.0, commit
+  dropped until then).
+
+### Task 28 — fixes made during the CI proof (all on release/v0.6.0)
+
+- **Goldens are platform-neutral now** (Task 27 follow-up): the registry
+  seeder wrote to `appdata/xdg/roampal` while Linux reads
+  `$XDG_CONFIG_HOME/roampal` (and macOS `~/Library/Application
+  Support/Roampal`) — candidates fixed; `_normalize` converts separators and
+  maps the OS data-root (`AppData\Roaming\Roampal` / `~/.local/share/roampal`
+  / `~/Library/.../Roampal`) and the opencode user-global segment
+  (`~/.config/opencode` / `$XDG_CONFIG_HOME/opencode`) to `<DATAROOT>`/`<OCFG>`.
+  Goldens regenerated once on Windows and verified deterministic.
+- **`test_bind_normalizes_key_duplicates` POSIX branch was self-contradictory**
+  (bound two different-case dirs under two different profiles and asserted
+  equality); now binds the same dir with/without a trailing separator.
+- **The unit-suite sandbox rewrote HF boolean flags into tmp paths** —
+  `HF_HUB_OFFLINE=1` became a truthy garbage path, silently putting every
+  forked child in offline mode against an empty cache. Flags now pass
+  through; only PATH-valued cache vars get the tmp rewrite. Added the
+  `ROAMPAL_TEST_PRIME_HF_CACHE=1` CI opt-in that points forked children at
+  the read-only primed cache.
+- **huggingface_hub 2.x + os.fork on macOS aborts (SIGABRT)** once any
+  cache-miss load constructs the httpx client (urllib's
+  `getproxies_macosx_sysconf` is not fork-safe). Product fix: cache-first
+  model download in `embedding_service._hub_download` (embedder) and
+  `search_service._load_ce` (cross-encoder) — `local_files_only=True` first
+  (pure filesystem, never a client), network fallback on a genuine miss.
+- **CI primes four model files now** (embedder ONNX + tokenizer, CE ONNX +
+  tokenizer; the CE was never primed and missed in every child), and the
+  prime step is self-verifying (prints paths + sizes, asserts non-empty).
+- **WAL-enabled SQLite on shared runners throws disk-I/O errors (code 522)
+  during ChromaDB compaction** — deterministically under the archive/sweep
+  write cycles (all four ubuntu versions), intermittently in the golden
+  job's doctor child. Ubuntu integration and the golden job now run with
+  `ROAMPAL_TEST_DISABLE_WAL=1` and the wal-marked tests are deselected
+  there; the WAL gate stays with wal-tests (ubuntu + windows, in-process)
+  and integration-tests-windows (WAL on, green). Known infra limitation.
+- **fastapi endpoint tests preseed the update-check cache** — `get_context`
+  made a real urlopen() to pypi.org per test (non-hermetic; aborts forked
+  macOS children at the same sysconf call).
+- **fail-fast off for the integration and golden matrices** — one flaky
+  version no longer cancels the evidence from the others.
 
 ## Task index
 
