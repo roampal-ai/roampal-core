@@ -45,6 +45,10 @@ TESTS_DIR = Path(__file__).resolve().parent
 GOLDEN_DIR = TESTS_DIR / "golden"
 PY_EXE = sys.executable
 
+# Real user home, captured at import time (before the unit-suite sandbox
+# rewrites HOME/USERPROFILE for the duration of each test).
+_REAL_HOME = Path.home()
+
 REGEN = os.environ.get("ROAMPAL_REGENERATE_GOLDEN") == "1"
 
 CASES = [
@@ -115,6 +119,10 @@ def _normalize(text: str, root: Path) -> str:
     # a machine-varying absolute path. Map it (either separator form).
     text = text.replace(str(REPO_ROOT), "<REPOROOT>")
     text = text.replace(str(REPO_ROOT).replace("\\", "/"), "<REPOROOT>")
+    # The real user home can leak through HF warnings now that the child
+    # resolves the primed model cache; mask it (either separator form).
+    text = text.replace(str(_REAL_HOME), "<HOME>")
+    text = text.replace(str(_REAL_HOME).replace("\\", "/"), "<HOME>")
     # Absolute source paths from tracebacks (site-packages / editable install)
     py_dir = str(Path(PY_EXE).parent)
     if py_dir in text:
@@ -351,6 +359,15 @@ def _base_env(appdata: Path, xdg: Path) -> dict:
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
     env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    # Model-loading cases (reembed --dry-run, doctor) must resolve the PRIMED
+    # model cache: the child's isolated HOME has none, and when the caller
+    # runs with HF_HUB_OFFLINE a cache miss hard-fails the load (first CI
+    # run, 2026-09-26). Read-only use of the real cache — the same sanction
+    # as the HF-cache skip-check in test_reembed_dry_run_offline.
+    hf_hub_cache = _REAL_HOME / ".cache" / "huggingface" / "hub"
+    if hf_hub_cache.is_dir():
+        env["HF_HUB_CACHE"] = str(hf_hub_cache)
+        env["HF_HOME"] = str(hf_hub_cache.parent)
     return env
 
 
