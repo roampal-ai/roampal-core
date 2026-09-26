@@ -49,8 +49,20 @@ jobs:
           path: ~/.cache/huggingface/hub
           key: hf-mpnet-qint8-dedup-v1
       - name: Prime mpnet-INT8 into HF cache (download only on miss)
+        # Verbose on purpose (Task 28): a silent prime left the macOS forked
+        # children cache-missing and aborting. Assert both files landed.
         run: |
-          python -c "import huggingface_hub as h; from roampal.backend.modules.memory import embedding_service as es; [h.hf_hub_download(repo_id=es.HF_REPO, filename=f) for f in (es.ONNX_FILE, es.TOKENIZER_FILE)]"
+          python - <<'EOF'
+          import os
+          import huggingface_hub as h
+          from roampal.backend.modules.memory import embedding_service as es
+          paths = [h.hf_hub_download(repo_id=es.HF_REPO, filename=f)
+                   for f in (es.ONNX_FILE, es.TOKENIZER_FILE)]
+          for p in paths:
+              size = os.path.getsize(p)
+              print(f"PRIMED {p} ({size} bytes)")
+              assert size > 0, f"prime produced an empty file: {p}"
+          EOF
 
       - name: Run tests
         timeout-minutes: 10
@@ -139,8 +151,20 @@ jobs:
           path: ~/.cache/huggingface/hub
           key: hf-mpnet-qint8-dedup-v1
       - name: Prime mpnet-INT8 into HF cache (download only on miss)
+        # Same verified prime as the Linux job above.
         run: |
-          python -c "import huggingface_hub as h; from roampal.backend.modules.memory import embedding_service as es; [h.hf_hub_download(repo_id=es.HF_REPO, filename=f) for f in (es.ONNX_FILE, es.TOKENIZER_FILE)]"
+          python - <<'EOF'
+          import os
+          import huggingface_hub as h
+          from roampal.backend.modules.memory import embedding_service as es
+          paths = [h.hf_hub_download(repo_id=es.HF_REPO, filename=f)
+                   for f in (es.ONNX_FILE, es.TOKENIZER_FILE)]
+          for p in paths:
+              size = os.path.getsize(p)
+              print(f"PRIMED {p} ({size} bytes)")
+              assert size > 0, f"prime produced an empty file: {p}"
+          EOF
+
       - name: Run tests
         timeout-minutes: 15
         env:
@@ -200,10 +224,10 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
-      # Task 28 diagnosis: two consecutive runs failed only on 3.12 with
-      # SQLite disk-I/O errors during ChromaDB compaction, but fail-fast
-      # cancelled 3.10/3.11/3.13 before they could speak. Let the whole
-      # matrix finish so the version scope is visible.
+      # Task 28 diagnosis: fail-fast cancelled the sibling versions before
+      # they could speak; run 3 showed the whole ubuntu integration matrix
+      # failing with the same SQLite disk-I/O errors, so keep the matrix
+      # independent from here on.
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
@@ -217,6 +241,17 @@ jobs:
           pip install -e ".[dev]"
       - name: Run integration tests
         timeout-minutes: 15
+        env:
+          # Task 28 (2026-09-26): three consecutive runs failed the whole
+          # ubuntu integration matrix (not one version) with SQLite
+          # disk-I/O errors (code 522) during ChromaDB compaction on the
+          # WAL-enabled write cycles (archive/sweep/routing). The same
+          # files pass with WAL disabled in the main job on the same
+          # runners, and the WAL behavior itself stays gated by the
+          # wal-tests job here and integration-tests-windows below. Treat
+          # WAL-on-Linux-runner as an infra limitation until chromadb
+          # upstream says otherwise.
+          ROAMPAL_TEST_DISABLE_WAL: "1"
         # v0.6.0 Task 0b (comment corrected by Task 33): root testpaths
         # ("roampal") DID collect these files already — the original
         # "never collected" claim was true only of a cwd whose rootdir
@@ -225,10 +260,11 @@ jobs:
         # depends on root testpaths drift) plus the 30 non-wal tests
         # running on Windows CI for the first time. No --forked (the WAL
         # crash-recovery tests need a real in-process SQLite/Chroma
-        # connection) and no ROAMPAL_TEST_DISABLE_WAL (that var is only
-        # for the main job). Explicit path also overrides testpaths, so
-        # this collects the whole directory regardless of what pytest.ini
-        # lands the default on.
+        # connection). WAL is disabled here since Task 28 (see env note
+        # above); the WAL-enabled integration coverage lives in
+        # integration-tests-windows. Explicit path also overrides
+        # testpaths, so this collects the whole directory regardless of
+        # what pytest.ini lands the default on.
         run: pytest --tb=short -q --timeout=120 roampal/backend/modules/memory/tests/integration
 
   integration-tests-windows:
