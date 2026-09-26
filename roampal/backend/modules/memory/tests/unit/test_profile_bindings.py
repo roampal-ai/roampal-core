@@ -337,9 +337,9 @@ class TestBindingMutations:
             assert d1 == d2
             assert len(reg.bindings()) == 1
         else:
-            reg.create("PROJ")
-            d2 = reg.bind("PROJ", str(tmp_path / "PROJ") + os.sep)
-            # POSIX is case-sensitive but trailing separators collapse
+            # POSIX is case-sensitive: 'Proj' and 'PROJ' are different keys.
+            # What still collapses is the trailing separator on the SAME dir.
+            d2 = reg.bind("work", str(tmp_path / "Proj") + os.sep)
             assert d1 == d2
             assert len(reg.bindings()) == 1
 
