@@ -52,6 +52,25 @@ ONNX_FILE = os.environ.get("ROAMPAL_EMBED_ONNX_FILE", "onnx/model_qint8_avx512_v
 TOKENIZER_FILE = "tokenizer.json"
 EMBEDDING_DIM = 768
 
+
+def _hub_download(repo_id: str, filename: str) -> str:
+    """Cache-first hf_hub_download.
+
+    local_files_only=True never touches the network: it resolves the file
+    from the local HF cache or raises. Two reasons to try it first: forked
+    CI test children on macOS must not construct an HTTP client (urllib's
+    getproxies_macosx_sysconf is not fork-safe and aborts the child once
+    huggingface_hub enters its metadata path), and normal startups skip the
+    per-load revision HEAD when the model is already cached — `roampal
+    reembed` and upgrades are the explicit update path. Falls back to the
+    plain network download when the cache misses (first run / fresh
+    install), which surfaces the real error if that fails.
+    """
+    try:
+        return hf_hub_download(repo_id=repo_id, filename=filename, local_files_only=True)
+    except Exception:
+        return hf_hub_download(repo_id=repo_id, filename=filename)
+
 # Default model name kept for backward compat (used in logs / repr)
 DEFAULT_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 
@@ -116,8 +135,8 @@ class EmbeddingService:
 
             logger.info(f"Downloading/loading ONNX model: {self.model_name}")
 
-            model_path = hf_hub_download(repo_id=HF_REPO, filename=ONNX_FILE)
-            tokenizer_path = hf_hub_download(repo_id=HF_REPO, filename=TOKENIZER_FILE)
+            model_path = _hub_download(HF_REPO, ONNX_FILE)
+            tokenizer_path = _hub_download(HF_REPO, TOKENIZER_FILE)
 
             # Use all available CPU cores but keep priority low.
             # v0.5.9 Item 1: disable the CPU memory arena + mem-pattern plan cache
