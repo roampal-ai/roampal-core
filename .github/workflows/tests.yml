@@ -60,6 +60,12 @@ jobs:
           # disk I/O errors during ChromaDB compaction). WAL tests run in a
           # separate in-process job below.
           ROAMPAL_TEST_DISABLE_WAL: "1"
+          # The model files are primed into the HF cache above; without this
+          # huggingface_hub still does a network metadata check per load. In
+          # a forked child on macOS that call reaches urllib's
+          # getproxies_macosx_sysconf, which is not fork-safe and aborts the
+          # child (SIGABRT). Offline mode keeps every forked child cache-only.
+          HF_HUB_OFFLINE: "1"
         # --forked: each test in its own subprocess so RAM (esp. ONNX models
         # at ~420MB each) is fully released between tests. Without this the
         # 27+ tests that call await ums.initialize() in test_unified_memory_system.py
@@ -135,6 +141,12 @@ jobs:
         timeout-minutes: 15
         env:
           ROAMPAL_TEST_DISABLE_WAL: "1"
+          # Fork-safety on macOS: a network metadata check by
+          # huggingface_hub inside a forked child hits urllib's
+          # getproxies_macosx_sysconf, which aborts the child (SIGABRT).
+          # The model is primed into the HF cache above; keep children
+          # strictly cache-only.
+          HF_HUB_OFFLINE: "1"
         run: pytest --tb=short -q --timeout=60 --forked -m "not wal"
 
   wal-tests:
