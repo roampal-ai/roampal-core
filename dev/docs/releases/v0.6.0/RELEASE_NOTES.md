@@ -20,7 +20,7 @@ No data migration: existing memories, profiles and `profiles.json` are read as-i
 - **Folder bindings are new** (`roampal profile bind`). A `ROAMPAL_PROFILE` set in an app's MCP config still overrides them for that app — remove it if you want bindings to apply there; `roampal profile use` already sets your global default.
 - **`roampal score` is removed.** Scoring is automatic in both Claude Code and OpenCode; use `roampal sidecar test` to check your scoring model.
 - **Python 3.10–3.13** are supported; upgrading also upgrades ChromaDB to ≥ 1.5.9 (Item 17).
-- **Model loading is cache-first.** When the model files are already in the local HF cache, startup uses them without a per-load network check; first downloads and `roampal reembed` behave as before.
+- **Model loading is cache-first.** When the model files are already in the local HF cache, startup uses them without a per-load network check; first downloads behave as before, and `roampal reembed` likewise uses the cached model without checking for a newer one.
 
 ---
 
