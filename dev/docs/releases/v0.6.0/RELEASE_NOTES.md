@@ -1,6 +1,6 @@
 # Roampal Core v0.6.0
 
-**Status:** CI green (https://github.com/roampal-ai/roampal-core/actions/runs/36264245428); ready to release.
+**Status:** Released 2026-09-26.
 **Tests:** 1122 passed, 4 skipped, 0 failed (Windows, Python 3.10, whole repo). Python 3.13 measured at 1094 passed, 2 skipped before the final round of fixes.
 **Scope:** no embedder change — mpnet-INT8 and the cross-encoder stay exactly as in v0.5.9 (the e5-base upgrade is deferred; see Known issues).
 
