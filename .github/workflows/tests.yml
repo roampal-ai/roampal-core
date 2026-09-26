@@ -51,13 +51,22 @@ jobs:
       - name: Prime mpnet-INT8 into HF cache (download only on miss)
         # Verbose on purpose (Task 28): a silent prime left the macOS forked
         # children cache-missing and aborting. Assert both files landed.
+        # Primes the EMBEDDER (mpnet-INT8) and the CROSS-ENCODER
+        # (mmarco-mMiniLMv2 INT8) — search_service loads the CE lazily and
+        # a CE cache-miss takes forked children down the same abort path.
         run: |
           python - <<'EOF'
           import os
           import huggingface_hub as h
           from roampal.backend.modules.memory import embedding_service as es
-          paths = [h.hf_hub_download(repo_id=es.HF_REPO, filename=f)
-                   for f in (es.ONNX_FILE, es.TOKENIZER_FILE)]
+          from roampal.backend.modules.memory import search_service as ss
+          files = [
+              (es.HF_REPO, es.ONNX_FILE),
+              (es.HF_REPO, es.TOKENIZER_FILE),
+              (ss.SearchService.CE_HF_REPO, ss.SearchService.CE_ONNX_FILE),
+              (ss.SearchService.CE_HF_REPO, ss.SearchService.CE_TOKENIZER_FILE),
+          ]
+          paths = [h.hf_hub_download(repo_id=repo, filename=f) for repo, f in files]
           for p in paths:
               size = os.path.getsize(p)
               print(f"PRIMED {p} ({size} bytes)")
@@ -261,11 +270,13 @@ jobs:
         # running on Windows CI for the first time. No --forked (the WAL
         # crash-recovery tests need a real in-process SQLite/Chroma
         # connection). WAL is disabled here since Task 28 (see env note
-        # above); the WAL-enabled integration coverage lives in
+        # above), so the wal-marked tests are deselected — they assert
+        # journal_mode='wal' and belong to the wal-tests job; the
+        # WAL-enabled integration coverage lives in
         # integration-tests-windows. Explicit path also overrides
         # testpaths, so this collects the whole directory regardless of
         # what pytest.ini lands the default on.
-        run: pytest --tb=short -q --timeout=120 roampal/backend/modules/memory/tests/integration
+        run: pytest --tb=short -q --timeout=120 -m "not wal" roampal/backend/modules/memory/tests/integration
 
   integration-tests-windows:
     runs-on: windows-latest
