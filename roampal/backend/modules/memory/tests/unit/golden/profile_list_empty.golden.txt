@@ -1,5 +1,5 @@
 ### exit: 0
 --- stdout+stderr ---
-Default profile: <ROOT>/homeN\AppDataRoaming\Roampal\data
+Default profile: <ROOT>/homeN/<DATAROOT>/data
 No named profiles registered.
 Create one: roampal profile create <name>

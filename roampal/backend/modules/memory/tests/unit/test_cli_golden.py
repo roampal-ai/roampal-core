@@ -21,7 +21,11 @@ additive only) and later for the Task 15 version bump; see
 dev/docs/releases/v0.6.0/RELEASE_NOTES.md Test Plan A.
 
 Non-determinism control: every absolute path from the temp env is normalized
-to <ROOT>, so snapshots are stable across machines and OSes. Server-dependent
+to <ROOT>, the OS-specific data-root segment (APPDATA\\Roampal,
+~/.local/share/roampal, ~/Library/Application Support/Roampal) to <DATAROOT>
+and the opencode user-global config segment (~/.config/opencode or
+$XDG_CONFIG_HOME/opencode) to <OCFG>, so snapshots are stable across
+machines and OSes. Server-dependent
 cases point at a fixed unoccupied port (29191) so the result is always the
 "deterministic connection-refused path". Config seeding writes to every
 platform's _config_dir() candidate (Windows APPDATA plus XDG/HOME config
@@ -63,15 +67,16 @@ CASES = [
 ]
 
 
-def _register_profiles(root: Path, names: list[str]) -> None:
+def _register_profiles(home: Path, names: list[str]) -> None:
     """Seed a profiles.json registry in ProfileRegistry's format at every
     platform config-dir candidate.
 
     The loader iterates TOP-LEVEL keys (name -> Profile dict); a nested
     "profiles" key would be interpreted as a profile named 'profiles'.
-    `profile_manager._config_dir()` is OS-dependent (Windows APPDATA/Roampal;
-    Linux/macOS XDG_CONFIG_HOME or ~/.config + /roampal lowercase), so we
-    seed all of them — whichever one resolves for the child env is hit.
+    `profile_manager._config_dir()` is OS-dependent (Windows
+    APPDATA\\Roampal; Linux XDG_CONFIG_HOME/roampal or ~/.config/roampal;
+    macOS ~/Library/Application Support/Roampal), so we seed all of them —
+    whichever one resolves for the child env is hit.
     """
     import json
 
@@ -84,9 +89,10 @@ def _register_profiles(root: Path, names: list[str]) -> None:
         }
     )
     candidates = [
-        root / "Roampal",                     # win32: APPDATA
-        root / "xdg" / "roampal",             # XDG_CONFIG_HOME
-        root.parent / ".config" / "roampal",  # HOME fallback
+        home / "AppDataRoaming" / "Roampal",                   # win32: APPDATA
+        home / "xdg" / "roampal",                              # Linux: XDG_CONFIG_HOME
+        home / ".config" / "roampal",                          # POSIX HOME fallback
+        home / "Library" / "Application Support" / "Roampal",  # darwin
     ]
     for d in candidates:
         d.mkdir(parents=True, exist_ok=True)
@@ -130,6 +136,19 @@ def _normalize(text: str, root: Path) -> str:
         "<SITESP>/",
         text,
     )
+    # Task 27 follow-up (first CI run): the CLI prints OS-specific data and
+    # config paths. Convert Windows separators to POSIX form first so one
+    # pattern set matches every platform, then map the platform-specific
+    # segments to placeholders so a single golden covers the whole matrix:
+    #   data root:   <APPDATA>\Roampal | ~/.local/share/roampal |
+    #                ~/Library/Application Support/Roampal
+    #   opencode user-global config: ~/.config/opencode | $XDG_CONFIG_HOME/opencode
+    text = text.replace("\\", "/")
+    text = re.sub(r"/AppDataRoaming/Roampal(?=/)", "/<DATAROOT>", text)
+    text = re.sub(r"/\.local/share/roampal(?=/)", "/<DATAROOT>", text)
+    text = re.sub(r"/Library/Application Support/Roampal(?=/)", "/<DATAROOT>", text)
+    text = re.sub(r"/\.config/opencode(?=/)", "/<OCFG>", text)
+    text = re.sub(r"/xdg/opencode(?=/)", "/<OCFG>", text)
     framed = re.sub(r"roampal-cli\.py:\d+", "roampal-cli.py:LINE", text)
     # Task 42 (Python 3.13): argparse's help layout width is version-dependent
     # (3.13 lays the command column one slot wider, so `summarize` no longer
@@ -223,7 +242,7 @@ def _run_case(args: list[str], state: dict, tmp_path_factory) -> tuple[str, int]
     temp_root = home.parent  # pytest tmp-tree root, used by normalization
 
     if state.get("profiles"):
-        _register_profiles(appdata, state["profiles"])
+        _register_profiles(home, state["profiles"])
     if state.get("use"):
         # Persisted active profile: env isolation happens inside the child.
         # Write via a helper subprocess that runs WITH the same isolated env.

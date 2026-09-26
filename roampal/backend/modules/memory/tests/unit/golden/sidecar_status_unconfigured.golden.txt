@@ -5,7 +5,7 @@ No scoring model configured.
 
   Run roampal sidecar setup to configure one.
 Sidecar scoring configuration:
-  User-global:  not found  (<ROOT>/homeN\.config\opencode\opencode.json)
+  User-global:  not found  (<ROOT>/homeN/<OCFG>/opencode.json)
   Project-local: none found in cwd ancestry
 
   No sidecar configured — scoring, summaries, and fact extraction are disabled.

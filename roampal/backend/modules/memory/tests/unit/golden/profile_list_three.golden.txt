@@ -1,14 +1,14 @@
 ### exit: 0
 --- stdout+stderr ---
-Default profile: <ROOT>/homeN\AppDataRoaming\Roampal\data
+Default profile: <ROOT>/homeN/<DATAROOT>/data
 
 Registered profiles (3):
   alpha  slug: alpha
-    path: <ROOT>/homeN\AppDataRoaming\Roampal\data\alpha
+    path: <ROOT>/homeN/<DATAROOT>/data/alpha
   beta  slug: beta
-    path: <ROOT>/homeN\AppDataRoaming\Roampal\data\beta
+    path: <ROOT>/homeN/<DATAROOT>/data/beta
   gamma  slug: gamma
-    path: <ROOT>/homeN\AppDataRoaming\Roampal\data\gamma
+    path: <ROOT>/homeN/<DATAROOT>/data/gamma
 Profile 'alpha' has non-string path {'name': 'alpha', 'slug': 'alpha', 'path': None}. Treating as unset.
 Profile 'beta' has non-string path {'name': 'beta', 'slug': 'beta', 'path': None}. Treating as unset.
 Profile 'gamma' has non-string path {'name': 'gamma', 'slug': 'gamma', 'path': None}. Treating as unset.
