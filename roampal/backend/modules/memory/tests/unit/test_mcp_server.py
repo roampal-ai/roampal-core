@@ -324,18 +324,24 @@ class TestServerLifecycle:
         finally:
             server._fastapi_started = original
 
-    def test_cleanup_terminates_process(self):
-        """_cleanup_fastapi terminates the subprocess."""
+    def test_cleanup_does_not_kill_shared_server(self):
+        """Round 2 Item 7 / Task 22: the MCP process no longer OWNS the
+        shared server — _cleanup_fastapi must leave the subprocess
+        running for everyone else (the server self-retires when idle)."""
+        from unittest.mock import MagicMock
+
         from roampal.mcp import server
+
         mock_proc = MagicMock()
-        mock_proc.poll.return_value = None  # Still running
-        mock_proc.wait.return_value = 0
+        mock_proc.poll.return_value = None  # still running
 
         original = server._fastapi_process
         server._fastapi_process = mock_proc
         try:
             server._cleanup_fastapi()
-            mock_proc.terminate.assert_called_once()
+            mock_proc.terminate.assert_not_called()
+            mock_proc.kill.assert_not_called()
+            mock_proc.wait.assert_not_called()
         finally:
             server._fastapi_process = original
 
@@ -665,6 +671,32 @@ class TestToolHandlers:
         assert "related" not in call_payload
         assert "outcome" in call_payload
 
+    @pytest.mark.asyncio
+    async def test_score_memories_surfaces_server_rejection(self, tool_handler):
+        """v0.6.0: the server's length rejection reaches the model — never
+        a false "Summary stored" for a write that did not happen."""
+        import roampal.mcp.server as server_module
+
+        rejection = (
+            "Too long: 742/600 chars. Rewrite in ~300 chars, 1–2 sentences. "
+            "Put anything extra in a separate record_response."
+        )
+        mock_api = AsyncMock(side_effect=RuntimeError(rejection))
+
+        with patch.object(server_module, '_ensure_server_running', return_value=True), \
+             patch.object(server_module, '_api_call', mock_api):
+            result = await tool_handler("score_memories", {
+                "memory_scores": {"working_def": "worked"},
+                "exchange_summary": "x" * 742,
+                "exchange_outcome": "worked",
+            })
+
+        text = result[0].text
+        assert text.startswith("Error:")
+        assert "Too long: 742/600" in text
+        assert "Summary stored" not in text
+        assert "Scored" not in text
+
     # ---- record_response ----
 
     @pytest.mark.asyncio
@@ -822,6 +854,26 @@ class TestToolRegistration:
         schema = score_tool.inputSchema
         assert "memory_scores" in schema["properties"]
         assert "memory_scores" in schema["required"]
+
+    @pytest.mark.asyncio
+    async def test_write_tools_carry_no_schema_length_caps(self, tool_list):
+        """v0.6.0: length limits live on the server, which rejects with an
+        actionable message. A schema maxLength would make the MCP client
+        reject first with its generic validation error, so the model would
+        never see ours."""
+        tools = await tool_list()
+
+        def walk(node):
+            if isinstance(node, dict):
+                assert "maxLength" not in node, node
+                for v in node.values():
+                    walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v)
+
+        for tool in tools:
+            walk(tool.inputSchema)
 
 
 # ============================================================================

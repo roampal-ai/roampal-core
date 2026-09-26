@@ -1,0 +1,7 @@
+### exit: 0
+--- stdout+stderr ---
+Active profile: alpha  (persisted via 'roampal profile use')
+Data path:      <ROOT>/homeN\AppDataRoaming\Roampal\data\alpha
+Profile 'alpha' has non-string path {'name': 'alpha', 'slug': 'alpha', 'path': None}. Treating as unset.
+Profile 'beta' has non-string path {'name': 'beta', 'slug': 'beta', 'path': None}. Treating as unset.
+Profile 'gamma' has non-string path {'name': 'gamma', 'slug': 'gamma', 'path': None}. Treating as unset.

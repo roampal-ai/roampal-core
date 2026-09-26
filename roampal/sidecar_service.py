@@ -8,7 +8,7 @@ v0.3.6: Auto-detects best backend:
   4. Nothing works → fails gracefully (no silent subprocess spawning)
 
 Two operations:
-1. summarize_and_score() — Summarize exchange + score outcome (used by stop hook)
+1. summarize_and_score() — Summarize exchange + score outcome (used by `roampal sidecar test`)
 2. summarize_only() — Summarize long memory content (used by `roampal summarize`)
 """
 

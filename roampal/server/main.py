@@ -23,6 +23,7 @@ import asyncio
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 # Handle pythonw.exe (GUI subsystem) where stdout/stderr are None.
@@ -78,6 +79,24 @@ _search_cache: Dict[str, Dict[str, Any]] = {}
 # Format: {doc_id: {"conversation_id": str, "injected_at": str, "exchange_doc_id": str}}
 _injection_map: Dict[str, Dict[str, Any]] = {}
 
+# v0.6.0 Task 30: per-conversation record of what was ALREADY injected this
+# session, keyed on `{doc_id}:{content_hash}` (id + content — an updated
+# memory re-shows in full). The KNOWN CONTEXT block renders unchanged
+# repeats as one-line pointers (never dropped), while the surfaced/scoring
+# list keeps every id. Reset by the SessionStart hooks (compact/startup/
+# clear → /api/hooks/session-reset, session id from stdin) and TTL-evicted
+# with the other caches so stale sessions can't leak memory.
+_session_injections: Dict[str, Dict[str, str]] = {}
+
+# v0.6.0 Task 30 (delivery ack): a get-context response's surfaced keys are
+# held here under a one-time token and only move into _session_injections
+# when the hook confirms it handed the block to Claude Code
+# (/api/hooks/injection-ack). A hook that times out, crashes or exits
+# non-zero never confirms, so those memories show in full next turn instead
+# of as pointers to text Claude never received.
+# token -> {"conversation_id": str, "keys": {key: iso_ts}, "created": iso_ts}
+_pending_injections: Dict[str, Dict[str, Any]] = {}
+
 # Port constants for dev/prod isolation
 PROD_PORT = 27182
 DEV_PORT = 27183
@@ -86,8 +105,92 @@ DEV_PORT = 27183
 _update_check_cache: Optional[tuple] = None
 _update_check_time: float = 0.0
 
+# Round 2 Item 7 / Task 22: idle self-retirement of the shared server.
+# Configurable via ROAMPAL_SERVER_IDLE_TIMEOUT_MINUTES (invalid/empty -> 30).
+IDLE_TIMEOUT_DEFAULT_MINUTES = 30
+_IDLE_CHECK_INTERVAL_SECONDS = 60.0
+
+
+def _idle_timeout_minutes() -> int:
+    raw = (os.environ.get("ROAMPAL_SERVER_IDLE_TIMEOUT_MINUTES") or "").strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return IDLE_TIMEOUT_DEFAULT_MINUTES
+
+
+_last_request_time: float = 0.0
+_idle_monitor_task: Optional[asyncio.Task] = None
+# v0.6.0 review fix 9: idle self-retirement is for SHARED servers (spawned
+# by hooks/MCP/plugin — no parent to shut them down). A foreground server
+# launched with `roampal start` is EXEMPT — the user started it explicitly
+# ("Press Ctrl+C to stop"); a surprise exit after 30 idle minutes broke
+# that promise.
+_idle_retirement_enabled: bool = True
+
+
+async def _idle_retire_monitor(uvicorn_server: Any):
+    """Retire the shared server when no request has arrived for the idle
+    timeout. A request arriving before retirement keeps the server alive —
+    nobody loses work to an idle shutdown; a launcher's exit no longer
+    kills anyone else's server (F2).
+    """
+    global _retiring_idle
+    while True:
+        await asyncio.sleep(_IDLE_CHECK_INTERVAL_SECONDS)
+        idle_seconds = time.time() - _last_request_time
+        if idle_seconds >= _idle_timeout_minutes() * 60:
+            logger.info(
+                f"No requests for {_idle_timeout_minutes()} minutes — shared server "
+                "retiring (idle). It restarts on the next request."
+            )
+            # fix 5: mark the retirement so lifespan shutdown preserves the
+            # launch pin — the respawn reads the pin file and re-pins.
+            _retiring_idle = True
+            uvicorn_server.should_exit = True
+            return
+
 # Cache TTL: 30 minutes (entries older than this are evicted)
 _CACHE_TTL_SECONDS = 30 * 60
+
+# Round 2 Item 6 / Task 17, amended by v0.6.0 review fix 5: the profile
+# explicitly pinned at server launch (`roampal start --profile X`) is the
+# server's DEFAULT for requests that do not name a profile — a named
+# profile header and a cwd-header binding are both explicit client intent
+# and beat it. Precedence: named profile header > cwd-header binding >
+# pin > persisted `use` > default. The pin persists across respawn via a
+# per-port pin file (profile_manager.read_server_pin) that spawn sites
+# re-pass as --profile; it is cleared by bare `roampal start`, `roampal
+# stop`, and explicit (non-idle) shutdowns.
+_STARTUP_PINNED_PROFILE: Optional[str] = None
+# True while the idle monitor is retiring the server — the lifespan
+# shutdown path must NOT clear the pin file in that case, so the respawn
+# re-pins (fix 5).
+_retiring_idle: bool = False
+
+
+def _shutdown_pin_cleanup(app_state: Any) -> None:
+    """v0.6.0 review fix 5: clear the launch pin on an EXPLICIT shutdown
+    (Ctrl+C / foreground exit) so later auto-started shared servers stay
+    unpinned. An idle retirement SKIPS the clear — the respawn reads the
+    pin file and re-passes --profile, preserving the pin. Always resets
+    the retirement flag (the next shutdown is explicit again)."""
+    global _retiring_idle
+    try:
+        if not _retiring_idle:
+            port = getattr(app_state, "roampal_port", None)
+            if port is not None:
+                from roampal.profile_manager import clear_server_pin
+
+                clear_server_pin(port)
+    except Exception:
+        pass  # best effort — an un-cleared pin only re-pins the next spawn
+    finally:
+        _retiring_idle = False
 
 
 def _evict_stale_entries():
@@ -119,10 +222,38 @@ def _evict_stale_entries():
     for key in stale_injection_keys:
         del _injection_map[key]
 
-    evicted = len(stale_search_keys) + len(stale_injection_keys)
+    # Task 30 record: a conversation's entry survives the TTL while ANY
+    # of its keys was injected recently; when everything in the record is
+    # stale, the whole conversation entry goes.
+    stale_session_injection = []
+    for cid, record in _session_injections.items():
+        newest = max(record.values() or [""], default="")
+        try:
+            entry_time = datetime.fromisoformat(newest)
+            if (now - entry_time).total_seconds() > _CACHE_TTL_SECONDS:
+                stale_session_injection.append(cid)
+        except (ValueError, TypeError):
+            stale_session_injection.append(cid)
+    for cid in stale_session_injection:
+        del _session_injections[cid]
+
+    # Unconfirmed deliveries (hook never acked) expire on the same TTL.
+    stale_pending = []
+    for token, entry in _pending_injections.items():
+        try:
+            created = datetime.fromisoformat(entry.get("created", ""))
+            if (now - created).total_seconds() > _CACHE_TTL_SECONDS:
+                stale_pending.append(token)
+        except (ValueError, TypeError):
+            stale_pending.append(token)
+    for token in stale_pending:
+        del _pending_injections[token]
+
+    evicted = len(stale_search_keys) + len(stale_injection_keys) + len(stale_session_injection)
     if evicted:
         logger.info(
-            f"Cache eviction: {len(stale_search_keys)} search + {len(stale_injection_keys)} injection entries"
+            f"Cache eviction: {len(stale_search_keys)} search + "
+            f"{len(stale_injection_keys)} injection + {len(stale_session_injection)} session records"
         )
 
 
@@ -137,14 +268,19 @@ TAG_PRIORITIES = [
 ]
 
 
-def _first_sentence(text: str, max_chars: int = 300) -> str:
+def _first_sentence(text: str, max_chars: Optional[int] = None) -> str:
     """
-    Extract first sentence from text, capped at max_chars.
+    Extract first sentence from text, capped at the profile-block display cut.
 
     v0.2.7: Used for cold start truncation - prevents massive facts
     from overwhelming context. Full facts still available via search.
-    Bumped from 150 to 300 chars for better summary context.
+    v0.6.0 Task 37: the limit comes from memory_limits.PROFILE_BLOCK_DISPLAY_CUT
+    (one source of truth for every memory length rule); clipped lines are
+    word-boundary cut and end in "…" so the model knows to search for the rest.
     """
+    from roampal.memory_limits import PROFILE_BLOCK_DISPLAY_CUT
+
+    cap = PROFILE_BLOCK_DISPLAY_CUT if max_chars is None else max_chars
     if not text:
         return ""
     # Find first sentence ending
@@ -152,13 +288,74 @@ def _first_sentence(text: str, max_chars: int = 300) -> str:
         idx = text.find(end_char)
         if idx > 0:
             first = text[: idx + 1].strip()
-            if len(first) <= max_chars:
+            if len(first) <= cap:
                 return first
             break
     # No sentence ending found or sentence too long - truncate
-    if len(text) <= max_chars:
+    if len(text) <= cap:
         return text
-    return text[: max_chars - 3].rsplit(" ", 1)[0] + "..."
+    candidate = text[: cap - 1].rsplit(" ", 1)[0]
+    if not candidate:
+        # No word boundary in the first cap-1 chars (leading whitespace or an
+        # unbroken word) — use the whole raw prefix.
+        candidate = text[: cap - 1]
+    return candidate.rstrip() + "…"
+
+
+# Task 45: how recently an identical summary must have been stored for the
+# stop hook to treat it as the same exchange (the plugin stores via the stop
+# hook seconds after its scoring call; retries can take a few minutes).
+SUMMARY_MERGE_WINDOW_SECONDS = 600
+
+
+async def _merge_into_recent_summary(
+    memory: UnifiedMemorySystem,
+    conversation_id: str,
+    summary: str,
+    metadata_updates: Dict[str, Any],
+) -> Optional[str]:
+    """Merge a sidecar summary into an identical one stored moments ago.
+
+    OpenCode plugins up to v0.6.0 send each exchange summary twice: with the
+    scoring call (/api/record-outcome stores it as a new working memory) and
+    then via the stop hook. Returns the id of the existing copy, updated with
+    `metadata_updates` (fingerprint, outcome), or None when there is nothing
+    to merge into. Never raises — a failed check just stores normally.
+    """
+    if not conversation_id or not summary:
+        return None
+    try:
+        adapter = memory.collections.get("working")
+        if adapter is None:
+            return None
+        await adapter._ensure_initialized()
+        if adapter.collection is None:
+            return None
+        found = adapter.collection.get(
+            where={
+                "$and": [
+                    {"conversation_id": conversation_id},
+                    {"memory_type": "exchange_summary"},
+                ]
+            },
+            include=["metadatas"],
+        )
+        now = datetime.now()
+        wanted = summary.strip()
+        for doc_id, meta in zip(found.get("ids") or [], found.get("metadatas") or []):
+            meta = meta or {}
+            if (meta.get("content") or meta.get("text") or "").strip() != wanted:
+                continue
+            try:
+                age = (now - datetime.fromisoformat(meta.get("created_at", ""))).total_seconds()
+            except (TypeError, ValueError):
+                continue
+            if 0 <= age <= SUMMARY_MERGE_WINDOW_SECONDS:
+                adapter.update_fragment_metadata(doc_id, dict(metadata_updates))
+                return doc_id
+    except Exception as e:
+        logger.warning(f"Summary merge check failed (storing normally): {e}")
+    return None
 
 
 def _get_installed_version() -> str:
@@ -386,11 +583,20 @@ Keep it conversational - don't interrogate. A simple "I don't think we've met - 
 
         # Build compact narrative
         profile_parts = ["<roampal-user-profile>"]
+        any_clipped = False
         for tag in TAG_PRIORITIES:
             if tag in category_facts:
-                profile_parts.append(
-                    f"{tag_labels[tag]}: {_first_sentence(category_facts[tag])}"
-                )
+                line = _first_sentence(category_facts[tag])
+                if line.endswith("…"):
+                    any_clipped = True
+                profile_parts.append(f"{tag_labels[tag]}: {line}")
+        # Task 37: the block ends with the clipped-lines note so the model
+        # knows to search_memory for the full text (spec table row: cold-start
+        # profile block). Only present when something was actually clipped.
+        if any_clipped:
+            profile_parts.append(
+                "Lines ending in … are clipped — use search_memory for the full text."
+            )
         profile_parts.append("</roampal-user-profile>")
 
         logger.info(
@@ -412,6 +618,12 @@ class GetContextRequest(BaseModel):
     query: str
     conversation_id: Optional[str] = None
     recent_messages: Optional[List[Dict[str, Any]]] = None
+    # v0.6.0 Task 30: injection-replay dedup is a CLAUDE-CODE-surface feature
+    # (hook output is append-only — repeats sit in old context until
+    # compaction). OpenCode rebuilds its block every request, so a pointer
+    # line there would HIDE the memory, not dedup it. Only the CC hook sets
+    # this; the plugin leaves the default False → its flow is unchanged.
+    dedup_injections: bool = False
 
 
 class GetContextResponse(BaseModel):
@@ -434,6 +646,10 @@ class GetContextResponse(BaseModel):
     scoring_memories: Optional[List[Dict[str, str]]] = (
         None  # [{"id": "doc_id", "content": "full memory content"}, ...]
     )
+    # v0.6.0 Task 30: one-time token for /api/hooks/injection-ack. Set only
+    # for dedup_injections requests; the surfaced memories count as shown
+    # (pointer next time) only after the hook acks delivery.
+    injection_token: str = ""
 
 
 class StopHookRequest(BaseModel):
@@ -605,22 +821,46 @@ async def lifespan(app: FastAPI):
     """Manage memory system lifecycle."""
     logger.info("Starting Roampal server...")
 
+    # Round 2 Item 7 / Task 22: idle self-retirement. Requests stamped by
+    # the http middleware keep the server alive; no campaign of spawned
+    # children is needed to keep it up.
+    global _last_request_time, _idle_monitor_task
+    _last_request_time = time.time()
+    uvicorn_server = getattr(app.state, "roampal_uvicorn_server", None)
+    if uvicorn_server is not None and _idle_retirement_enabled:
+        _idle_monitor_task = asyncio.create_task(
+            _idle_retire_monitor(uvicorn_server)
+        )
+        logger.info(
+            f"Idle self-retirement enabled: no requests for "
+            f"{_idle_timeout_minutes()} minutes -> graceful shutdown "
+            f"(override: ROAMPAL_SERVER_IDLE_TIMEOUT_MINUTES)"
+        )
+    elif uvicorn_server is not None:
+        logger.info("Idle self-retirement disabled (explicit launch: roampal start)")
+
     # v0.5.4: Pull sidecar config from opencode.json before any handler runs
     # so server-side extract_tags() can reach the sidecar.
     _hydrate_sidecar_from_opencode_config()
 
     # v0.5.4: Resolve profile at startup for banner only — actual memory init
     # is lazy per-request. This avoids binding a single profile to the process.
+    # Task 17: headerless resolution is pinned -> persisted `use` -> default;
+    # the server's own env/binding NEVER resolve request profiles (F1).
     from roampal.profile_manager import (
-        active_profile_name,
-        active_profile_source,
         DEFAULT_PROFILE,
+        persisted_profile_fallback,
     )
 
-    resolved_name = active_profile_name()
+    pinned = _STARTUP_PINNED_PROFILE
+    if pinned:
+        resolved_name, source = pinned, "startup --profile flag"
+    else:
+        resolved_name = persisted_profile_fallback()
+        source = "persisted use" if resolved_name != DEFAULT_PROFILE else "default"
     if resolved_name != DEFAULT_PROFILE:
         logger.info(
-            f"Active profile at startup: {resolved_name} (source: {active_profile_source()})"
+            f"Headerless-request profile resolution: {resolved_name} (source: {source})"
         )
 
     # v0.5.4: Shared embedding service — one ONNX model for all profiles.
@@ -634,6 +874,22 @@ async def lifespan(app: FastAPI):
         _shared_embed_service = None
 
     yield
+
+    # Task 22: stop the idle monitor before its retired-server flag fires
+    # during a normal shutdown sequence.
+    if _idle_monitor_task is not None:
+        _idle_monitor_task.cancel()
+        try:
+            await _idle_monitor_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _idle_monitor_task = None
+
+    # v0.6.0 review fix 5: explicit (non-idle) shutdown ends the pinned
+    # server's identity — clear the launch pin so later auto-started shared
+    # servers stay unpinned. An idle retirement SKIPS this: the respawn
+    # reads the pin file and re-passes --profile, preserving the pin.
+    _shutdown_pin_cleanup(app.state)
 
     # v0.4.1: Explicit cleanup of ChromaDB adapters (replaces __del__ destructor)
     logger.info("Shutting down Roampal server...")
@@ -655,16 +911,63 @@ async def lifespan(app: FastAPI):
 def _resolve_profile_name(request: Request) -> str:
     """Resolve the profile name for a request.
 
-    Priority: X-Roampal-Profile header > ROAMPAL_PROFILE env > active_profile_name().
-    Returns a normalized key suitable for _memory_by_profile lookup.
+    Round 2 Item 6 (profile routing contract, v0.6.0), amended by review
+    fix 5 and round 2:
+      1. X-Roampal-Profile header — clients ALWAYS name their profile
+         (Task 18; explicit "default" included). Task 18's F1 rationale:
+         the client's walk is complete, the server never second-guesses it
+      2. X-Roampal-Cwd header (Task 19) — the server resolves THAT
+         directory's binding for this request only; this is the CLIENT's
+         stated project directory, not a guess from the server's own cwd
+      3. Persisted `profile use`
+      4. Profile pinned at server launch (`roampal start --profile X`) —
+         the LAST exit before "default", so a pinned server only governs
+         sessions that configured nothing anywhere. Round 2 finding:
+         the pin sat at position 2 while the CLIENT-side walk (hooks/MCP)
+         puts it after binding and use — a bound folder plus a pinned
+         server disagreed between clients (Claude Code bound to X, our
+         cwd-header clients landing on the pin). The server order now
+         matches the client walk exactly. The pin persists across respawn
+         via the per-port pin file (fix 5) and is displayed by
+         `profile show` so a stale pin is never invisible.
+
+    The server DELIBERATELY never resolves from its own cwd binding or a
+    spawner's ROAMPAL_PROFILE env (F1): those describe whichever MCP
+    process or hook spawned/last respawned this process, not the caller.
     """
     header = request.headers.get("X-Roampal-Profile")
-    if header:
-        return header
+    if header and header.strip():
+        return header.strip()
 
-    from roampal.profile_manager import active_profile_name, DEFAULT_PROFILE
-    resolved = active_profile_name()
-    return resolved if resolved != DEFAULT_PROFILE else "default"
+    cwd_header = request.headers.get("X-Roampal-Cwd")
+    if cwd_header and cwd_header.strip():
+        try:
+            # v0.6.0 review fix 4: the OpenCode plugin percent-encodes this
+            # header (encodeURIComponent) — HTTP header values cannot carry
+            # characters above Latin-1, and Node's fetch THROWS on raw
+            # Cyrillic/CJK project paths. unquote() leaves plain paths
+            # (hooks, pre-fix plugin versions) byte-identical.
+            from urllib.parse import unquote
+
+            from roampal.profile_manager import binding_for_cwd
+
+            bound = binding_for_cwd(cwd=Path(unquote(cwd_header.strip())))
+            if bound:
+                return bound[1]
+        except (OSError, ValueError):
+            pass  # unresolvable cwd -> fall through to the next level
+
+    from roampal.profile_manager import persisted_profile_fallback, DEFAULT_PROFILE
+
+    fallback = persisted_profile_fallback()
+    if fallback != DEFAULT_PROFILE:
+        return fallback
+
+    # Nothing configured anywhere (no binding, no `use`) — the launch pin
+    # is the last-exit default (fix 5 / round 2: last, matching clients).
+    if _STARTUP_PINNED_PROFILE:
+        return _STARTUP_PINNED_PROFILE
+    return fallback
 
 
 async def get_memory_for_request(request: Request) -> UnifiedMemorySystem:
@@ -679,8 +982,30 @@ async def get_memory_for_request(request: Request) -> UnifiedMemorySystem:
     if profile_name not in _memory_by_profile:
         async with _init_lock:
             if profile_name not in _memory_by_profile:
+                # Routing contract (Round 2 Item 6): an unregistered profile
+                # name must fail EXPLICITLY. UMS would otherwise catch
+                # ProfileNotFoundError and silently write this request's
+                # data into the default store — a cross-profile bleed now
+                # that headers/bindings are the routing source. The check
+                # only applies without a ROAMPAL_DATA_PATH override (env
+                # override = the operator's explicit choice; buckets by
+                # name unchanged).
+                data_path = os.environ.get("ROAMPAL_DATA_PATH")
+                if profile_name != "default" and not data_path:
+                    from roampal.profile_manager import ProfileRegistry
+
+                    if not ProfileRegistry().exists(profile_name):
+                        logger.warning(
+                            f"Profile {profile_name!r} named by a request is not registered"
+                        )
+                        raise HTTPException(
+                            status_code=404,
+                            detail=(
+                                f"Profile {profile_name!r} is not registered. "
+                                f"Create it first: roampal profile create {profile_name}"
+                            ),
+                        )
                 try:
-                    data_path = os.environ.get("ROAMPAL_DATA_PATH")
                     umem = UnifiedMemorySystem(
                         data_path=data_path,
                         profile_name=None if profile_name == "default" else profile_name,
@@ -758,6 +1083,14 @@ def create_app() -> FastAPI:
         allow_headers=["Content-Type"],
     )
 
+    # Round 2 Item 7 / Task 22: every request touches the idle-timestamp —
+    # kept alive by anyone's usage, retired only after full idleness.
+    @app.middleware("http")
+    async def _touch_last_request(server_req: Request, call_next):
+        global _last_request_time
+        _last_request_time = time.time()
+        return await call_next(server_req)
+
     # ==================== Hook Endpoints ====================
 
     @app.post("/api/hooks/get-context", response_model=GetContextResponse)
@@ -795,6 +1128,7 @@ def create_app() -> FastAPI:
             )
             context_parts = []  # v0.3.2: non-scoring context parts for split delivery
             conversation_id = request.conversation_id or "default"
+            injection_token = ""  # Task 30 delivery ack (dedup requests only)
 
             # 0. Check for cold start (first message of session)
             is_cold_start = _session_manager.is_first_message(conversation_id)
@@ -820,10 +1154,28 @@ def create_app() -> FastAPI:
 
             # v0.2.7: Get context for BOTH cold start and regular messages
             # Cold start uses it for KNOWN CONTEXT (recent work), non-cold start also uses for scoring
+            # v0.6.0 Task 30: hand the per-conversation injection record in so
+            # unchanged repeats render as pointers (never silently dropped),
+            # then record every surfaced key below (Task 30 record block).
+            from roampal.backend.modules.memory.unified_memory_system import (
+                injection_hash,
+                normalize_memory,
+            )
+
+            # Task 30: only the Claude Code hook's append-only surface opts
+            # into pointer dedup (the request flag). OpenCode (default False)
+            # gets FULL text every time — its per-request rebuild loses the
+            # prior turn's block, so a pointer would hide the memory.
+            dedup = bool(getattr(request, "dedup_injections", False)) and _session_injections is not None
+            if dedup:
+                shown_map = dict(_session_injections.get(conversation_id, {}))
+            else:
+                shown_map = {}
             context = await _memory.get_context_for_injection(
                 query=request.query,
                 conversation_id=conversation_id,
                 recent_conversation=request.recent_messages,
+                already_shown=shown_map,
             )
 
             # v0.2.7: On cold start, append KNOWN CONTEXT after profile (recent work context)
@@ -945,6 +1297,40 @@ def create_app() -> FastAPI:
                     f"Added {len(injected_doc_ids)} doc_ids to injection map for {conversation_id}"
                 )
 
+                # v0.6.0 Task 30: record every surfaced (id, content) pair so
+                # the NEXT turn's unchanged repeats render as pointers. Only
+                # for the dedup-injected (Claude hook) surface. The content
+                # bytes MUST be the ones the renderer hashes — extract via
+                # normalize_memory (the same precedence the KNOWN CONTEXT
+                # renderer uses; a metadata.text vs root-text split would
+                # otherwise hash different strings and pointers would never
+                # render for such memories). A same-id update (new content)
+                # gets a NEW key and shows in full again.
+                # Delivery ack: the keys are held PENDING under a one-time
+                # token; they enter the record only when the hook confirms it
+                # handed this block to Claude Code (/api/hooks/injection-ack).
+                if dedup:
+                    surfaced_keys: Dict[str, str] = {}
+                    for mem in context.get("relevant_memories", []):
+                        mem_id = mem.get("id", "")
+                        normalized_for_hash = normalize_memory(
+                            dict(mem), mem.get("collection", "")
+                        )
+                        content = normalized_for_hash.get("content", "")
+                        if mem_id:
+                            surfaced_keys[f"{mem_id}:{injection_hash(content)}"] = timestamp
+                    if surfaced_keys:
+                        injection_token = uuid.uuid4().hex
+                        _pending_injections[injection_token] = {
+                            "conversation_id": conversation_id,
+                            "keys": surfaced_keys,
+                            "created": timestamp,
+                        }
+                        logger.info(
+                            f"Injection pending ack for {conversation_id}: "
+                            f"{len(surfaced_keys)} surfaced key(s)"
+                        )
+
             return GetContextResponse(
                 formatted_injection="\n".join(formatted_parts),
                 relevant_memories=context.get("relevant_memories", []),
@@ -956,6 +1342,7 @@ def create_app() -> FastAPI:
                 context_only="\n".join(context_parts) if context_parts else "",
                 scoring_exchange=scoring_exchange_data,
                 scoring_memories=scoring_memories_data,
+                injection_token=injection_token,
             )
 
         except EmbedderUnavailable as e:
@@ -1044,37 +1431,64 @@ def create_app() -> FastAPI:
                         f"Lifecycle-only exchange stored in JSONL for {conversation_id}"
                     )
                 else:
-                    # OpenCode path: Full storage in both ChromaDB and JSONL
-                    content = f"User: {user_msg}\n\nAssistant: {assistant_msg}"
+                    # OpenCode path (sidecar): summary-only storage with 600-char enforcement.
+                    # The sidecar produces a ~300-char summary; we store ONLY that summary,
+                    # not the "User: .../Assistant: ..." wrapper. Over-limit -> HTTP 400
+                    # with the sidecar rewrite message; NOTHING is stored. The plugin
+                    # re-asks the sidecar with the rejection text; the exchange itself
+                    # already landed in session JSONL via the plugin's separate
+                    # lifecycle_only=true call, so session state is not affected.
+                    from roampal.memory_limits import check_length, sidecar_reprompt_too_long
+
+                    err = check_length("summary", assistant_msg)
+                    if err:
+                        logger.warning(
+                            f"Sidecar summary rejected for {conversation_id}: {err}"
+                        )
+                        raise HTTPException(
+                            status_code=400, detail=sidecar_reprompt_too_long(len(assistant_msg))
+                        )
+
                     store_metadata = {
-                        "turn_type": "exchange",
+                        "memory_type": "exchange_summary",
                         "timestamp": datetime.now().isoformat(),
                     }
                     if request.metadata:
                         store_metadata.update(request.metadata)
 
-                    # v0.5.3 Section 11: Extract tags from summary when plugin doesn't provide noun_tags
-                    extracted_tags = None
-                    if not request.noun_tags and store_metadata.get("memory_type") == "exchange_summary":
-                        try:
-                            from roampal.sidecar_service import extract_tags as sidecar_extract_tags
-
-                            extracted_tags = sidecar_extract_tags(assistant_msg)
-                            if extracted_tags:
-                                logger.info(
-                                    f"Extracted {len(extracted_tags)} tags from exchange via sidecar"
-                                )
-                        except Exception as tag_err:
-                            logger.warning(f"Failed to extract tags from exchange (non-fatal): {tag_err}")
-
-                    effective_noun_tags = request.noun_tags or extracted_tags
-
-                    doc_id = await _memory.store_working(
-                        content=content,
-                        conversation_id=conversation_id,
-                        metadata=store_metadata,
-                        noun_tags=effective_noun_tags,
+                    # Task 45: plugins up to v0.6.0 also send this summary with their
+                    # scoring call (/api/record-outcome), which stores it first. Merge
+                    # into that copy instead of storing the same summary twice.
+                    doc_id = await _merge_into_recent_summary(
+                        _memory, conversation_id, assistant_msg, store_metadata
                     )
+                    if doc_id:
+                        logger.info(
+                            f"Sidecar summary for {conversation_id} merged into {doc_id} (already stored by record-outcome)"
+                        )
+                    else:
+                        # v0.5.3 Section 11: Extract tags from summary when plugin doesn't provide noun_tags
+                        extracted_tags = None
+                        if not request.noun_tags and store_metadata.get("memory_type") == "exchange_summary":
+                            try:
+                                from roampal.sidecar_service import extract_tags as sidecar_extract_tags
+
+                                extracted_tags = sidecar_extract_tags(assistant_msg)
+                                if extracted_tags:
+                                    logger.info(
+                                        f"Extracted {len(extracted_tags)} tags from exchange via sidecar"
+                                    )
+                            except Exception as tag_err:
+                                logger.warning(f"Failed to extract tags from exchange (non-fatal): {tag_err}")
+
+                        effective_noun_tags = request.noun_tags or extracted_tags
+
+                        doc_id = await _memory.store_working(
+                            content=assistant_msg,
+                            conversation_id=conversation_id,
+                            metadata=store_metadata,
+                            noun_tags=effective_noun_tags,
+                        )
 
                     await _session_manager.store_exchange(
                         conversation_id=conversation_id,
@@ -1082,7 +1496,7 @@ def create_app() -> FastAPI:
                         assistant_response=request.assistant_response,
                         doc_id=doc_id,
                     )
-                    logger.info(f"Full exchange {doc_id} stored for {conversation_id}")
+                    logger.info(f"Sidecar summary {doc_id} stored for {conversation_id}")
             else:
                 logger.info(
                     f"State-only stop hook for {conversation_id} (no exchange data)"
@@ -1162,9 +1576,76 @@ def create_app() -> FastAPI:
                 block_message=block_message,
             )
 
+        # Task 37: length rejections (HTTP 400) pass through untouched — the
+        # generic handler below must not re-wrap them into a 500.
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error in stop hook: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/hooks/session-reset")
+    async def session_reset(request: Request):
+        """v0.6.0 Task 30: drop the per-conversation injection record.
+
+        Claude Code SessionStart hooks (claude startup/compact/clear) call this
+        with the NEW/recovered session id (from stdin) — the previously
+        injected set no longer matches what the user actually has in
+        context, so next turn's KNOWN CONTEXT shows full text again.
+        Best-effort semantics: unknown ids are a no-op; the hook treats any
+        answer as success. OpenCode is unchanged (it rebuilds per request).
+
+        Accepts {\"conversation_id\": \"<session id>\"} as JSON."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        conversation_id = (body or {}).get("conversation_id") or ""
+        conversation_id = str(conversation_id).strip()
+        if not conversation_id:
+            raise HTTPException(status_code=400, detail="conversation_id required")
+        removed = _session_injections.pop(conversation_id, None)
+        # Unacked deliveries from before the reset must not land in the
+        # fresh record afterwards.
+        for token in [
+            t for t, entry in _pending_injections.items()
+            if entry.get("conversation_id") == conversation_id
+        ]:
+            del _pending_injections[token]
+        logger.info(
+            f"Session-reset: dropped injection record for {conversation_id} "
+            f"({len(removed or {})} key(s))"
+        )
+        return {"status": "ok", "conversation_id": conversation_id}
+
+    @app.post("/api/hooks/injection-ack")
+    async def injection_ack(request: Request):
+        """v0.6.0 Task 30: the hook confirms it handed a get-context block to
+        Claude Code. Only now do that response's surfaced memories count as
+        shown (rendered as pointers on later turns). No ack — hook timeout,
+        crash, non-zero exit — means they show in full again next turn.
+
+        Accepts {"injection_token": "<token from get-context>"}. An unknown
+        or expired token is a no-op (committed: false), never an error."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        token = str((body or {}).get("injection_token") or "").strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="injection_token required")
+        entry = _pending_injections.pop(token, None)
+        if entry is None:
+            return {"status": "ok", "committed": False}
+        conversation_id = entry["conversation_id"]
+        acked_at = datetime.now().isoformat()
+        record = _session_injections.setdefault(conversation_id, {})
+        for key in entry.get("keys", {}):
+            record[key] = acked_at
+        logger.info(
+            f"Injection ack for {conversation_id}: {len(entry.get('keys', {}))} key(s) now shown"
+        )
+        return {"status": "ok", "committed": True}
 
     # ==================== Memory API Endpoints ====================
 
@@ -1260,20 +1741,28 @@ def create_app() -> FastAPI:
 
     @app.post("/api/memory-bank/add")
     async def add_to_memory_bank(request: MemoryBankAddRequest, main_req: Request = None):
-        """Add a fact to memory bank."""
+        """Add a fact to memory bank.
+
+        v0.6.0 Task 37: length rules enforced HERE, not by silent cuts.
+        Over-limit writes are rejected with an actionable message (the
+        model rewrites shorter or splits into another call); nothing is
+        stored on rejection, so the old silent safety cap is gone.
+        Facts have no server-side list field (memory-bank content is a
+        single entry) — the facts-list per-item rule lives in the MCP
+        schema where the list exists.
+        """
         _memory = await get_memory_for_request(main_req)
 
-        MAX_MEMORY_CHARS = 2000
-        content = request.content
-        if content and len(content) > MAX_MEMORY_CHARS:
-            content = content[:MAX_MEMORY_CHARS]
-            logger.warning(
-                f"Memory content truncated from {len(request.content)} to {MAX_MEMORY_CHARS} chars (safety cap)"
-            )
+        from roampal.memory_limits import check_length
+
+        err = check_length("memory_bank", request.content)
+        if err:
+            logger.warning(f"Rejected memory-bank add: {err}")
+            raise HTTPException(status_code=400, detail=err)
 
         try:
             doc_id = await _memory.store_memory_bank(
-                text=content,
+                text=request.content,
                 tags=request.tags,
                 noun_tags=request.noun_tags,
                 importance=request.importance,
@@ -1288,20 +1777,19 @@ def create_app() -> FastAPI:
 
     @app.post("/api/memory-bank/update")
     async def update_memory_bank(request: MemoryBankUpdateRequest, main_req: Request = None):
-        """Update a memory bank entry."""
+        """Update a memory bank entry (Task 37 rejection rules as add)."""
         _memory = await get_memory_for_request(main_req)
 
-        MAX_MEMORY_CHARS = 2000
-        new_content = request.new_content
-        if new_content and len(new_content) > MAX_MEMORY_CHARS:
-            new_content = new_content[:MAX_MEMORY_CHARS]
-            logger.warning(
-                f"Updated memory content truncated from {len(request.new_content)} to {MAX_MEMORY_CHARS} chars (safety cap)"
-            )
+        from roampal.memory_limits import check_length
+
+        err = check_length("memory_bank", request.new_content)
+        if err:
+            logger.warning(f"Rejected memory-bank update: {err}")
+            raise HTTPException(status_code=400, detail=err)
 
         try:
             doc_id = await _memory.update_memory_bank(
-                doc_id=request.id, new_content=new_content,
+                doc_id=request.id, new_content=request.new_content,
                 tags=request.tags, noun_tags=request.noun_tags,
                 importance=request.importance, confidence=request.confidence,
             )
@@ -1421,16 +1909,20 @@ def create_app() -> FastAPI:
 
     @app.post("/api/record-response")
     async def record_response_endpoint(request: RecordResponseRequest, main_req: Request = None):
-        """Record a key takeaway in working memory (MCP tool proxy)."""
+        """Record a key takeaway in working memory (MCP tool proxy).
+
+        v0.6.0 Task 37: over-limit takeaways are REJECTED with the split
+        message (make another record_response) — the silent 2,000-char
+        cut is gone. Nothing stored on rejection."""
         _memory = await get_memory_for_request(main_req)
 
-        MAX_MEMORY_CHARS = 2000
+        from roampal.memory_limits import check_length
+
+        err = check_length("takeaway", request.key_takeaway)
+        if err:
+            logger.warning(f"Rejected record_response: {err}")
+            raise HTTPException(status_code=400, detail=err)
         takeaway = request.key_takeaway
-        if takeaway and len(takeaway) > MAX_MEMORY_CHARS:
-            takeaway = takeaway[:MAX_MEMORY_CHARS]
-            logger.warning(
-                f"Key takeaway truncated from {len(request.key_takeaway)} to {MAX_MEMORY_CHARS} chars (safety cap)"
-            )
 
         try:
             doc_id = await _memory.store_working(
@@ -1444,7 +1936,7 @@ def create_app() -> FastAPI:
                 noun_tags=request.noun_tags,
             )
             logger.info(
-                f"Recorded takeaway (score=0.7): {request.key_takeaway[:50]}..."
+                f"Recorded takeaway (score=0.7): {str(request.key_takeaway or '')[:50]}..."
             )
             return {"success": True, "doc_id": doc_id}
 
@@ -1464,6 +1956,29 @@ def create_app() -> FastAPI:
         """
         _memory = await get_memory_for_request(main_req)
         _session_manager = await get_session_manager_for_request(main_req)
+
+        # v0.6.0 Task 37: the summary + facts write path also enforces the
+        # length rules — previously the sidecar path had NO limits at all
+        # (a sidecar reply could be ~16k chars and got stored as-is).
+        # Over-limit content is rejected with the split/rewrite message;
+        # NOTHING is stored on rejection. The plugin's re-ask wiring is
+        # Task 35 chunk B.
+        try:
+            from roampal.memory_limits import check_length
+
+            err = check_length("summary", request.exchange_summary)
+            if not err:
+                for fact_text in (request.facts or []):
+                    err = check_length("fact", fact_text)
+                    if err:
+                        break
+            if err:
+                logger.warning(f"Rejected record-outcome write: {err}")
+                raise HTTPException(status_code=400, detail=err)
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # length checks never block on internal error
 
         try:
             conversation_id = request.conversation_id or "default"
@@ -1780,10 +2295,19 @@ def create_app() -> FastAPI:
         Update a memory's content and re-embed it.
 
         v0.3.6: Used by `roampal summarize` to replace long memories with summaries.
+        v0.6.0 Task 37: Enforces the 600-char summary limit — rejects over-limit
+        updates so the CLI doesn't silently truncate (the sidecar already summarized).
         """
         _memory = await get_memory_for_request(main_req)
 
         try:
+            # Task 37: enforce memory length rules on content updates.
+            from roampal.memory_limits import check_length
+
+            err = check_length("summary", request.new_content)
+            if err:
+                raise HTTPException(status_code=400, detail=err)
+
             collection = request.collection
             if collection not in _memory.collections:
                 raise HTTPException(
@@ -2045,7 +2569,13 @@ def create_app() -> FastAPI:
 
         if _shared_embed_service is not None:
             try:
-                test_vector = await _shared_embed_service.embed_text("health check")
+                # v0.6.0 review fix 2, part 2: skip_cache — with the cache,
+                # the first successful probe stored "health check" and every
+                # later probe returned that stored vector, reading a dead
+                # embedder as healthy forever. The probe must run the model.
+                test_vector = await _shared_embed_service.embed_text(
+                    "health check", skip_cache=True
+                )
                 if len(test_vector) > 0:
                     embedding_ok = True
             except Exception as e:
@@ -2055,7 +2585,9 @@ def create_app() -> FastAPI:
             for mem in _memory_by_profile.values():
                 if mem.initialized and mem._embedding_service:
                     try:
-                        test_vector = await mem._embedding_service.embed_text("health check")
+                        test_vector = await mem._embedding_service.embed_text(
+                            "health check", skip_cache=True
+                        )
                         if len(test_vector) > 0:
                             embedding_ok = True
                         break
@@ -2114,7 +2646,8 @@ def create_app() -> FastAPI:
             out["status"] = "no_profile"
             return out
 
-        # Embedder: lightweight probe (mirrors /api/health).
+        # Embedder: lightweight probe (mirrors /api/health; fix 2 part 2:
+        # skip the cache so a dead embedder reports as degraded here too).
         embed_ok = False
         model = None
         try:
@@ -2122,7 +2655,9 @@ def create_app() -> FastAPI:
             if es is not None:
                 raw_model = getattr(es, "HF_REPO", None) or getattr(es, "model_name", None)
                 model = str(raw_model) if raw_model is not None else None
-                await asyncio.wait_for(es.embed_text("status probe"), timeout=15)
+                await asyncio.wait_for(
+                    es.embed_text("status probe", skip_cache=True), timeout=15
+                )
                 embed_ok = True
         except Exception:
             embed_ok = False
@@ -2157,7 +2692,13 @@ def create_app() -> FastAPI:
     return app
 
 
-def start_server(host: str = "127.0.0.1", port: int = None, dev: bool = False):
+def start_server(
+    host: str = "127.0.0.1",
+    port: int = None,
+    dev: bool = False,
+    profile: Optional[str] = None,
+    idle_retire: bool = True,
+):
     """
     Start the Roampal server with dev/prod isolation.
 
@@ -2165,7 +2706,21 @@ def start_server(host: str = "127.0.0.1", port: int = None, dev: bool = False):
         host: Server host
         port: Server port (auto-determined from dev mode if not specified)
         dev: Run in dev mode (port 27183, Roampal_DEV data)
+        profile: Explicitly pinned profile (Round 2 Item 6 / Task 17).
+            Header still wins over it; headerless requests on this server
+            resolve to it — NOT to this process's env or cwd binding.
+        idle_retire: Task 22 idle self-retirement (30 idle min -> graceful
+            shutdown) is for SHARED servers spawned by hooks/MCP/plugin,
+            which have no parent to shut them down. v0.6.0 review fix 9:
+            `roampal start` passes False — a foreground server the user
+            launched explicitly stays up until Ctrl+C / roampal stop,
+            instead of surprising them with an exit after 30 idle minutes.
     """
+    # Round 2 Item 6 / Task 17: record the explicit pin (None = not pinned;
+    # env ROAMPAL_PROFILE is deliberately ignored server-side).
+    global _STARTUP_PINNED_PROFILE, _idle_retirement_enabled
+    _STARTUP_PINNED_PROFILE = (profile or "").strip() or None
+    _idle_retirement_enabled = idle_retire
     # Determine mode and port
     dev_mode = dev or os.environ.get("ROAMPAL_DEV", "").lower() in ("1", "true", "yes")
 
@@ -2196,15 +2751,21 @@ def start_server(host: str = "127.0.0.1", port: int = None, dev: bool = False):
     # active profile + any ROAMPAL_DATA_PATH override. Previous versions printed
     # an unexpanded %APPDATA%/Roampal/data literal that was wrong under named
     # profiles.
+    # Task 17: banner resolves from the explicit pin or the headerless
+    # fallback (persisted `use` -> default) — never env/binding (F1).
     from roampal.profile_manager import (
         DEFAULT_PROFILE,
         ProfileNotFoundError,
-        active_profile_name,
-        active_profile_source,
+        persisted_profile_fallback,
         resolve_data_path,
     )
 
-    profile_name = active_profile_name()
+    if _STARTUP_PINNED_PROFILE:
+        profile_name = _STARTUP_PINNED_PROFILE
+        profile_source = "startup --profile flag"
+    else:
+        profile_name = persisted_profile_fallback()
+        profile_source = "persisted use"
     try:
         resolved_path = resolve_data_path(profile_name)
     except ProfileNotFoundError:
@@ -2220,14 +2781,24 @@ def start_server(host: str = "127.0.0.1", port: int = None, dev: bool = False):
     ]
     if profile_name != DEFAULT_PROFILE:
         banner_lines.append(
-            f"  Profile: {profile_name} ({active_profile_source()})"
+            f"  Profile: {profile_name} ({profile_source})"
         )
     banner_lines.append("===================================================")
     print("\n" + "\n".join(banner_lines) + "\n")
 
     app = create_app()
     try:
-        uvicorn.run(app, host=host, port=port)
+        # v0.6.0 review fix 5: the lifespan shutdown path needs the port to
+        # clear the launch pin on explicit shutdown.
+        app.state.roampal_port = port
+        # Round 2 Item 7 / Task 22: the uvicorn.Server handle is stored on
+        # app.state so the lifespan's idle-retirement monitor can flip
+        # should_exit — the shared server retires itself when no requests
+        # arrive for ROAMPAL_SERVER_IDLE_TIMEOUT_MINUTES (default 30),
+        # instead of being killed by whichever app launched it.
+        uvicorn_server = uvicorn.Server(uvicorn.Config(app, host=host, port=port))
+        app.state.roampal_uvicorn_server = uvicorn_server
+        uvicorn_server.run()
     except BaseException as e:
         # v0.5.9 Item 5: log a fatal MemoryError (incl. when wrapped in an
         # ExceptionGroup) before the process exits.
@@ -2249,6 +2820,11 @@ if __name__ == "__main__":
         help="Server port (default: 27182 prod, 27183 dev)",
     )
     parser.add_argument(
+        "--profile",
+        default=None,
+        help="Pin a named profile for headerless requests on this server",
+    )
+    parser.add_argument(
         "--dev",
         action="store_true",
         help="Run in dev mode (port 27183, Roampal_DEV data)",
@@ -2257,4 +2833,4 @@ if __name__ == "__main__":
 
     # Logging (console + rotating PID-scoped file) is configured inside
     # start_server() for v0.5.9 Item 5.
-    start_server(host=args.host, port=args.port, dev=args.dev)
+    start_server(host=args.host, port=args.port, dev=args.dev, profile=args.profile)

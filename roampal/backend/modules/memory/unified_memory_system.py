@@ -47,6 +47,21 @@ else:
 
 logger = logging.getLogger(__name__)
 
+
+def injection_hash(content: str) -> str:
+    """Task 30 content fingerprint: 12-hex md5 of the exact delivered text.
+
+    The server keeps per-conversation injection records keyed on
+    `{doc_id}:{hash}` so an unchanged re-retrieved memory renders as the
+    pointer line while an UPDATED memory (same id, new content) shows in
+    full again. Stable across processes; the id in the key carries the
+    lookup, the hash disambiguates updater generations.
+    """
+    import hashlib
+
+    return hashlib.md5((content or "").encode("utf-8")).hexdigest()[:12]
+
+
 CollectionName = Literal["books", "working", "history", "patterns", "memory_bank"]
 
 # ContextType is any string - LLM discovers topics organically (coding, fitness, finance, etc.)
@@ -1322,6 +1337,7 @@ class UnifiedMemorySystem:
         query: str,
         conversation_id: str = None,
         recent_conversation: List[Dict[str, Any]] = None,
+        already_shown: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
         Get context to inject into LLM prompt via hooks.
@@ -1329,10 +1345,19 @@ class UnifiedMemorySystem:
         v0.4.5: TagCascade retrieval — tags-first cascade fills candidate pool,
         CE reranks, top results injected into LLM context.
 
+        v0.6.0 Task 30: `already_shown` (optional; {doc_id: content_hash})
+        is the SERVER's per-conversation record of what this session already
+        received. A memory whose (id, content) is unchanged renders as a
+        one-line pointer instead of full text — re-injection dedup WITHOUT
+        losing anything: no size cap, retrieval still 4 summaries + 4 facts,
+        the surfaced/scoring list still carries every id. An UPDATED memory
+        (different content, same id) shows in full again.
+
         Args:
             query: The user's message
             conversation_id: Current conversation ID
             recent_conversation: Recent messages for continuity
+            already_shown: Content-consumed fingerprint map (optional)
 
         Returns:
             Dict with memories, doc_ids for scoring, and formatted injection
@@ -1380,16 +1405,26 @@ class UnifiedMemorySystem:
             top_memories  # Alias for selective scoring in hooks
         )
         result["doc_ids"] = [m.get("id") for m in top_memories if m.get("id")]
-        result["formatted_injection"] = self._format_context_injection(result)
+        result["formatted_injection"] = self._format_context_injection(
+            result, already_shown=already_shown or {}
+        )
 
         return result
 
-    def _format_context_injection(self, context: Dict[str, Any]) -> str:
+    def _format_context_injection(
+        self, context: Dict[str, Any], already_shown: Optional[Dict[str, str]] = None
+    ) -> str:
         """
         Format context for injection into LLM prompt.
 
         v0.4.5: Shows all memories (4 summaries + 4 facts from two-lane retrieval).
         Extracts user name from identity-tagged memories.
+
+        v0.6.0 Task 30: `already_shown` maps doc_id -> content hash — memories
+        already delivered to this conversation this session (same id AND same
+        content) render as a one-line pointer (`still relevant: [id:…] — shown
+        earlier this session`) instead of full text. The line keeps the id so
+        the scoring prompt's per-id roster is identical to the full-text one.
         """
         import re
 
@@ -1470,6 +1505,19 @@ class UnifiedMemorySystem:
                 uses = normalized.get("uses", 0)
                 wilson = normalized.get("wilson_score", 0)
                 last_outcome = normalized.get("last_outcome", "")
+
+                # Task 30: unchanged repeat -> pointer, never silently dropped.
+                # The record is keyed on id+CONTENT hash (composite) — same
+                # id with updated content gets a new key and shows in full.
+                if (
+                    already_shown
+                    and doc_id
+                    and f"{doc_id}:{injection_hash(content)}" in already_shown
+                ):
+                    return (
+                        f"still relevant: [id:{doc_id}] — shown earlier this session "
+                        f"(content unchanged; use search_memory {doc_id} for the full text)"
+                    )
 
                 tag_parts = []
                 if age:
@@ -1612,8 +1660,13 @@ class UnifiedMemorySystem:
                 where={"title": title}, include=["metadatas"]
             )
 
-            if results and results.get("ids"):
-                return results["ids"]
+            # Removed books stay in ChromaDB as ghosted chunks (v0.2.2); they
+            # must not count as "already exists", or a removed title could
+            # never be ingested again (the ingest reported success and stored
+            # nothing).
+            live = [i for i in (results or {}).get("ids", []) if i not in self.ghost_ids]
+            if live:
+                return live
         except Exception as e:
             logger.warning(f"Error checking for existing book: {e}")
 
@@ -1744,7 +1797,8 @@ class UnifiedMemorySystem:
         except Exception as e:
             return {"removed": 0, "error": str(e)}
 
-        doc_ids = results.get("ids", [])
+        # Already-ghosted chunks are a book removed earlier — not found again.
+        doc_ids = [i for i in results.get("ids", []) if i not in self.ghost_ids]
         if not doc_ids:
             return {"removed": 0, "message": f"No book found with title '{title}'"}
 
@@ -1906,7 +1960,16 @@ class UnifiedMemorySystem:
         for name, adapter in self.collections.items():
             try:
                 count = adapter.collection.count() if adapter.collection else 0
-                stats["collections"][name] = {"count": count}
+                entry = {"count": count}
+                # Task 46: removed books stay stored as ghosted chunks (v0.2.2),
+                # so the raw count overstated books vs `roampal books`. Report
+                # live chunks as the count and the hidden ones as "removed".
+                if name == "books" and self.ghost_ids and adapter.collection:
+                    present = adapter.collection.get(ids=list(self.ghost_ids), include=[])
+                    removed = len(present.get("ids") or [])
+                    if removed:
+                        entry = {"count": count - removed, "removed": removed}
+                stats["collections"][name] = entry
             except Exception as e:
                 stats["collections"][name] = {"error": str(e)}
 

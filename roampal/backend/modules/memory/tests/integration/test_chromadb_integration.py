@@ -715,7 +715,8 @@ time.sleep(30)
             assert result["ids"] == ["baseline"]
             assert result["metadatas"][0]["text"] == "committed baseline metadata"
         finally:
-            recovered.close()
+            if hasattr(recovered, "close"):
+                recovered.close()
 
 
 if __name__ == "__main__":

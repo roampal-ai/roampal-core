@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roampal"
-version = "0.5.9"
+version = "0.6.0"
 description = "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Environment :: Console",
@@ -27,7 +28,7 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "chromadb>=1.0.0,<2.0.0",  # v0.2.2: Pin to 1.x (schema migration handles 0.4.x upgrades)
+    "chromadb>=1.5.9,<2.0.0",  # Task 42: floor at the version CI tests (1.5.9) so `pip install --upgrade roampal` also upgrades an older ChromaDB — reading a store written by a NEWER ChromaDB with an OLDER one is not guaranteed to work (0.5.9-era 1.5.0 leftovers)
     "onnxruntime>=1.14.0",
     "tokenizers>=0.14.0",
     "huggingface-hub>=0.20.0",
@@ -45,6 +46,7 @@ dev = [
     "pytest-asyncio>=0.21.0",
     "pytest-timeout>=2.1.0",
     "pytest-forked>=1.6.0",
+    "pyflakes>=3.0.0",
     "mypy>=1.0.0",
     "build>=1.0.0",
     "twine>=4.0.0",

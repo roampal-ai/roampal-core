@@ -1,0 +1,12 @@
+### exit: 0
+--- stdout+stderr ---
+No scoring model configured.
+  This command needs a model to process your memories.
+
+  Run roampal sidecar setup to configure one.
+Sidecar scoring configuration:
+  User-global:  not found  (<ROOT>/homeN\.config\opencode\opencode.json)
+  Project-local: none found in cwd ancestry
+
+  No sidecar configured — scoring, summaries, and fact extraction are disabled.
+  Retrieval from existing memories still works. Run roampal sidecar setup to enable scoring.

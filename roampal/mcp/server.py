@@ -53,7 +53,10 @@ import atexit
 import subprocess
 import uuid
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, List
+
+from roampal.profile_manager import neutral_spawn_dir  # Task 36
+import roampal.memory_limits as memory_limits  # v0.6.0 Task 37: one source of truth
 
 logger = logging.getLogger(__name__)
 
@@ -166,10 +169,6 @@ _dev_mode = False
 # v0.3.6: Platform detection — OpenCode sets ROAMPAL_PLATFORM=opencode via MCP env
 _is_opencode = os.environ.get("ROAMPAL_PLATFORM", "").lower() == "opencode"
 
-# v0.5.4: Cache resolved profile name for X-Roampal-Profile header on all HTTP calls.
-_MCP_PROFILE_UNRESOLVED = object()
-_mcp_profile_name: Any = _MCP_PROFILE_UNRESOLVED
-
 # v0.4.1: Hide score_memories tool when OpenCode sidecar is active.
 # The sidecar handles scoring silently. If score_memories is visible, the model
 # reads the tool description and calls it unprompted — causing double-scoring.
@@ -235,16 +234,44 @@ def _get_update_notice() -> str:
     return ""
 
 
-def _get_mcp_profile_name() -> Optional[str]:
-    """v0.5.4: Resolve the profile name for X-Roampal-Profile header."""
-    global _mcp_profile_name
-    if _mcp_profile_name is not _MCP_PROFILE_UNRESOLVED:
-        return _mcp_profile_name
+def _get_mcp_profile_name() -> str:
+    """v0.5.4: Resolve the profile name for X-Roampal-Profile header.
 
-    from roampal.profile_manager import active_profile_name, DEFAULT_PROFILE
-    resolved = active_profile_name()
-    _mcp_profile_name = None if resolved == DEFAULT_PROFILE else resolved
-    return _mcp_profile_name
+    v0.6.0 Task 14: this seam resolves through profile_manager's ONE
+    helper (`profile_header_value`) — same precedence walk (env > cwd
+    binding > persisted use > default) that the hook CLI paths use.
+
+    Round 2 Item 6 / Task 18: the MCP process ALWAYS names its profile —
+    an explicit "default" is sent when the walk lands there, so the
+    shared server never resolves from its own cwd/env for MCP calls.
+
+    Round 2 Item 6 / Task 20: resolved PER CALL (the v0.5.4 sentinel
+    cache froze the profile at first resolution) — a bind/unbind
+    mid-session takes effect on the next MCP tool call, same as hooks.
+
+    v0.6.0 review fix 5 (round-2 amended): one more tier before "default"
+    — the SERVER's launch pin (`roampal start --profile X`, per-port pin
+    file), matching the hooks. A session with nothing configured
+    explicitly names the pinned profile instead of sending "default", so
+    the pin reaches header-sending clients. F1 intact: the CLIENT names
+    its choice.
+
+    Round-2 parity: an EXPLICIT ROAMPAL_PROFILE (even the literal
+    "default") short-circuits before the pin tier here, exactly as the
+    hooks do — pre-fix the MCP swap substituted the pin while the hooks
+    returned the env's "default" verbatim.
+    """
+    from roampal.profile_manager import profile_header_value, read_server_pin
+
+    if os.environ.get("ROAMPAL_PROFILE", "").strip():
+        return profile_header_value()
+
+    resolved = profile_header_value()
+    if resolved == "default":
+        pin = read_server_pin(_get_port())
+        if pin:
+            return pin
+    return resolved
 
 
 def _is_port_in_use(port: int) -> bool:
@@ -275,10 +302,16 @@ def _start_fastapi_server():
     Uses subprocess instead of threading to avoid event loop conflicts between
     uvicorn and the MCP server's asyncio loop.
 
-    v0.2.8: Child process lifecycle - FastAPI dies when MCP dies.
-    - Windows: Uses STARTUPINFO to hide console without detaching
-    - Linux/macOS: Child naturally dies with parent (same process group)
-    - atexit handler ensures graceful cleanup on normal exit
+    Round 2 Item 7 / Task 22 (was v0.2.8 "FastAPI dies when MCP dies"):
+    the spawned server outlives this MCP process — no launcher ownership,
+    no atexit kill. The server self-retires after an idle period
+    (ROAMPAL_SERVER_IDLE_TIMEOUT_MINUTES, default 30). Platform lifecycle:
+    - Windows: STARTUPINFO hides the console; the server survives MCP exit
+    - Linux/macOS: child is orphaned to init and survives as well
+    - atexit only logs (see _cleanup_fastapi)
+    - respawn concern (a spawner leaking its env) is handled at spawn time
+      (ROAMPAL_PROFILE stripped, Task 17) and by neutral-cwd spawning
+      (Task 36)
     """
     global _fastapi_started, _fastapi_process
 
@@ -307,10 +340,29 @@ def _start_fastapi_server():
         env = os.environ.copy()
         if _dev_mode:
             env["ROAMPAL_DEV"] = "1"
+        # Round 2 Item 6 / Task 17: the shared server never resolves
+        # request profiles from its env (server/main.py routes headerless
+        # requests via persisted `use` -> default). Stripping the spawner's
+        # ROAMPAL_PROFILE prevents one project's shell from reaching the
+        # server process at all.
+        env.pop("ROAMPAL_PROFILE", None)
 
         # Start FastAPI server as a subprocess with correct port
-        # Use the same Python that's running this MCP server
-        cmd = [sys.executable, "-m", "roampal.server.main", "--port", str(port)]
+        # Use the same Python that's running this MCP server.
+        # Task 36: the caller's cwd (where Claude Code launches this MCP
+        # process) must not leak into the child's sys.path; cwd is pinned to
+        # the neutral data dir for that reason. v0.6.0 review fix 1: -E
+        # (PYTHONPATH/PYTHONHOME ignored) instead of -I — -I's implied -s
+        # hides USER site-packages, breaking Store-Python/pip --user installs.
+        # -P (3.11+) additionally keeps the spawn cwd off sys.path.
+        from roampal.profile_manager import spawn_isolation_flags, read_server_pin
+
+        cmd = [sys.executable, *spawn_isolation_flags(), "-m", "roampal.server.main", "--port", str(port)]
+        # v0.6.0 review fix 5: a respawn of a pinned server re-passes the
+        # launch pin (per-port pin file), preserving its routing identity.
+        _pin = read_server_pin(port)
+        if _pin:
+            cmd += ["--profile", _pin]
 
         # v0.2.8: Platform-specific subprocess handling
         # Goal: Hide console window without detaching from parent process
@@ -326,6 +378,7 @@ def _start_fastapi_server():
 
         _fastapi_process = subprocess.Popen(
             cmd,
+            cwd=str(neutral_spawn_dir()),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
@@ -341,26 +394,24 @@ def _start_fastapi_server():
 
 def _cleanup_fastapi():
     """
-    v0.2.8: Kill FastAPI subprocess on MCP exit.
-
-    Called by atexit handler for graceful shutdown.
-    On crash, child dies automatically (no longer detached).
+    Round 2 Item 7 / Task 22: the MCP process NO LONGER OWNS the shared
+    server. v0.2.8 killed the FastAPI subprocess here (atexit) — that cut
+    every other session off from the shared server until its restart path
+    fired, and each respawn loaded the restarter's cwd/env (profile
+    routing bug F1). The server now retires ITSELF after an idle period
+    (see server/main.py: ROAMPAL_SERVER_IDLE_TIMEOUT_MINUTES, default 30,
+    logged) — a request arriving before idling keeps it alive for the
+    next session.
     """
-    global _fastapi_process
     if _fastapi_process and _fastapi_process.poll() is None:
-        logger.info("Cleaning up FastAPI hook server...")
-        try:
-            _fastapi_process.terminate()
-            _fastapi_process.wait(timeout=2)
-        except Exception:
-            # Force kill if terminate doesn't work
-            try:
-                _fastapi_process.kill()
-            except Exception:
-                pass
+        logger.info(
+            "FastAPI hook server left running (self-retires when idle); "
+            f"pid={_fastapi_process.pid}"
+        )
 
 
-# v0.2.8: Register cleanup handler
+# v0.2.8→Task 22: register atexit only for the no-op log; the process
+# itself is left running.
 atexit.register(_cleanup_fastapi)
 
 
@@ -385,21 +436,73 @@ def _ensure_server_running(timeout: float = 5.0) -> bool:
     port = _get_port()
     health_url = f"http://127.0.0.1:{port}/api/health"
 
-    # Try health check first
-    try:
-        req = urllib.request.Request(health_url, method='GET')
-        with urllib.request.urlopen(req, timeout=2.0) as resp:
-            if resp.status == 200:
-                return True
-    except (urllib.error.URLError, OSError, TimeoutError):
-        pass
+    def _health_now() -> bool:
+        """Task 23, amended by v0.6.0 review fix 2: 200 = up; 503 = the
+        server reports itself BROKEN (dead embed service / failed profile
+        init — never a busy signal) -> down for restart purposes; any other
+        HTTP answer = up (never kill a foreign port holder, F2); connection
+        failure = down."""
+        try:
+            req = urllib.request.Request(health_url, method='GET')
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                return resp.status == 200
+        except urllib.error.HTTPError as e:
+            return e.code != 503
+        except (urllib.error.URLError, OSError, TimeoutError):
+            return False
 
-    # Server not responding - try to restart it
+    # Try health check first
+    if _health_now():
+        return True
+
+    # Round 2 Item 7 / Task 23: single-flight restart — concurrent
+    # restarters (other MCP processes, CC hooks, the plugin) cooperate
+    # through the same cross-process lock; latecomers wait for the
+    # winner's health instead of spawning a second server.
+    try:
+        from roampal.utils import proc_lock
+
+        _lock = proc_lock
+    except Exception:
+        _lock = None
+
+    if _lock is not None:
+        if _lock.acquire(port) is None:
+            # Another restarter is mid-restart — wait for its result.
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                if _health_now():
+                    logger.info("FastAPI hook server restarted by another client")
+                    return True
+                time.sleep(0.5)
+            logger.error("Failed to restart FastAPI hook server")
+            return False
+        try:
+            # Re-check under the lock: the other restarter may have finished.
+            if _health_now():
+                return True
+            logger.info(f"Roampal server restarting on port {port}...")
+            _fastapi_started = False
+            _start_fastapi_server()
+            return _poll_fastapi_health(health_url, timeout)
+        finally:
+            try:
+                _lock.release(port)
+            except Exception:
+                pass
+
     logger.info(f"Roampal server restarting on port {port}...")
     _fastapi_started = False
     _start_fastapi_server()
+    return _poll_fastapi_health(health_url, timeout)
 
-    # Wait for startup
+
+def _poll_fastapi_health(health_url: str, timeout: float) -> bool:
+    """Task 23: poll until the freshly spawned server answers health."""
+    import time
+    import urllib.request
+    import urllib.error
+
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
@@ -437,8 +540,22 @@ async def _api_call(method: str, path: str, payload: dict = None, timeout: float
             response = await client.get(url, timeout=timeout, headers=headers)
         else:
             response = await client.post(url, json=payload or {}, timeout=timeout, headers=headers)
-        response.raise_for_status()
+        raise_for_status(response)
         return response.json()
+
+
+def raise_for_status(response):
+    """httpx's raise_for_status() loses the response body — but Task 37's
+    length rejections (400) carry OUR actionable text ("Too long: 601/600
+    chars... rewrite in ~300 chars..."). Surface that detail to the model
+    instead of a generic 'Client error 400'."""
+    if response.status_code < 400:
+        return
+    try:
+        detail = response.json().get("detail", "")
+    except Exception:
+        detail = response.text[:300]
+    raise RuntimeError(f"{detail or f'HTTP {response.status_code}'}")
 
 
 def run_mcp_server(dev: bool = False):
@@ -609,8 +726,7 @@ RETURNS: "Added to memory bank (ID: memory_bank_<8hex>)". """,
                         "content": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": 600,
-                            "description": "Fact to store. ~300 char target, 600 hard cap. Example: \"Maya is a data scientist focused on AI memory systems\""
+                            "description": f"Fact to store. ~300 char target, {memory_limits.MEMORY_BANK_ENTRY_MAX} hard cap — over it the server rejects with a rewrite-shorter message. Example: \"Maya is a data scientist focused on AI memory systems\""
                         },
                         "tags": {
                             "type": "array",
@@ -688,8 +804,7 @@ RETURNS: Text confirmation with doc_id on success. Example: "Updated memory (ID:
                         "new_content": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": 600,
-                            "description": "The corrected or updated fact. Keep concise (~300 chars). One concept per fact. Example: \"User switched to light mode in April 2026\""
+                            "description": f"The corrected or updated fact. Keep concise (~300 chars) — server rejects over {memory_limits.MEMORY_BANK_ENTRY_MAX} with a rewrite-shorter message. One concept per fact. Example: \"User switched to light mode in April 2026\""
                         },
                         "tags": {
                             "type": "array",
@@ -751,7 +866,6 @@ RETURNS: "Memory deleted successfully" on success; "Memory not found for deletio
                         "content": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": 600,
                             "description": "Fact to archive. Semantic match — paraphrase OK. Example: \"User prefers dark mode\""
                         }
                     },
@@ -803,8 +917,7 @@ RETURNS: "Scored (N memories updated). Summary stored (M chars)". """,
                         "exchange_summary": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": 600,
-                            "description": "1-3 sentences (~300 chars). What happened, what changed."
+                            "description": f"{memory_limits.TARGET_PHRASE.capitalize()} — what happened, what changed. Over {memory_limits.SUMMARY_TAKEAWAY_MAX} chars the server rejects with a rewrite-shorter message."
                         },
                         "exchange_outcome": {
                             "type": "string",
@@ -821,8 +934,8 @@ RETURNS: "Scored (N memories updated). Summary stored (M chars)". """,
                         "facts": {
                             "type": "array",
                             "maxItems": 20,
-                            "items": {"type": "string", "minLength": 1, "maxLength": 150},
-                            "description": "Atomic facts (≤150 chars each). Include dates, names, decisions. Example: [\"User prefers snake_case\", \"v2.0 released 2026-04-01\"]"
+                            "items": {"type": "string", "minLength": 1},
+                            "description": f"Atomic facts (≤{memory_limits.FACT_MAX} chars each; the server rejects a longer one with a one-fact-per-item message). Include dates, names, decisions. Example: [\"User prefers snake_case\", \"v2.0 released 2026-04-01\"]"
                         }
                     },
                     "required": ["memory_scores"]
@@ -860,8 +973,7 @@ ERRORS
                     "key_takeaway": {
                         "type": "string",
                         "minLength": 1,
-                        "maxLength": 600,
-                        "description": "1-2 sentence summary of the important learning. Be specific — include names, decisions, outcomes. Example: \"User prefers one bundled PR for refactors — splitting would be churn\""
+                        "description": f"{memory_limits.TARGET_PHRASE.capitalize()} of the important learning. Be specific — include names, decisions, outcomes. Over {memory_limits.SUMMARY_TAKEAWAY_MAX} chars the server rejects with a split-into-another-call message. Example: \"User prefers one bundled PR for refactors — splitting would be churn\""
                     },
                     "noun_tags": {
                         "type": "array",
@@ -1181,12 +1293,19 @@ ERRORS
                 if facts:
                     payload["facts"] = facts
 
-                scored_count = 0
+                # v0.6.0: errors reach the model. The server's length rejection
+                # ("Too long: N/600 ...", nothing stored) is the only feedback
+                # now that the schemas carry no maxLength — swallowing it here
+                # would report "Summary stored" for a write that never happened.
                 try:
                     result = await _api_call("POST", "/api/record-outcome", payload)
-                    scored_count = result.get("documents_scored", 0)
                 except Exception as e:
                     logger.warning(f"Failed to call FastAPI record-outcome: {e}")
+                    return [types.TextContent(
+                        type="text",
+                        text=f"Error: {e} Nothing was recorded — call score_memories again."
+                    )]
+                scored_count = result.get("documents_scored", 0)
 
                 parts = [f"Scored ({scored_count} memories updated)"]
                 if exchange_summary:

@@ -17,6 +17,7 @@ import io
 import json
 import pytest
 import tempfile
+import threading
 from unittest.mock import patch, MagicMock, call
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', '..')))
@@ -308,67 +309,284 @@ class TestTranscriptReading:
 class TestRestartServer:
     """Test _restart_server self-healing logic in both hooks."""
 
-    def test_restart_attempts_kill_and_start(self):
-        """Restart kills old process and starts new one."""
-        from roampal.hooks.user_prompt_submit_hook import _restart_server
+    def _isolated_locks(self, monkeypatch, tmp_path):
+        """Single-flight lock dir isolation for restart tests."""
+        import roampal.profile_manager as pm
 
-        mock_health_resp = MagicMock()
-        mock_health_resp.__enter__ = MagicMock(return_value=mock_health_resp)
-        mock_health_resp.__exit__ = MagicMock(return_value=False)
-        mock_health_resp.status = 200
+        monkeypatch.setattr(pm, "_config_dir", lambda: tmp_path / "config")
+        (tmp_path / "config").mkdir(exist_ok=True)
 
-        with patch("subprocess.run") as mock_run, \
+    def test_healthy_server_is_never_restarted(self, monkeypatch, tmp_path):
+        """Task 23 down-only: an answering server returns immediately; the
+        old path killed it on ANY restart trigger (503/timeout)."""
+        from roampal.hooks import user_prompt_submit_hook as ups
+
+        self._isolated_locks(monkeypatch, tmp_path)
+        with patch.object(ups, "_server_health_ok", return_value=True), \
+             patch("subprocess.Popen") as mock_popen:
+            result = ups._restart_server("http://127.0.0.1:27182", 27182, timeout=2.0)
+            assert result is True
+            mock_popen.assert_not_called()
+
+    def test_503_is_degraded_counts_as_down(self):
+        """v0.6.0 review fix 2: the server's only 503 is a BROKEN state
+        (dead embed service / failed profile init — never busy). Health
+        503 must count as down so the single-flight restart replaces the
+        process (what main.py's health docstring always intended)."""
+        import urllib.error
+
+        from roampal.hooks import user_prompt_submit_hook as ups
+        from roampal.hooks import stop_hook as stop
+
+        for hook in (ups, stop):
+            with patch(
+                "urllib.request.urlopen",
+                side_effect=urllib.error.HTTPError("u", 503, "unhealthy", None, None),
+            ):
+                assert hook._server_health_ok("http://127.0.0.1:27182") is False
+
+    def test_non_503_http_answers_still_count_as_up(self):
+        """fix 2 F2 rule: any HTTP answer that is not the roampal broken
+        signal (404/500 — e.g. a foreign process squatting the port) is
+        UP: never kill a process we cannot positively identify."""
+        import urllib.error
+
+        from roampal.hooks import user_prompt_submit_hook as ups
+        from roampal.hooks import stop_hook as stop
+
+        for code in (404, 500, 401):
+            for hook in (ups, stop):
+                with patch(
+                    "urllib.request.urlopen",
+                    side_effect=urllib.error.HTTPError("u", code, "x", None, None),
+                ):
+                    assert hook._server_health_ok("http://127.0.0.1:27182") is True
+
+    def test_degraded_server_is_restarted_and_recovers(self, monkeypatch, tmp_path):
+        """fix 2 acceptance: health 503 -> the single-flight restart kills
+        and respawns; the fresh server's 200 health ends the flow."""
+        from roampal.hooks import user_prompt_submit_hook as ups
+
+        self._isolated_locks(monkeypatch, tmp_path)
+
+        health_states = [False, False, True]  # first check, under-lock recheck, post-spawn poll
+
+        def fake_health(url):
+            return health_states.pop(0) if health_states else True
+
+        with patch.object(ups, "_server_health_ok", side_effect=fake_health), \
              patch("subprocess.Popen") as mock_popen, \
-             patch("urllib.request.urlopen", return_value=mock_health_resp), \
              patch("time.sleep"), \
-             patch('builtins.print'):
+             patch("subprocess.run"):
+            result = ups._restart_server("http://127.0.0.1:27182", 27182, timeout=2.0)
 
-            # Mock netstat output (Windows path)
-            if sys.platform == "win32":
-                mock_run.return_value = MagicMock(
-                    stdout="  TCP    127.0.0.1:27182    0.0.0.0:0    LISTENING    12345\n"
-                )
+        assert result is True
+        mock_popen.assert_called_once()  # degraded server WAS replaced
 
-            result = _restart_server("http://127.0.0.1:27182", 27182, timeout=2.0)
+    def test_preflight_degradation_check_gates_restart(self, monkeypatch, tmp_path):
+        """fix 2, round-2 amended: the UPS pre-flight probes health directly
+        and only reacts to an ACTUAL 503 answer. Healthy (200), down/slow
+        (connection error or 2s timeout), and foreign HTTP answers (404)
+        must all leave the server alone — the per-prompt path must not
+        become a new kill opportunity for busy-but-healthy servers."""
+        import urllib.error
+        from roampal.hooks import user_prompt_submit_hook as ups
+
+        # Healthy -> untouched.
+        with patch("urllib.request.urlopen") as mock_open, \
+             patch.object(ups, "_restart_server") as mock_restart:
+            mock_open.return_value.status = 200
+            mock_open.return_value.__enter__ = MagicMock(return_value=mock_open.return_value)
+            mock_open.return_value.__exit__ = MagicMock(return_value=False)
+            ups._preflight_degradation_check("http://127.0.0.1:27182", 27182)
+            mock_restart.assert_not_called()
+
+        # Down/slow (connection error or 2s timeout) -> untouched:
+        # the real request's failure path owns the down-restart.
+        with patch("urllib.request.urlopen",
+                   side_effect=urllib.error.URLError("timeout")), \
+             patch.object(ups, "_restart_server") as mock_restart:
+            ups._preflight_degradation_check("http://127.0.0.1:27182", 27182)
+            mock_restart.assert_not_called()
+
+        # Foreign HTTP answer (404) -> untouched.
+        with patch("urllib.request.urlopen",
+                   side_effect=urllib.error.HTTPError("u", 404, "x", None, None)), \
+             patch.object(ups, "_restart_server") as mock_restart:
+            ups._preflight_degradation_check("http://127.0.0.1:27182", 27182)
+            mock_restart.assert_not_called()
+
+        # Probe blowing up -> never blocks the prompt.
+        with patch("urllib.request.urlopen", side_effect=RuntimeError("boom")), \
+             patch.object(ups, "_restart_server") as mock_restart:
+            ups._preflight_degradation_check("http://127.0.0.1:27182", 27182)
+            mock_restart.assert_not_called()
+
+        # The one signal that reacts: 503 -> health-gated restart.
+        with patch("urllib.request.urlopen",
+                   side_effect=urllib.error.HTTPError("u", 503, "unhealthy", None, None)), \
+             patch.object(ups, "_restart_server") as mock_restart:
+            ups._preflight_degradation_check("http://127.0.0.1:27182", 27182)
+            mock_restart.assert_called_once_with("http://127.0.0.1:27182", 27182)
+
+    def test_restart_single_flight_one_spawn(self, monkeypatch, tmp_path):
+        """Task 23 acceptance: two concurrent restarters -> exactly one
+        spawn; the latecomer waits for the winner's health."""
+        from roampal.hooks import user_prompt_submit_hook as ups
+
+        self._isolated_locks(monkeypatch, tmp_path)
+
+        # Health is DOWN until the first spawn happens; afterwards, up.
+        # That makes the flow deterministic whichever thread runs first:
+        # early checks (and under-lock rechecks without a winner) are down,
+        # and any post-spawn recheck sees an up server.
+        spawned = threading.Event()
+        spawns = []
+
+        def fake_health(url):
+            return spawned.is_set()
+
+        def fake_popen(*args, **kwargs):
+            spawns.append(args)
+            spawned.set()
+            return MagicMock()
+
+        with patch.object(ups, "_server_health_ok", side_effect=fake_health), \
+             patch.object(ups, "_poll_health", side_effect=lambda url, t: True), \
+             patch("subprocess.Popen", side_effect=fake_popen), \
+             patch("time.sleep"), \
+             patch("subprocess.run"):
+            barrier = threading.Barrier(2)
+            results = {}
+
+            def contender(name):
+                barrier.wait()
+                results[name] = ups._restart_server("http://127.0.0.1:27182", 27182, timeout=2.0)
+
+            threads = [threading.Thread(target=contender, args=(n,)) for n in ("a", "b")]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        # One shared server: exactly one spawn, everyone recovered.
+        assert len(spawns) == 1, (
+            f"single-flight violated: {len(spawns)} restart spawns: {results}"
+        )
+        assert all(results.values()), results
+
+    def test_restart_returns_false_on_spawn_failure(self, monkeypatch, tmp_path):
+        """Down server + failed health thereafter -> False (restart path)."""
+        from roampal.hooks import user_prompt_submit_hook as ups
+
+        self._isolated_locks(monkeypatch, tmp_path)
+        with patch.object(ups, "_server_health_ok", return_value=False), \
+             patch.object(ups, "_poll_health", return_value=False), \
+             patch("subprocess.Popen") as mock_popen, \
+             patch("time.sleep"), \
+             patch("subprocess.run"):
+            result = ups._restart_server("http://127.0.0.1:27182", 27182, timeout=2.0)
+            assert result is False
+            mock_popen.assert_called_once()  # spawn reached (down path)
+
+    def test_stop_hook_healthy_server_never_restarted(self, monkeypatch, tmp_path):
+        """Stop hook's seam matches: healthy -> return True, no spawn."""
+        from roampal.hooks import stop_hook as stop
+
+        self._isolated_locks(monkeypatch, tmp_path)
+        with patch.object(stop, "_server_health_ok", return_value=True), \
+             patch("subprocess.Popen") as mock_popen:
+            result = stop._restart_server("http://127.0.0.1:27183", 27183, timeout=2.0)
+            assert result is True
+            mock_popen.assert_not_called()
+
+    def test_stop_hook_spawn_after_locked_restart(self, monkeypatch, tmp_path):
+        """Stop hook's down path: single turn of spawn + poll."""
+        from roampal.hooks import stop_hook as stop
+
+        self._isolated_locks(monkeypatch, tmp_path)
+        with patch.object(stop, "_server_health_ok", return_value=False), \
+             patch.object(stop, "_poll_health", return_value=True), \
+             patch("subprocess.Popen") as mock_popen, \
+             patch("time.sleep"), \
+             patch("subprocess.run"):
+            result = stop._restart_server("http://127.0.0.1:27183", 27183, timeout=2.0)
             assert result is True
             mock_popen.assert_called_once()
 
-    def test_restart_returns_false_on_timeout(self):
-        """Returns False if server doesn't start within timeout."""
-        from roampal.hooks.user_prompt_submit_hook import _restart_server
 
-        with patch("subprocess.run"), \
-             patch("subprocess.Popen"), \
-             patch("urllib.request.urlopen", side_effect=Exception("refused")), \
-             patch("time.sleep"), \
-             patch("time.time", side_effect=[0, 0.5, 1.0, 1.5, 2.0, 2.5, 100.0]), \
-             patch('builtins.print'):
+# ============================================================================
+# Profile-404 Surfacing Tests (v0.6.0 review fix 8)
+# ============================================================================
 
-            result = _restart_server("http://127.0.0.1:27182", 27182, timeout=2.0)
-            assert result is False
+class TestProfile404Surfacing:
+    """fix 8: a 404 is the routing contract rejecting an unknown profile
+    (e.g. after `roampal profile delete`) — NOT a down/degraded server.
+    The hooks must print the server's actionable detail (it includes the
+    exact fix command) and exit WITHOUT the restart/retry theater that
+    previously buried it under 'retry failed after restart: HTTP 404'."""
 
-    def test_stop_hook_restart_same_behavior(self):
-        """Stop hook's _restart_server has same interface."""
-        from roampal.hooks.stop_hook import _restart_server
+    @staticmethod
+    def _404_error(detail=None):
+        import urllib.error
 
-        mock_health_resp = MagicMock()
-        mock_health_resp.__enter__ = MagicMock(return_value=mock_health_resp)
-        mock_health_resp.__exit__ = MagicMock(return_value=False)
-        mock_health_resp.status = 200
+        body = json.dumps({"detail": detail}).encode("utf-8") if detail else b"<html>502</html>"
+        return urllib.error.HTTPError(
+            "http://127.0.0.1:27182", 404, "Not Found", None, io.BytesIO(body)
+        )
 
-        with patch("subprocess.run") as mock_run, \
-             patch("subprocess.Popen") as mock_popen, \
-             patch("urllib.request.urlopen", return_value=mock_health_resp), \
-             patch("time.sleep"), \
-             patch('builtins.print'):
+    def test_ups_404_prints_detail_without_restart(self):
+        from roampal.hooks import user_prompt_submit_hook as ups
 
-            if sys.platform == "win32":
-                mock_run.return_value = MagicMock(
-                    stdout="  TCP    127.0.0.1:27183    0.0.0.0:0    LISTENING    67890\n"
-                )
+        detail = "Profile 'ghost' is not registered. Create it first: roampal profile create ghost"
+        with patch('sys.stdin', io.StringIO(json.dumps({"prompt": "hi", "session_id": "s"}))), \
+             patch("urllib.request.urlopen", side_effect=self._404_error(detail)), \
+             patch.object(ups, "_preflight_degradation_check"), \
+             patch.object(ups, "_restart_server") as mock_restart, \
+             patch("builtins.print") as mock_print:
+            with pytest.raises(SystemExit) as exc:
+                ups.main()
 
-            result = _restart_server("http://127.0.0.1:27183", 27183, timeout=2.0)
-            assert result is True
+        assert exc.value.code == 1
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "Create it first: roampal profile create ghost" in printed
+        assert "retry failed" not in printed
+        mock_restart.assert_not_called()
+
+    def test_ups_404_unparseable_body_falls_back(self):
+        from roampal.hooks import user_prompt_submit_hook as ups
+
+        with patch('sys.stdin', io.StringIO(json.dumps({"prompt": "hi", "session_id": "s"}))), \
+             patch("urllib.request.urlopen", side_effect=self._404_error(None)), \
+             patch.object(ups, "_preflight_degradation_check"), \
+             patch.object(ups, "_restart_server") as mock_restart, \
+             patch("builtins.print") as mock_print:
+            with pytest.raises(SystemExit) as exc:
+                ups.main()
+
+        assert exc.value.code == 1
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "HTTP 404 from server" in printed
+        mock_restart.assert_not_called()
+
+    def test_stop_hook_404_prints_detail_exit_0(self):
+        """Stop hook never blocks the user's flow — 404 surfaces the detail
+        and exits 0, no restart."""
+        from roampal.hooks import stop_hook as stop
+
+        detail = "Profile 'ghost' is not registered. Create it first: roampal profile create ghost"
+        with patch('sys.stdin', io.StringIO(json.dumps({
+                "conversation_id": "s", "last_assistant_message": "resp"}))), \
+             patch("urllib.request.urlopen", side_effect=self._404_error(detail)), \
+             patch.object(stop, "_restart_server") as mock_restart, \
+             patch("builtins.print") as mock_print:
+            with pytest.raises(SystemExit) as exc:
+                stop.main()
+
+        assert exc.value.code == 0
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "Create it first: roampal profile create ghost" in printed
+        mock_restart.assert_not_called()
 
 
 # ============================================================================

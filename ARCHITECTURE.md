@@ -34,7 +34,7 @@ roampal init --opencode   # Or configure explicitly
   OpenCode MCP         hook subprocesses   TypeScript plugin
 ```
 
-**Architecture (v0.5.9):** MCP servers are thin HTTP clients - no ChromaDB or heavy ML frameworks in the MCP process. Embeddings use pure ONNX Runtime (no PyTorch). All access routes through a single shared FastAPI server. The first MCP client to start auto-launches the server; subsequent clients detect it's already running. **Per-request profile resolution (v0.5.4):** FastAPI holds a per-profile registry (`_memory_by_profile`, `_session_manager_by_profile`) and resolves the active profile on every request via an `X-Roampal-Profile` header sent by the client. Lazy initialization under an async lock, with a shared `EmbeddingService` and (as of v0.5.9) a shared cross-encoder session keeping ONNX model memory flat (~484MB steady state, measured) regardless of profile count. Every client sends the header: MCP server, OpenCode plugin (reads env > project `opencode.json` > global `opencode.json`), Claude Code / Cursor Python hooks (via `active_profile_name()`). Sidecar LLM handles tag extraction (OpenCode only - Claude Code uses the main LLM via MCP tools). Tag extraction uses LLM only, no regex fallback, routed through `TagService.extract_tags_async()` with an `asyncio.Lock` for GPU OOM prevention. `store_working` auto-extracts tags via TagService when caller omits them. Pre-store fact dedup prevents near-duplicate storage across tiers with tier-scoped checks. Sidecar scoring requires explicit configuration (no automatic Zen/localhost fallback); bare JSON arrays from small local models are handled via server-side shape tolerance.
+**Architecture (v0.5.9, extended by v0.6.0):** MCP servers are thin HTTP clients - no ChromaDB or heavy ML frameworks in the MCP process. Embeddings use pure ONNX Runtime (no PyTorch). All access routes through a single shared FastAPI server. No client owns the server: no MCP attachment kills it, and it retires itself after 30 idle minutes (a foreground `roampal start` is exempt) - see "Shared Server Lifecycle". **Per-request profile resolution (v0.5.4, contract rewritten v0.6.0):** FastAPI holds a per-profile registry (`_memory_by_profile`, `_session_manager_by_profile`) and resolves the active profile on every request — clients name their profile explicitly (header, cwd directory, persisted default), and the server never guesses from its own cwd/env. Lazy initialization under an async lock, with a shared `EmbeddingService` and (as of v0.5.9) a shared cross-encoder session keeping ONNX model memory flat (~484MB steady state, measured) regardless of profile count. Client surface: MCP server (explicit header per call), OpenCode plugin (env > project config > user-global, then the project cwd), Claude Code / Cursor hooks (process env > config env > binding > pin > use > default). Sidecar LLM handles tag extraction (OpenCode only - Claude Code uses the main LLM via MCP tools). Tag extraction uses LLM only, no regex fallback, routed through `TagService.extract_tags_async()` with an `asyncio.Lock` for GPU OOM prevention. `store_working` auto-extracts tags via TagService when caller omits them. Pre-store fact dedup prevents near-duplicate storage across tiers with tier-scoped checks. Sidecar scoring requires explicit configuration (no automatic Zen/localhost fallback); bare JSON arrays from small local models are handled via server-side shape tolerance.
 
 `roampal start` is available for standalone use (e.g., OpenCode-only setups where no MCP auto-starts the server).
 
@@ -478,10 +478,11 @@ Users can maintain multiple isolated memory stores. Each profile has its own Chr
 ### Registry
 
 - File: `<config_dir>/profiles.json`
-- Structure: `{ "<name>": <path or null>, ... }`
+- Structure: `{ "<name>": <path or null>, ..., "bindings": { "<dir>": "<name>", ... } }` (v0.6.0)
 - `null` path → auto-locate at `<system_default_base>/<slug>/`
 - string path → use that path verbatim (lets users register pre-existing directories without data migration)
-- Managed via `roampal profile create|register|delete|list`
+- `bindings` is a reserved top-level key (never loads as a profile named "bindings"); a directory→profile map used by the cwd-ancestry resolution step. Registries written before v0.6.0 have no such key and resolve exactly as before. Bindings survive profile deletion until explicitly `profile unbind`ed; a profile named "bindings" is shadowed by the reserved key by policy.
+- Managed via `roampal profile create|register|delete|list|bind|unbind`
 
 ### Active profile resolution
 
@@ -489,8 +490,13 @@ There are two precedence chains in play — one for the server picking which pro
 
 **`active_profile_name()` — which profile is active** (highest wins):
 1. `ROAMPAL_PROFILE` env var (per-shell or per-project via MCP config `env: {}`)
-2. Persisted `<config_dir>/active_profile` file (`roampal profile use <name>`)
-3. `"default"`
+2. cwd-ancestry directory binding (v0.6.0): walk from `Path.cwd()` upward; the first ancestor whose directory is bound in `profiles.json` wins (`roampal profile bind <name> [--path <dir>]`, innermost bound directory wins; Windows drive-style casing normalized)
+3. Persisted `<config_dir>/active_profile` file (`roampal profile use <name>`)
+4. `"default"`
+
+A bound profile that is not registered still wins at this layer and fails **explicitly** (`ProfileNotFoundError` from `resolve_data_path()`) rather than silently falling through to the default.
+
+(v0.6.0 Task 33 corrects the earlier claim here: the one-helper statement is true for the PYTHON seam users — the stdio MCP server and the Claude Code / Cursor hook CLI paths and hooks resolve through `profile_header_value()` per call — but the OpenCode plugin does NOT: it keeps its own env > project-config > user-global walk (`resolveRoampalProfile()`) and, when that is empty, sends `X-Roampal-Cwd: <project dir>` so the SERVER resolves the cwd binding. Routing and lifecycle contracts are in "Per-Request Profile Resolution" below and the v0.6.0 release notes Items 6/7.)
 
 **`UnifiedMemorySystem.__init__` — path resolution for the bound profile** (highest wins):
 1. Explicit `data_path` constructor argument
@@ -498,20 +504,26 @@ There are two precedence chains in play — one for the server picking which pro
 3. `profile_name` argument → `ProfileRegistry.resolve()` (registered custom path or auto-located slug dir)
 4. System default (`%APPDATA%/Roampal/data`, dev-mode-aware)
 
-Prior to v0.5.4, the server's `lifespan` called `active_profile_name()` once and bound the whole process to that profile. v0.5.4 removed that binding in favor of per-request resolution (see below) so a single server can cleanly serve multiple profiles simultaneously. `active_profile_name()` is still used at startup for banner logging and as the fallback when a request does not carry an `X-Roampal-Profile` header. `roampal profile switch <name>` still updates the persisted file; killing the server is no longer strictly required for the change to take effect, but it is still what the CLI does for backward compatibility.
+Prior to v0.5.4, the server's `lifespan` called `active_profile_name()` once and bound the whole process to that profile. v0.5.4 removed that binding in favor of per-request resolution (see below) so a single server can cleanly serve multiple profiles simultaneously. `active_profile_name()` is still used at startup for banner logging. `roampal profile switch <name>` updates the persisted file only — since v0.6.0 it no longer touches the running server: clients name their profiles per request and pick it up on their next exchange (Task 24).
 
-### Per-Request Profile Resolution (v0.5.4)
+### Per-Request Profile Resolution (v0.5.4, rewritten v0.6.0 Task 17-19)
 
-FastAPI holds a per-profile registry - `_memory_by_profile: Dict[str, UnifiedMemorySystem]` and `_session_manager_by_profile: Dict[str, SessionManager]` - rather than a singleton. Each request resolves its profile via `_resolve_profile_name(request)`:
+FastAPI holds a per-profile registry - `_memory_by_profile: Dict[str, UnifiedMemorySystem]` and `_session_manager_by_profile: Dict[str, SessionManager]` - rather than a singleton. Each request resolves its profile via `_resolve_profile_name(request)` — the SERVER never guesses a profile from its own cwd or environment (that was the F1 routing bug: the shared server inherits its cwd/env from whichever client spawned it last). Highest wins:
 
-1. `X-Roampal-Profile` header on the request (sent by every client)
-2. Fallback to `active_profile_name()` (env var > persisted file > `"default"`)
+1. `X-Roampal-Profile` header, when the request carries one (a client naming an unregistered profile is an explicit failure: HTTP 404 with a `roampal profile create <name>` hint - never a silent default-store write)
+2. `roampal start --profile X` launch pin (persists via a per-port pin file that clients resolve as a late tier and respawns re-pass)
+3. `X-Roampal-Cwd` header binding — OpenCode sends its project directory percent-encoded; the server resolves that directory's binding for THIS request only
+4. Persisted `active_profile` file (`roampal profile use`) — profile-headerless legacy requests resolve here, never the server's own cwd
+5. `"default"`
 
-Every client layer attaches the header:
+Every client layer states its profile explicitly:
 
-- **MCP server** (`roampal/mcp/server.py`): caches the resolved profile at process startup via `_get_mcp_profile_name()` with a sentinel-based cache; attaches on every `_api_call` to FastAPI. Omits the header for the default profile so the FastAPI fallback preserves pre-v0.5.4 CLI behavior.
-- **OpenCode plugin** (`roampal/plugins/opencode/roampal.ts`): `resolveRoampalProfile()` reads `process.env.ROAMPAL_PROFILE` first, then walks to the project's `opencode.json` for `mcp.roampal-core.environment.ROAMPAL_PROFILE`, then to the user-global `opencode.json`. Covers the per-project Desktop scenario where Desktop passes the env block to the spawned MCP subprocess but not to the plugin process.
-- **Python hooks** (`roampal/hooks/user_prompt_submit_hook.py`, `stop_hook.py`): `_roampal_headers()` uses `active_profile_name()` (same precedence as FastAPI's fallback). Used by Claude Code and Cursor.
+- **MCP server** (`roampal/mcp/server.py`): `_get_mcp_profile_name()` resolves through `profile_header_value()` PER CALL (v0.6.0 — no sentinel cache; a bind/unbind mid-session takes effect on the next tool call) and attaches `X-Roampal-Profile` on every `_api_call()` — explicit `default` included.
+- **OpenCode plugin** (`roampal/plugins/opencode/roampal.ts`): `resolveRoampalProfile()` reads `process.env.ROAMPAL_PROFILE` first, then the project's `opencode.json` `mcp.roampal-core.environment.ROAMPAL_PROFILE`, then the user-global config; when all three are empty it sends `X-Roampal-Cwd: <worktree>` (Desktop project-switch aware) instead of guessing. Its old copies that send no cwd header fall through to the server-side pin/persisted/default chain.
+- **Python hooks** (`roampal/hooks/*.py`): `_hook_profile_name()` walks process env > project `.mcp.json` env > `~/.claude.json` per-project/user scope > cwd binding > pin > `use` > literal `default`; `X-Roampal-Profile` sent on every post.
+- **CLI** (`roampal/cli/`): every command that reads or writes profile data (`stats`, `books`, `ingest`, `remove`, `summarize`, `retag`, `context`, `score`) sends `X-Roampal-Profile` via `_common.profile_headers()` → `profile_header_value()` (env > binding > `use` > pin > `default`), so a command run inside a bound folder acts on that folder's profile; `ingest`'s offline fallback opens the same profile. Only `/api/health` probes go headerless (a guard test enforces this).
+
+Spawners (`mcp/server.py` Popen, both hooks' `_spawn_fresh_server`, the plugin's `restartServer`) strip `ROAMPAL_PROFILE` from the env handed to the shared server, spawn it with a neutral cwd and `-E` (plus `-P` on 3.11+) isolation, honor the launch pin on respawn, and treat a health 503 as BROKEN-health → single-flight restart (never a busy-kill) — see "Shared Server Lifecycle".
 
 `get_memory_for_request(request)` performs lazy init under an `asyncio.Lock` with double-check: if the resolved profile is missing from the registry, a fresh `UnifiedMemorySystem` is built for that profile, its `TagService` is wired with the sidecar-backed LLM extractor, and the one-time `cleanup_archived()` migration runs. A shared `EmbeddingService` singleton (`_shared_embed_service`) is reused across every profile, and as of v0.5.9 the cross-encoder reranker session is also shared at module scope (see Item 3a, v0.5.9 release notes), so ONNX model memory stays flat (~484MB steady state, measured) regardless of how many profiles get loaded.
 
@@ -519,16 +531,26 @@ On per-profile init failure (corrupted DB, missing dependency, etc.) the helper 
 
 ### File layout
 
-Per-request resolution (v0.5.4):
+Per-request resolution (v0.5.4, updated v0.6.0):
 - `roampal/server/main.py` - `_memory_by_profile` / `_session_manager_by_profile` registries, `_resolve_profile_name()`, `get_memory_for_request()`, `get_session_manager_for_request()`, `get_profile_context()` helpers; lazy init under `_init_lock: asyncio.Lock`
-- `roampal/mcp/server.py` - `_MCP_PROFILE_UNRESOLVED` sentinel + `_get_mcp_profile_name()`; header attached in `_api_call()`
-- `roampal/plugins/opencode/roampal.ts` - `resolveRoampalProfile()` + `roampalHeaders()`; attached on all 11 FastAPI fetch sites
-- `roampal/hooks/user_prompt_submit_hook.py` / `stop_hook.py` - `_roampal_headers()` helper; attached on all 4 POST callsites
+- `roampal/mcp/server.py` - `_get_mcp_profile_name()` per-call helper (no sentinel cache in v0.6.0); header attached in `_api_call()`
+- `roampal/plugins/opencode/roampal.ts` - `resolveRoampalProfile()` + `roampalHeaders()`; attached on all FastAPI fetch sites (cwd header included)
+- `roampal/hooks/user_prompt_submit_hook.py` / `stop_hook.py` - `_roampal_headers()` / `_hook_profile_name()` helpers; attached on all POST callsites
 
-Named profile registry (v0.5.1):
-- `roampal/profile_manager.py` — `ProfileRegistry`, `profile_slug`, `resolve_data_path`, `active_profile_name`, `active_profile_source`, active-profile file read/write/clear
+Named profile registry (v0.5.1, bindings v0.6.0):
+- `roampal/profile_manager.py` — `ProfileRegistry` (+ `bind`/`unbind`/`bindings`), `profile_slug`, `resolve_data_path`, `active_profile_name`/`active_profile_source`, `profile_header_value()` (the ONE helper the Python seams resolve through), `write_server_pin`/`read_server_pin`/`clear_server_pin`, `binding_for_cwd`, `active_profile` file read/write/clear
 - `roampal/backend/modules/memory/unified_memory_system.py` — `__init__(data_path, config, profile_name, embed_service)` — profile_name arg resolves via ProfileRegistry when no explicit path/env; `embed_service` (v0.5.4) accepts a shared `EmbeddingService` so multiple per-profile instances share one ONNX model
-- `roampal/cli.py` — `cmd_profile()` dispatcher + `profile` subparser group with `list`/`show`/`create`/`register`/`delete`/`use`/`unuse`/`switch` actions; `--profile` flag added to `start` and `doctor`
+- `roampal/cli/profile_cmds.py` — `cmd_profile()` with `list`/`show`/`create`/`register`/`delete`/`use`/`unuse`/`switch`/`bind`/`unbind` actions; `--profile` flag on `start` and `doctor` (dispatch via `roampal/cli/commands.py`)
+
+### Shared Server Lifecycle (v0.6.0)
+
+The shared FastAPI server (ports 27182 prod / 27183 dev) is owned by no client:
+
+- Spawn: whichever MCP client or hook finds the server down launches it — with `cwd` set to `neutral_spawn_dir()` (the Roampal data dir, never the caller's cwd) and `-E` isolation (plus `-P` on Python 3.11+) so a `roampal/` folder in the caller's project can never shadow the install. `ROAMPAL_PROFILE` is stripped from the spawn env (the F1 fix — the spawner's shell profile must not become the server's identity). The OpenCode plugin (Task 41) respawns with the interpreter `roampal init` recorded in opencode.json (`mcp["roampal-core"].command`) — same interpreter, same flags, `pythonw` sibling or hidden-VBS launch on Windows — and only falls back to the PATH guess (`pythonw`/`python3`, `-E`) when there is no usable config, logging why.
+- Idle self-retirement: a monitor (60s cadence) flips `should_exit` after 30 idle minutes (`ROAMPAL_SERVER_IDLE_TIMEOUT_MINUTES`), graceful: in-flight requests complete first. A foreground `roampal start` passes `idle_retire=False` — the user started it explicitly, and its banner promises Ctrl+C control.
+- Restart-on-down single-flight: all three clients (hooks, MCP, plugin) probe health first; 503 = BROKEN (dead/degraded embed service) → single-flight restart (cross-process lock file per port, 45s stale TTL, ownership-checked release); any other HTTP answer = UP (never killed); connection-refused = DOWN → restart. Request-level 503 ≠ restart-trigger: it's backoff + one retry through the same health gate.
+- Launch pin: `roampal start --profile X` writes `server_pin_<port>.txt`; explicit shutdowns clear it, idle retirement does NOT (respawn reads it and re-passes `--profile`). Clients resolve the pin as a late tier so nothing sticks a session onto the pinned profile unless the session configured nothing else.
+- `profile switch` never kills the server (Task 24); `roampal stop` remains the user-initiated stop and clears the pin.
 
 ---
 
@@ -567,7 +589,8 @@ roampal init                       # Auto-detect and configure installed tools
 roampal init --claude-code         # Configure Claude Code explicitly
 roampal init --opencode            # Configure OpenCode explicitly
 roampal init --cursor              # Configure Cursor explicitly
-roampal init --scope user|project|both  # Where to write OpenCode MCP/plugin config (default: auto)
+roampal init --scope user|project|both  # Where to write OpenCode MCP/plugin config (default: auto); `user` skips Claude Code's project .mcp.json, `project`/`both` create it (default never creates one, only updates an existing roampal entry)
+roampal init --no-input                 # No prompts: skips email and the sidecar model picker (run `roampal sidecar setup` later)
 roampal init --force / -f          # Overwrite existing config without prompting
 roampal init --no-input            # Non-interactive setup (CI/scripts)
 roampal doctor                     # Diagnose installation issues
@@ -604,7 +627,6 @@ roampal sidecar disable --scope project    # Clear only from project-local openc
 roampal sidecar disable                    # Auto-detects scope same as setup
 
 # Advanced:
-roampal score             # Score the last exchange (manual/testing)
 roampal context           # Output recent exchange context
 
 # Named memory profiles (v0.5.1) — isolate memory per project, per client, etc.
@@ -614,9 +636,9 @@ roampal profile create <name>                # Create auto-located profile
 roampal profile register <name> --path <dir> # Register an existing directory
 roampal profile use <name>                   # Persist as user-global default
 roampal profile unuse                        # Clear persistence
-roampal profile switch <name>                # Persist + kill running server
-roampal profile delete <name>                # Remove from registry
-roampal start --profile <name>               # One-off launch on a profile
+roampal profile switch <name>                # Persist as active (no server kill — sessions pick it up on the next exchange)
+roampal profile delete <name>                # Remove from registry (cascades directory bindings)
+roampal start --profile <name>               # Launch with a default profile: sessions with nothing configured (hook/MCP resolve the launch pin explicitly) route there; survives idle respawn; cleared by bare start/stop
 
 # Retag memories using sidecar LLM (v0.5.3+)
 roampal retag                                # Re-extract noun_tags on all memories
@@ -708,10 +730,12 @@ Automatically detects and configures installed tools. Use `--claude-code` or `--
 
 2. Writes the roampal-core MCP server entry to `~/.claude.json` (user-scope, root-level `mcpServers`). The previous `~/.claude/.mcp.json` location was a v0.2.5 bug — Claude Code does not read that path.
 
-3. Also writes a project-local `.mcp.json` to `cwd()` so per-project Claude Code installs pick up roampal automatically.
+3. With `--scope project` or `--scope both`, writes/updates a project-local `.mcp.json` in `cwd()`. The default scope never creates one (the user-scope entry in `~/.claude.json` already covers Claude Code, and a stray `.mcp.json` inside a git repo invites accidental commits) — it only updates a file that already carries a `roampal-core` entry. `--scope user` never touches the project file.
+
+4. Never wipes a user's config: every file init touches is read as UTF-8 (BOM tolerated) and a parse error aborts that tool — nothing is written, the file stays byte-identical, and `roampal init` exits 1 with instructions. Hook events Roampal manages (`UserPromptSubmit`, `Stop`, `SessionStart`) keep the user's own hooks; only Roampal-owned commands are replaced. Every overwrite is backed up to `<name>.bak-<timestamp>` first and backups are pruned to the newest 3.
 
 **OpenCode** (`~/.config/opencode/` detected):
-1. Writes roampal-core MCP server entry into `opencode.json` (atomic write — parse errors abort, `.bak` backup preserved). Scope-aware via `--scope user|project|both`.
+1. Writes roampal-core MCP server entry into `opencode.json` (atomic write — parse errors abort, timestamped `.bak-<timestamp>` backup kept before each overwrite, backups pruned to the newest 3). Scope-aware via `--scope user|project|both`.
 2. Installs TypeScript plugin to `~/.config/opencode/plugins/roampal.ts` (note: plural `plugins/`). On Windows, also installs to `%APPDATA%/opencode/plugins/roampal.ts` as a fallback path.
 3. Plugin handles context injection (via `chat.message` + `experimental.chat.system.transform` + `experimental.chat.messages.transform` hooks) and exchange capture (via `session.idle`).
 
@@ -831,6 +855,10 @@ Note: OpenCode passes MCP env vars to MCP server subprocesses but NOT to plugins
 
 When configured, only the user's chosen model is used for scoring. The plugin never scans the full provider config — only the specific model written by `sidecar setup` is used. No surprise API charges. Zen free models are available as an explicit opt-in choice during setup (for users who don't have a local model or API key), but they route through OpenCode's proxy which may log data.
 
+**Correction (v0.6.0 Task 38):** the v0.5.3 rule above was implemented only server-side (`sidecar_service.py`). The OpenCode plugin — which does OpenCode's actual scoring, summaries and fact extraction — kept its v0.3.7 default and sent exchange text to Zen whenever no custom sidecar was set, including after "Skip" and `roampal sidecar disable`. From v0.6.0 the plugin decides `SIDECAR_OFF = disabled || !(custom URL+model || ROAMPAL_SIDECAR_PRIORITY contains "zen")`: Zen is used only after the recorded opt-in (`roampal sidecar setup --zen` or the picker's Zen choice), and with nothing chosen no sidecar call is made at all. The model is told scoring is off and how the user enables it.
+
+**Non-interactive setup (v0.6.0 Task 39):** `roampal sidecar setup --list [--json]` lists every choice with whether exchange text leaves the machine and the command that selects it (keys never printed); `--model <name>`, `--url <base> --model <name> [--key-env VAR]`, `--go <model>`, `--zen` and `--auto` (recommended detected **local** model; never cloud or paid) record a choice without the menu. `roampal sidecar` now exits 1 on setup errors.
+
 ### Sidecar Configuration Changes (v0.5.3)
 
 **Explicit configuration required:** Scoring no longer falls back to Zen or localhost automatically. Users must explicitly configure a scoring model via `roampal sidecar setup`. If the sidecar is unavailable, scoring is paused and a warning prompts the user to run `roampal sidecar setup`.
@@ -937,7 +965,7 @@ All three entry points (hooks, MCP, plugin) auto-recover if the FastAPI server g
 |-------------|----------------|
 | Python hooks (`user_prompt_submit_hook`, `stop_hook`) | `_restart_server()` — kills stale port process, spawns fresh server, polls `/api/health` for 15s, retries |
 | MCP server (`server.py`) | `_ensure_server_running()` — health check before every tool call, auto-restart with 15s timeout |
-| OpenCode plugin (`roampal.ts`) | `restartServer()` — same kill/spawn/poll pattern, `_restartInProgress` guard prevents concurrent restarts |
+| OpenCode plugin (`roampal.ts`) | `restartServer()` — same kill/spawn/poll pattern, `_restartInProgress` guard prevents concurrent restarts; respawns with the interpreter recorded in opencode.json (Task 41), PATH only as fallback |
 
 The `user_prompt_submit_hook` / `chat.message` fires first every turn — if the server is down, it recovers before context injection.
 

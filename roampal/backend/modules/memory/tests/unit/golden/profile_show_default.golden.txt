@@ -1,0 +1,4 @@
+### exit: 0
+--- stdout+stderr ---
+Active profile: default  (fallback (no env var, no persisted file))
+Data path:      <ROOT>/homeN\AppDataRoaming\Roampal\data
