@@ -111,6 +111,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+      # Task 28: one flaky job must not cancel the other eleven.
+      fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -124,9 +126,17 @@ jobs:
           pip install -e ".[dev]"
       - name: Run golden CLI suite
         timeout-minutes: 10
+        env:
+          # Task 28 (2026-09-26): the doctor/reembed children init a real
+          # ChromaDB on the runner's tmp disk, and WAL-enabled SQLite there
+          # intermittently throws disk-I/O errors ("Failed to get segments")
+          # under matrix load — the same infra limitation the ubuntu
+          # integration job hit. WAL behavior stays gated by wal-tests and
+          # integration-tests-windows; the goldens pin CLI output, not WAL.
+          ROAMPAL_TEST_DISABLE_WAL: "1"
         # The suite subprocess-isolates the child per case (its own
-        # APPDATA/HOME/XDG, pinned PYTHONIOENCODING), so no --forked and no
-        # WAL restriction. The _normalizer maps platform dirs/separators to
+        # APPDATA/HOME/XDG, pinned PYTHONIOENCODING), so no --forked. The
+        # _normalizer maps platform dirs/separators to
         # placeholders so one set of goldens covers all matrices, and (Task
         # 42) joins argparse's wrapped rows + collapses column gaps so the
         # 3.13 layout change cannot flip it.
