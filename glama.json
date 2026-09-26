@@ -4,6 +4,7 @@
     "roampal-ai"
   ],
   "version": "0.6.0",
+  "pinned_commit": "f77db19",
   "description": "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)",
   "keywords": [
     "memory",
@@ -13,5 +14,5 @@
     "ai",
     "persistent-memory"
   ],
-  "release_notes": "v0.6.0: The 4,697-line cli.py monolith is split into a roampal/cli/ package with dispatch-table structural invariants and byte-golden equivalence. Profile-directory bindings: bind a project directory to a profile once (roampal profile bind), with the client resolution contract — every client names its profile (headers, cwd bindings), the shared server never guesses from its own cwd/env, and no app owns the server (idle self-retirement, single-flight down-only restarts, neutral-cwd spawns). Memory length rules live in one module; every write path rejects over-limit text instead of cutting it, and Claude Code's context injection dedups already-seen memories into pointers without losing anything. Full suite: 1019 passed, 4 skipped."
+  "release_notes": "v0.6.0: Folder-to-profile bindings (roampal profile bind) with a profile routing contract — every client names its profile on every request, the shared server never guesses from its own cwd/env, and no app owns the server (idle self-retirement, single-flight restarts, neutral-cwd spawns, the OpenCode plugin reusing Roampal's own interpreter). One memory-limits table rejects over-limit writes with a rewrite-shorter message instead of silently cutting text; exchange summaries store alone on every platform and Claude Code no longer re-injects already-seen memories. OpenCode scoring requires an explicit cloud opt-in (the silent Zen default is gone), roampal init never wipes or clutters config files, the 4,697-line cli.py is split into a roampal/cli/ package with byte-identical output, and model loading is cache-first. 1122 tests passing, 4 skipped."
 }
