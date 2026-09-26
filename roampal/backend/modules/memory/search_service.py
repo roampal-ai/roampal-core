@@ -126,10 +126,17 @@ class SearchService:
             try:
                 import onnxruntime as ort
                 from tokenizers import Tokenizer
-                from huggingface_hub import hf_hub_download
 
-                model_path = hf_hub_download(repo_id=self.CE_HF_REPO, filename=self.CE_ONNX_FILE)
-                tokenizer_path = hf_hub_download(repo_id=self.CE_HF_REPO, filename=self.CE_TOKENIZER_FILE)
+                # Cache-first download (same rationale as
+                # embedding_service._hub_download): forked CI test children
+                # on macOS must not construct an HTTP client, and cached
+                # startups skip the per-load revision HEAD.
+                from roampal.backend.modules.memory.embedding_service import (
+                    _hub_download,
+                )
+
+                model_path = _hub_download(self.CE_HF_REPO, self.CE_ONNX_FILE)
+                tokenizer_path = _hub_download(self.CE_HF_REPO, self.CE_TOKENIZER_FILE)
 
                 opts = ort.SessionOptions()
                 opts.inter_op_num_threads = 1

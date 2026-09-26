@@ -3,8 +3,7 @@
   "maintainers": [
     "roampal-ai"
   ],
-  "version": "0.5.8",
-  "pinned_commit": "6abb79f",
+  "version": "0.6.0",
   "description": "Outcome-based persistent memory for AI coding tools (Claude Code, OpenCode)",
   "keywords": [
     "memory",
@@ -14,5 +13,5 @@
     "ai",
     "persistent-memory"
   ],
-  "release_notes": "v0.5.8: Crash-resilience release. Enables SQLite WAL + FULL durability on the ChromaDB catalog so hard terminations (Windows port conflicts, external process kills, power loss) no longer corrupt or empty the database. Rewrites SessionManager.mark_scored() to perform an atomic temp-file replace, guaranteeing the session JSONL transcript survives a crash mid-write. Ships 16 new automated tests covering both fixes and fixes pre-existing test debt that left the full suite red on Windows. No data migration required; WAL applies on the next server start. 733 tests pass (3 skipped on Python 3.10 only for a test-harness teardown path)."
+  "release_notes": "v0.6.0: The 4,697-line cli.py monolith is split into a roampal/cli/ package with dispatch-table structural invariants and byte-golden equivalence. Profile-directory bindings: bind a project directory to a profile once (roampal profile bind), with the client resolution contract — every client names its profile (headers, cwd bindings), the shared server never guesses from its own cwd/env, and no app owns the server (idle self-retirement, single-flight down-only restarts, neutral-cwd spawns). Memory length rules live in one module; every write path rejects over-limit text instead of cutting it, and Claude Code's context injection dedups already-seen memories into pointers without losing anything. Full suite: 1019 passed, 4 skipped."
 }

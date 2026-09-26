@@ -686,8 +686,11 @@ class TestSharedCrossEncoder:
 
         monkeypatch.setattr(ort, "InferenceSession", fake_session)
         monkeypatch.setattr("tokenizers.Tokenizer", _FakeTok)
-        # _load_ce imports hf_hub_download inside the function — patch the package.
-        monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
+        # _load_ce downloads via embedding_service._hub_download, which calls
+        # embedding_service's module-level hf_hub_download — patch that name.
+        import roampal.backend.modules.memory.embedding_service as embedding_service_module
+
+        monkeypatch.setattr(embedding_service_module, "hf_hub_download", fake_download)
         monkeypatch.setattr(ss, "_shared_ce_session", None)
         monkeypatch.setattr(ss, "_shared_ce_tokenizer", None)
         return constructed

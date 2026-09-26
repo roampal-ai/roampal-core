@@ -10,6 +10,7 @@ v0.3.6: /api/context-insights removed (hooks/plugin inject context automatically
 
 import sys
 import os
+import time
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from datetime import datetime
@@ -95,6 +96,15 @@ def client(mock_memory, mock_session_manager):
     original_memory_by_profile = dict(main._memory_by_profile)
     original_sm_by_profile = dict(main._session_manager_by_profile)
 
+    # Preseed the PyPI update-check cache: without it get_context makes a
+    # real urlopen() to pypi.org inside the test — non-hermetic, and in a
+    # forked test child on macOS the client construction aborts the whole
+    # process (urllib's getproxies_macosx_sysconf is not fork-safe; Task 28).
+    original_update_cache = main._update_check_cache
+    original_update_time = main._update_check_time
+    main._update_check_cache = (False, "0.6.0", "0.6.0")
+    main._update_check_time = time.time()
+
     # Pre-populate the registry with mocks under 'default' so lazy init is bypassed
     main._memory_by_profile["default"] = mock_memory
     main._session_manager_by_profile["default"] = mock_session_manager
@@ -112,6 +122,8 @@ def client(mock_memory, mock_session_manager):
         yield app, mock_memory, mock_session_manager
 
     # Restore
+    main._update_check_cache = original_update_cache
+    main._update_check_time = original_update_time
     main._memory_by_profile.clear()
     main._memory_by_profile.update(original_memory_by_profile)
     main._session_manager_by_profile.clear()

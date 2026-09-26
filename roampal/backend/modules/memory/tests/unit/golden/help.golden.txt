@@ -1,0 +1,60 @@
+### exit: 0
+--- stdout+stderr ---
+usage: roampal [-h] [--version] <command> ...
+
+roampal - Persistent memory for AI coding assistants
+
+positional arguments:
+  <command>
+    init  Initialize Roampal for Claude Code / OpenCode
+    start  Start the memory server
+    stop  Stop the memory server
+    status  Check server status
+    stats  Show memory statistics
+    ingest  Ingest a document into the books collection
+    remove  Remove a book from the books collection
+    books  List all books in memory
+    summarize  Summarize existing long memories
+    context  Output recent exchange context
+    sidecar  Configure sidecar scoring model
+    retag  Re-extract tags on memories using sidecar LLM
+    doctor  Diagnose installation and configuration
+    profile  Manage named memory profiles
+    reembed  Re-embed stored vectors after an embedder model change
+    help  Show this help message
+
+options:
+  -h, --help  show this help message and exit
+  --version  show program's version number and exit
+
+commands:
+  Setup:
+    init  Initialize for Claude Code / OpenCode
+    doctor  Diagnose installation and configuration
+
+  Server:
+    start  Start the memory server
+    stop  Stop the memory server
+    status  Check server status (--json for scripting)
+    stats  Show memory statistics (--json for scripting)
+
+  Memory:
+    ingest <file>  Add documents to books collection
+    books  List all ingested books
+    remove <title>  Remove a book by title
+    summarize  Summarize long memories (retroactive cleanup)
+
+  Scoring (OpenCode):
+    sidecar status  Check scoring model configuration
+    sidecar setup  Configure scoring model
+    sidecar test  Test scoring model response format
+    sidecar disable  Remove scoring model configuration
+
+  Advanced:
+    context  Output recent exchange context
+
+examples:
+  roampal init --claude-code  Set up for Claude Code
+  roampal init --no-input  Non-interactive setup (CI/scripts)
+  roampal status --json  Machine-readable status
+  roampal stats --json  Machine-readable statistics

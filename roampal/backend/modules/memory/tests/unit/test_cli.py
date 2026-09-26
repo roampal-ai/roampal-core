@@ -35,6 +35,17 @@ def _isolate_xdg_config_home(monkeypatch):
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _run_in_temp_cwd(monkeypatch, tmp_path):
+    """configure_claude_code writes a project .mcp.json into Path.cwd(), and
+    `roampal init` project scope writes opencode.json there. Run every test
+    from a temp dir so the suite never rewrites the developer's real
+    repo-root .mcp.json (it used to, on every run)."""
+    work = tmp_path / "cwd"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+
 # ============================================================================
 # Helper Tests
 # ============================================================================
@@ -214,8 +225,13 @@ class TestConfigureOpencode:
             assert "-m" in mcp_config["command"]
             assert "roampal.mcp.server" in mcp_config["command"]
 
-    def test_pythonpath_in_environment(self, tmp_path):
-        """configure_opencode includes PYTHONPATH for module resolution."""
+    def test_no_pythonpath_in_environment(self, tmp_path):
+        """v0.6.0 round 2: PYTHONPATH REMOVED from the OpenCode MCP env —
+        (a) the written command runs with -E, which ignores PYTHONPATH;
+        (b) the CLI split moved this file one folder deeper, so the
+        pre-split package-root computation now yields site-packages/roampal
+        (the package dir), and without -E that path would make `import mcp`
+        load roampal's own mcp/ folder instead of the real MCP package."""
         from roampal.cli import configure_opencode
 
         config_dir = tmp_path / ".config" / "opencode"
@@ -233,9 +249,12 @@ class TestConfigureOpencode:
         if config_file.exists():
             config = json.loads(config_file.read_text())
             env = config["mcp"]["roampal-core"].get("environment", {})
-            assert "PYTHONPATH" in env
-            # PYTHONPATH should point to roampal's parent (so `import roampal` works)
-            assert os.path.isabs(env["PYTHONPATH"])
+            assert "PYTHONPATH" not in env, (
+                "PYTHONPATH must not be written anymore (dead under -E; "
+                "the split-era path pointed at the package dir, which "
+                "shadows the real mcp package without -E)"
+            )
+            assert env.get("ROAMPAL_PLATFORM") == "opencode"
 
     def test_dev_mode_adds_env_var(self, tmp_path):
         """configure_opencode with is_dev=True adds ROAMPAL_DEV to env."""
@@ -270,11 +289,17 @@ class TestConfigureOpencode:
 
         # Pre-create matching config (must include ROAMPAL_PLATFORM for v0.3.6+)
         roampal_root = str(Path(roampal.cli.__file__).parent.parent.resolve())
+        from roampal.profile_manager import spawn_isolation_flags
+        mcp_args = [*spawn_isolation_flags(), "-m", "roampal.mcp.server"]
         config = {
             "mcp": {
                 "roampal-core": {
                     "type": "local",
-                    "command": [sys.executable, "-m", "roampal.mcp.server"],
+                    # v0.6.0 review fix 1: seeded config uses the -E [-P]
+                    # shape roampal now writes; a pre-fix entry (bare "-m" or
+                    # Task 36's "-I") matches the update path instead (the
+                    # idempotent shape is the current one).
+                    "command": [sys.executable, *mcp_args],
                     "enabled": True,
                     "environment": {"PYTHONPATH": roampal_root, "ROAMPAL_PLATFORM": "opencode"}
                 }
@@ -298,13 +323,15 @@ class TestConfigureOpencode:
     def test_plugin_install(self, tmp_path):
         """configure_opencode copies plugin to plugin directory."""
         from roampal.cli import configure_opencode
-        import roampal.cli
+        import roampal
 
         config_dir = tmp_path / ".config" / "opencode"
         config_dir.mkdir(parents=True)
 
-        # Check if plugin source exists
-        plugin_source = Path(roampal.cli.__file__).parent / "plugins" / "opencode" / "roampal.ts"
+        # Check if plugin source exists (v0.6.0: derive from the roampal
+        # package root, not roampal.cli.__file__ — the CLI became a package,
+        # so its __file__ no longer sits one level above roampal/plugins)
+        plugin_source = Path(roampal.__file__).parent / "plugins" / "opencode" / "roampal.ts"
 
         # Patch XDG_CONFIG_HOME so Linux CI doesn't bypass the Path.home() mock
         fake_env = {"XDG_CONFIG_HOME": str(tmp_path / ".config")}
@@ -471,6 +498,65 @@ class TestConfigureOpencodeParseFailure:
 
 class TestConfigureClaudeCode:
     """Test configure_claude_code() function."""
+
+    def _configure(self, tmp_path, **kwargs):
+        from roampal.cli import configure_claude_code
+
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.validate_roampal_importable", return_value=True), \
+             patch("builtins.print"):
+            configure_claude_code(claude_dir, is_dev=False, **kwargs)
+
+    def test_scope_user_writes_no_project_mcp_json(self, tmp_path):
+        """--scope user = global config only; no .mcp.json in the cwd."""
+        self._configure(tmp_path, scope="user")
+        assert not (Path.cwd() / ".mcp.json").exists()
+        # The global (user-scope) entry is still written.
+        claude_json = json.loads((tmp_path / ".claude.json").read_text())
+        assert "roampal-core" in claude_json["mcpServers"]
+
+    def test_default_scope_never_creates_project_mcp_json(self, tmp_path):
+        """v0.6.0 Task 40 rule D: default scope (no --scope) never CREATES a
+        project .mcp.json (the user-scope ~/.claude.json entry already covers
+        Claude Code); --scope project|both still create it. This replaces
+        test_default_scope_still_writes_project_mcp_json, which pinned the
+        0.5.9 default of always writing one."""
+        for scope, expect_created in ((None, False), ("project", True), ("both", True)):
+            (Path.cwd() / ".mcp.json").unlink(missing_ok=True)
+            self._configure(tmp_path, scope=scope)
+            assert (Path.cwd() / ".mcp.json").exists() is expect_created, scope
+
+    def test_default_scope_upgrades_existing_project_mcp_json(self, tmp_path):
+        """v0.6.0 Task 40 rule D: default scope updates an existing .mcp.json
+        that already carries roampal-core, keeping its other servers."""
+        cwd_mcp = Path.cwd() / ".mcp.json"
+        cwd_mcp.write_text(json.dumps({
+            "mcpServers": {
+                "other-server": {"command": "other", "args": ["x"]},
+                "roampal-core": {"stale": True},
+            }
+        }))
+        self._configure(tmp_path, scope=None)
+        updated = json.loads(cwd_mcp.read_text())
+        assert "stale" not in updated["mcpServers"]["roampal-core"]
+        assert "other-server" in updated["mcpServers"]
+
+    def test_default_scope_leaves_foreign_project_mcp_json(self, tmp_path):
+        """v0.6.0 Task 40 rule D: an existing .mcp.json WITHOUT roampal-core
+        is left byte-identical under default scope."""
+        cwd_mcp = Path.cwd() / ".mcp.json"
+        content = '{"mcpServers": {"mine": {"command": "x"}}}'
+        cwd_mcp.write_text(content)
+        self._configure(tmp_path, scope=None)
+        assert cwd_mcp.read_text() == content
+
+    def test_tests_never_touch_the_real_repo_cwd(self):
+        """The module's autouse fixture runs every test from a temp dir, so
+        configure_claude_code's project write can't hit the real repo."""
+        repo_root = Path(__file__).resolve().parents[6]
+        assert Path.cwd().resolve() != repo_root
 
     def test_creates_settings_with_hooks(self, tmp_path):
         """configure_claude_code creates settings.json with hooks."""
@@ -652,6 +738,40 @@ class TestConfigureCursor:
 
 class TestCmdInit:
     """Test cmd_init() auto-detection and explicit flags."""
+
+    def _run_init_opencode(self, tmp_path, *, interactive):
+        from roampal.cli import cmd_init
+
+        args = MagicMock()
+        args.claude_code = False
+        args.cursor = False
+        args.opencode = True
+        args.dev = False
+        args.force = True
+        args.scope = None
+
+        printed = []
+        with patch("roampal.cli.Path.home", return_value=tmp_path), \
+             patch("roampal.cli.configure_opencode"), \
+             patch("roampal.cli._is_interactive", return_value=interactive), \
+             patch("roampal.cli._prompt_smart_onboarding") as mock_picker, \
+             patch("roampal.cli.collect_email"), \
+             patch("roampal.cli.print_banner"), \
+             patch("roampal.cli.print_update_notice"), \
+             patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+            cmd_init(args)
+        return mock_picker, "\n".join(printed)
+
+    def test_no_input_skips_sidecar_picker(self, tmp_path):
+        """--no-input / non-TTY: the model picker is skipped, not shown and
+        left blocking on input()."""
+        mock_picker, out = self._run_init_opencode(tmp_path, interactive=False)
+        mock_picker.assert_not_called()
+        assert "roampal sidecar setup" in out
+
+    def test_interactive_init_still_offers_sidecar_picker(self, tmp_path):
+        mock_picker, _ = self._run_init_opencode(tmp_path, interactive=True)
+        mock_picker.assert_called_once()
 
     def test_explicit_opencode_flag(self, tmp_path):
         """--opencode flag configures OpenCode."""
@@ -1573,6 +1693,155 @@ class TestScopeAwareSidecarSetup:
 
         printed = " ".join(str(c) for c in mock_print.call_args_list)
         assert "no opencode.json" in printed.lower() or "run roampal init" in printed.lower()
+
+
+class TestCmdStatusTimeoutIsStopped:
+    """Task 27: ConnectTimeout must report server 'stopped', not 'error'.
+
+    Product contract: on an unoccupied/hanging address:port the actionable
+    state for the user is the same as a refused connection (the golden for
+    `status --json` was deliberately regenerated on this change)."""
+
+    def test_both_connect_failures_report_stopped(self):
+        from roampal.cli.server import cmd_status
+        import httpx
+
+        args = MagicMock()
+        args.json_output = True
+        args.host = None
+        args.port = 29191
+        args.dev = False
+        code = None
+        with patch("roampal.cli.server.httpx.get",
+                   side_effect=httpx.ConnectTimeout("timed out")), \
+             patch("builtins.print") as mock_print, \
+             patch("roampal.cli.Path.home", return_value=Path.home()):
+            code = cmd_status(args)
+        assert code == 1
+        data = json.loads([
+            str(c.args[0]) for c in mock_print.call_args_list
+            if c.args and str(c.args[0]).lstrip().startswith("{")
+        ][0])
+        assert data["server"]["status"] == "stopped", data
+
+    def test_connect_refusal_also_stopped(self):
+        from roampal.cli.server import cmd_status
+        import httpx
+
+        args = MagicMock()
+        args.json_output = True
+        args.host = None
+        args.port = 29191
+        args.dev = False
+        with patch("roampal.cli.server.httpx.get",
+                   side_effect=httpx.ConnectError("refused")), \
+             patch("builtins.print") as mock_print, \
+             patch("roampal.cli.Path.home", return_value=Path.home()):
+            code = cmd_status(args)
+        assert code == 1
+        data = json.loads([
+            str(c.args[0]) for c in mock_print.call_args_list
+            if c.args and str(c.args[0]).lstrip().startswith("{")
+        ][0])
+        assert data["server"]["status"] == "stopped", data
+
+
+# ============================================================================
+# Server Launch Pin Lifecycle (v0.6.0 review fix 5)
+# ============================================================================
+
+class TestServerPinLifecycle:
+    """`roampal start --profile X` persists the pin; bare start / stop
+    clear it. The respawn sites read the pin file so the pinned server's
+    routing identity survives idle retirement."""
+
+    def _isolate(self, monkeypatch, tmp_path):
+        import roampal.profile_manager as pm
+
+        monkeypatch.setattr(pm, "_config_dir", lambda: tmp_path / "config")
+        # cmd_start sets ROAMPAL_PROFILE for its own process — restore it
+        # after the test so the env never leaks into later tests.
+        monkeypatch.delenv("ROAMPAL_PROFILE", raising=False)
+        return pm
+
+    def test_cmd_start_pinned_writes_pin(self, tmp_path, monkeypatch):
+        import argparse
+        import json
+        import roampal.profile_manager as pm
+        from roampal.cli.server import cmd_start
+
+        self._isolate(monkeypatch, tmp_path)
+        (tmp_path / "config").mkdir(exist_ok=True)
+        (tmp_path / "config" / "profiles.json").write_text(
+            json.dumps({"work": None}), encoding="utf-8"
+        )
+        args = argparse.Namespace(port=27182, host="127.0.0.1", profile="work", dev=False)
+        with patch("roampal.server.main.start_server"), patch("builtins.print"), \
+             patch.dict(os.environ):
+            cmd_start(args)
+        assert pm.read_server_pin(27182) == "work"
+
+    def test_cmd_start_exempts_from_idle_retirement(self, tmp_path, monkeypatch):
+        """v0.6.0 review fix 9: `roampal start` is an explicit launch — the
+        foreground server must NOT self-retire after 30 idle minutes."""
+        import argparse
+        import json
+        from roampal.cli.server import cmd_start
+
+        self._isolate(monkeypatch, tmp_path)
+        (tmp_path / "config").mkdir(exist_ok=True)
+        (tmp_path / "config" / "profiles.json").write_text(
+            json.dumps({"work": None}), encoding="utf-8"
+        )
+        args = argparse.Namespace(port=27182, host="127.0.0.1", profile="work", dev=False)
+        with patch("roampal.server.main.start_server") as mock_start, \
+             patch("builtins.print"), \
+             patch.dict(os.environ):
+            cmd_start(args)
+        assert mock_start.call_args.kwargs.get("idle_retire") is False
+
+    def test_cmd_start_bare_clears_pin(self, tmp_path, monkeypatch):
+        import argparse
+        import roampal.profile_manager as pm
+        from roampal.cli.server import cmd_start
+
+        self._isolate(monkeypatch, tmp_path)
+        pm.write_server_pin(27182, "stale")
+        args = argparse.Namespace(port=27182, host="127.0.0.1", profile=None, dev=False)
+        with patch("roampal.server.main.start_server"), patch("builtins.print"), patch.dict(os.environ):
+            cmd_start(args)
+        assert pm.read_server_pin(27182) is None
+
+    def test_cmd_start_unregistered_profile_leaves_no_pin(self, tmp_path, monkeypatch):
+        """fix 5: an aborted start (unregistered profile) must not leave a
+        pin behind — later auto-starts would 404 against it."""
+        import argparse
+        import roampal.profile_manager as pm
+        from roampal.cli.server import cmd_start
+
+        self._isolate(monkeypatch, tmp_path)
+        args = argparse.Namespace(port=27182, host="127.0.0.1", profile="ghost", dev=False)
+        with patch("roampal.server.main.start_server") as mock_start, \
+             patch("builtins.print"), \
+             patch.dict(os.environ):
+            code = cmd_start(args)
+        assert code == 1
+        mock_start.assert_not_called()
+        assert pm.read_server_pin(27182) is None
+
+    def test_cmd_stop_clears_pin(self, tmp_path, monkeypatch):
+        import argparse
+        import roampal.profile_manager as pm
+        from roampal.cli.server import cmd_stop
+
+        self._isolate(monkeypatch, tmp_path)
+        pm.write_server_pin(27182, "work")
+        args = argparse.Namespace(port=27182, dev=False)
+        with patch("roampal.cli.server._stop_server_on_port", return_value=True), \
+             patch("builtins.print"):
+            code = cmd_stop(args)
+        assert code == 0
+        assert pm.read_server_pin(27182) is None
 
 
 if __name__ == "__main__":

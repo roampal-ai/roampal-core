@@ -1,0 +1,4 @@
+### exit: 1
+--- stdout+stderr ---
+Active profile 'main' is not registered.
+Register or create it: roampal profile create main

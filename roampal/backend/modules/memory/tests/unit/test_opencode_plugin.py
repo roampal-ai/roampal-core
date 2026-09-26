@@ -155,28 +155,177 @@ class TestSelfHealing:
         """restartServer polls /api/health after starting server."""
         assert "/api/health" in plugin_source
 
-    def test_get_context_retries_on_503(self, plugin_source):
-        """getContextFromRoampal retries after 503."""
-        # Should have a 503 check in getContextFromRoampal
-        assert "503" in plugin_source
-        # Should call restartServer on 503
-        assert re.search(r'response\.status\s*===\s*503.*restartServer', plugin_source, re.DOTALL)
+    def test_get_context_503_routes_through_health_gated_restart(self, plugin_source):
+        """v0.6.0 review fix 2: a response 503 is a BROKEN server (dead
+        embed service / failed profile init — never busy). The 503 branch
+        routes through restartServer(), which health-gates: a healthy
+        server is untouched (Task 23 F2), a degraded one is replaced; then
+        the request is retried once."""
+        check_block = re.search(
+            r"if \(!response\.ok\) \{.*?\n    \}", plugin_source, re.DOTALL
+        )
+        assert check_block is not None
+        block = check_block.group(0)
+        assert "response.status === 503" in block
+        assert "restartServer()" in block, (
+            "503 branch must route through the health-gated restart "
+            "(fix 2: 503 = broken, and only the health gate decides)"
+        )
+        assert "setTimeout" in block  # brief backoff before the health gate
 
-    def test_get_context_retries_on_503(self, plugin_source):
-        """getContext retries after 503 (storeExchange removed in v0.4.8)."""
-        restart_calls = plugin_source.count("await restartServer()")
-        assert restart_calls >= 2  # 2 in getContext (503 + catch)
+    def test_get_context_restarts_only_on_connection_failure(self, plugin_source):
+        """Connection DOWN -> the single restart path (health-first guard
+        inside restartServer makes it a no-op for an answering server)."""
+        # The catch (connection failure) branch still restarts.
+        catch_block = re.search(
+            r"\} catch \(error\) \{.*?restartServer", plugin_source, re.DOTALL
+        )
+        assert catch_block is not None
+
+    def test_get_context_404_surfaces_server_detail(self, plugin_source):
+        """v0.6.0 review fix 8: a profile-404 surfaces the server's
+        actionable detail (it names the exact fix command) instead of a
+        bare status code — and triggers no restart (404 is deterministic)."""
+        check_block = re.search(
+            r"if \(!response\.ok\) \{.*?\n    \}", plugin_source, re.DOTALL
+        )
+        assert check_block is not None
+        block = check_block.group(0)
+        assert "response.status === 404" in block
+        assert "err?.detail" in block
+        assert "restartServer" not in block.split("response.status === 404")[1].split("console.error")[0]
+
+    def test_restart_repasses_launch_pin(self, plugin_source):
+        """v0.6.0 review fix 5: the plugin re-passes the launch pin on
+        respawn (per-port pin file matching profile_manager's write)."""
+        fn = re.search(
+            r"async function restartServer\(\).*?\n\}", plugin_source, re.DOTALL
+        )
+        assert fn is not None
+        body = fn.group(0)
+        assert "server_pin_${port}.txt" in body, "pin file path mismatch"
+        assert 'args.push("--profile", pin)' in body
 
     def test_detached_server_spawn(self, plugin_source):
         """Server is spawned detached so it outlives the plugin."""
         assert "detached: true" in plugin_source
+
+    def test_restart_health_first_never_kills_answering_server(self, plugin_source):
+        """Task 23, amended by fix 2: restartServer probes /api/health
+        BEFORE any kill — a 200 server returns immediately; any non-503
+        HTTP answer is left alone (foreign port holder); only 503 or
+        connection failure reaches the kill path."""
+        fn = re.search(
+            r"async function restartServer\(\).*?\n\}", plugin_source, re.DOTALL
+        )
+        assert fn is not None
+        body = fn.group(0)
+        health_guard_pos = body.find('const probe = await fetch(healthUrl')
+        netstat_pos = body.find('execSync("netstat -ano"')
+        assert health_guard_pos != -1, "health-first guard missing"
+        assert netstat_pos != -1
+        assert health_guard_pos < netstat_pos, "restart must health-check before any kill"
+        assert "if (probe.status !== 503) return true" in body, (
+            "fix 2: non-503 HTTP answers must never trigger a kill"
+        )
+
+    def test_restart_single_flight_lock(self, plugin_source):
+        """Task 23: cross-process lock file (proc_lock contract) around the
+        restart — exclusive create + staleness recovery + guaranteed release."""
+        fn = re.search(
+            r"async function restartServer\(\).*?\n\}", plugin_source, re.DOTALL
+        )
+        assert fn is not None
+        body = fn.group(0)
+        assert re.search(
+            r"server_restart_\$\{port\}\.lock", body
+        ), "lock file missing"
+        assert re.search(r"\{ flag: \"wx\" \}", body), "exclusive-create missing"
+        # v0.6.0 review fix 6: staleness bound must exceed the restarter's
+        # worst-case hold (~26s) — 45s matches the Python token TTL.
+        assert "lockStaleMs = 45000" in body, "stale-lock TTL below worst-case hold"
+        # fix 6: ownership-checked release — the unlock reads the lock and
+        # compares to OUR pid before unlinking.
+        assert re.search(
+            r"readFileSync\(lockPath[\s\S]*?===\s*String\(process\.pid\)[\s\S]*?unlinkSync\(lockPath\)",
+            body,
+        ), "release must verify ownership before unlinking"
+
+    def test_lock_path_matches_python_config_dir(self, plugin_source):
+        """Task 23 double-check: the plugin's lock base must equal
+        profile_manager._config_dir() on every platform, or the
+        single-flight silently splits across seams (Windows/macOS
+        discrepancy found and fixed during review)."""
+        # win32: APPDATA\Roampal
+        assert re.search(
+            r'\s*join\(process\.env\.APPDATA.*"Roampal"\)', plugin_source
+        )
+        # darwin: ~/Library/Application Support/Roampal
+        assert re.search(
+            r'"Library", "Application Support", "Roampal"', plugin_source
+        )
+        # linux: <xdg-config>/roampal (lowercase, matching profile_manager)
+        assert re.search(
+            r'join\(process\.env\.XDG_CONFIG_HOME.*"roampal"\)', plugin_source, re.DOTALL
+        )
 
 
 # ============================================================================
 # Caching Architecture
 # ============================================================================
 
+class TestCwdHeaderBinding:
+    """Round 2 Item 6 / Task 19: the plugin honors bindings by sending the
+    project directory when its own resolution is empty; the server resolves
+    that binding. Plugin priorities stay intact (structural validation)."""
+
+    def test_cached_worktree_tracked(self, plugin_source):
+        """refreshProfile stores the resolved worktree for the cwd header."""
+        assert "let _cachedWorktree" in plugin_source
+        assert "_cachedWorktree = worktree" in plugin_source
+
+    def test_cwd_header_sent_when_resolution_empty(self, plugin_source):
+        """roampalHeaders sends X-Roampal-Cwd instead of a bare request.
+        v0.6.0 review fix 4: percent-encoded — header values cannot carry
+        characters above Latin-1, and Node's fetch throws on raw
+        Cyrillic/CJK project paths (non-Latin Windows usernames)."""
+        assert 'h["X-Roampal-Cwd"] = encodeURIComponent(_cachedWorktree || process.cwd())' in plugin_source
+        assert 'h["X-Roampal-Cwd"] = _cachedWorktree' not in plugin_source
+
+    def test_restart_creates_lock_folder_first(self, plugin_source):
+        """v0.6.0 review fix 7: the config dir is mkdir'd BEFORE the
+        exclusive-create lock attempt — on a fresh machine the dir does
+        not exist yet (on Linux it is a different root than the data dir),
+        and every wx write would fail with ENOENT, so the plugin could
+        never restart the server. (The Python restarter mkdirs inside
+        proc_lock.acquire.)"""
+        fn = re.search(
+            r"async function restartServer\(\).*?\n\}", plugin_source, re.DOTALL
+        )
+        assert fn is not None
+        body = fn.group(0)
+        mkdir_pos = body.find("mkdirSync(configBase")
+        lock_pos = body.find('{ flag: "wx" }')
+        assert mkdir_pos != -1, "config-dir mkdir missing"
+        assert lock_pos != -1
+        assert mkdir_pos < lock_pos, "must create the config dir before the lock attempt"
+
+    def test_profile_header_still_wins(self, plugin_source):
+        """env / per-project / user-global resolution keeps X-Roampal-Profile."""
+        assert 'h["X-Roampal-Profile"] = _cachedProfile' in plugin_source
+
+    def test_resolution_priorities_unchanged(self, plugin_source):
+        """Priority 1/2/3 unchanged: env var > project opencode.json > user-global."""
+        assert "const envProfile = process.env.ROAMPAL_PROFILE" in plugin_source
+        assert 'config?.mcp?.["roampal-core"]?.environment?.ROAMPAL_PROFILE' in plugin_source
+
+    def test_binding_walk_not_duplicated_in_ts(self, plugin_source):
+        """No local binding-walk re-implementation — the server owns it."""
+        assert "binding_for_cwd" not in plugin_source
+
+
 class TestCachingArchitecture:
+
     """Verify the two-phase caching architecture for split delivery."""
 
     def test_cached_context_map_exists(self, plugin_source):

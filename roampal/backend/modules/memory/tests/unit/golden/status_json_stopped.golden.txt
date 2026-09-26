@@ -1,0 +1,10 @@
+### exit: 1
+--- stdout+stderr ---
+{
+  "mcp": {  "status": "not_found"
+  },
+  "server": {  "status": "stopped",
+    "port": 29191,
+    "mode": "prod"
+  }
+}

@@ -1,0 +1,17 @@
+### exit: 0
+--- stdout+stderr ---
+usage: roampal ingest [-h] [--title TITLE] [--chunk-size CHUNK_SIZE]
+                      [--chunk-overlap CHUNK_OVERLAP] [--dev]
+                      file
+
+positional arguments:
+  file  File to ingest (.txt, .md, .pdf)
+
+options:
+  -h, --help  show this help message and exit
+  --title TITLE  Document title (defaults to filename)
+  --chunk-size CHUNK_SIZE
+                        Characters per chunk (default: 1000)
+  --chunk-overlap CHUNK_OVERLAP
+                        Overlap between chunks (default: 200)
+  --dev  Dev mode - use separate data directory

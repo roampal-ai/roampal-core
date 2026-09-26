@@ -37,8 +37,31 @@ const ROAMPAL_PORT = ROAMPAL_DEV ? 27183 : 27182
 const ROAMPAL_API_URL = `http://127.0.0.1:${ROAMPAL_PORT}/api`  // v0.4.0: single base URL constant
 const ROAMPAL_HOOK_URL = `${ROAMPAL_API_URL}/hooks`
 
+// v0.6.0 Task 37 / 35(2): the RECENT EXCHANGES display cut — mirrored
+// from the one source of truth (roampal/memory_limits.py:
+// RECENT_EXCHANGES_DISPLAY_CUT = 300). test_memory_limits.py asserts the
+// two stay equal. Displayers may slice to this; write paths never cut.
+const RECENT_EXCHANGES_DISPLAY_CUT = 300
+
+// Task 37 chunk B: the summary/takeaway hard cap, mirrored from
+// roampal/memory_limits.py (SUMMARY_TAKEAWAY_MAX = 600). The server rejects
+// over-limit summary writes with HTTP 400; the client pre-checks nothing —
+// this constant drives the re-ask's sanity bound and the parity test.
+const SUMMARY_TAKEAWAY_MAX = 600
+
+// Task 37 chunk B: word-boundary display cut — clipped entries end in "…"
+// (mirrors the Python formatter and the cold-start profile cut). The model
+// is told per-block to use search_memory for full text of "…" lines.
+function clipDisplay(body: string): string {
+  if (!body || body.length <= RECENT_EXCHANGES_DISPLAY_CUT) return body || "No content"
+  const cut = body.slice(0, RECENT_EXCHANGES_DISPLAY_CUT)
+  const boundary = cut.lastIndexOf(" ")
+  const trimmed = (boundary > 0 ? cut.slice(0, boundary) : cut).trimEnd()
+  return (trimmed || cut) + "…"
+}
+
 // Debug logging to file (console.log leaks into OpenCode UI on some platforms)
-import { appendFileSync, readFileSync, statSync, writeFileSync } from "fs"
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs"
 import { join } from "path"
 const DEBUG_LOG = join(process.env.APPDATA || process.env.HOME || ".", "roampal_plugin_debug.log")
 const DEBUG_LOG_MAX_BYTES = 1024 * 1024  // 1 MB — rotate by truncating to last 256KB
@@ -60,6 +83,15 @@ function debugLog(msg: string) {
 // Mirrors MCP server-side _get_mcp_profile_name() so OpenCode hits the right
 // profile instead of defaulting to active_profile_name() on the server.
 //
+// v0.6.0 Tasks 14/18/19 (client-seam wiring, profile routing contract):
+// when the plugin's own resolution comes up empty the plugin no longer
+// sends a bare request. It sends `X-Roampal-Cwd: <project dir>` and the
+// SERVER resolves that directory's binding for the request (use -> default
+// when unbound). There is still NO local re-implementation of the binding
+// walk in TypeScript — the server owns it; Task 17's contract says a
+// headerless request falls to `use` -> default, never the server's own
+// cwd/env (F1), so the plugin must name its project explicitly.
+//
 // v0.5.5.1: Desktop project-switch fix (#10).
 // The plugin receives a client from OpenCode that has project.current().
 // This queries Desktop's HTTP API (localhost:4096) for the currently active
@@ -68,6 +100,7 @@ function debugLog(msg: string) {
 // (before any API calls), so the correct profile is used for the exchange.
 let _pluginClient: any = null
 let _cachedProfile: string = ""
+let _cachedWorktree: string = ""
 
 function resolveRoampalProfile(worktree?: string): string {
   // Priority 1: explicit env var (CLI: $env:ROAMPAL_PROFILE = "..."; opencode)
@@ -149,13 +182,14 @@ async function _resolveActiveWorktree(sessionID?: string): Promise<string> {
 
 async function refreshProfile(sessionID?: string): Promise<void> {
   const worktree = await _resolveActiveWorktree(sessionID)
+  _cachedWorktree = worktree
   if (worktree) {
     _cachedProfile = resolveRoampalProfile(worktree)
-    debugLog(`[v0.5.6] refreshProfile: worktree=${worktree} → profile=${_cachedProfile || "(none)"}`)
+    debugLog(`[v0.5.6] refreshProfile: worktree=${worktree} → profile=${_cachedProfile || "(cwd header)"}`)
     return
   }
   _cachedProfile = resolveRoampalProfile()
-  debugLog(`[v0.5.6] refreshProfile: no worktree from APIs, fell back to cwd → profile=${_cachedProfile || "(none)"}`)
+  debugLog(`[v0.5.6] refreshProfile: no worktree from APIs, fell back to cwd → profile=${_cachedProfile || "(cwd header)"}`)
 }
 
 let _roampalProfileResolved = false
@@ -163,11 +197,23 @@ let _roampalProfileResolved = false
 function roampalHeaders(): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" }
   if (!_roampalProfileResolved) {
-    debugLog(`[v0.5.6] Resolved profile: ${_cachedProfile || "(default — no header)"}`)
+    debugLog(`[v0.5.6] Resolved profile: ${_cachedProfile || `"(cwd header: ${_cachedWorktree || process.cwd()})"`}`)
     _roampalProfileResolved = true
   }
   if (_cachedProfile) {
     h["X-Roampal-Profile"] = _cachedProfile
+  } else {
+    // Task 19: no env / per-project / user-global override — name the
+    // project directory and let the server resolve its binding for THIS
+    // request (falling to use -> default when unbound).
+    // v0.6.0 review fix 4: percent-encode the value. Header values cannot
+    // carry characters above Latin-1 — Node's fetch THROWS on raw
+    // Cyrillic/CJK project paths (common: non-Latin Windows usernames),
+    // which failed every plugin call into the restart branch and turned
+    // memory off. The server unquotes (server/main.py); encodeURIComponent
+    // leaves plain ASCII paths byte-identical, so pre-fix servers only
+    // lose cwd routing until they're updated (fall to use -> default).
+    h["X-Roampal-Cwd"] = encodeURIComponent(_cachedWorktree || process.cwd())
   }
   return h
 }
@@ -236,7 +282,7 @@ const scoringQueue: _ScoringQueueItem[] = []
 // OpenCode passes MCP env vars to MCP server subprocesses but NOT to plugins, so we read
 // the config file directly instead of process.env.
 // Fallback: process.env still checked for manual/testing overrides.
-function _loadSidecarConfig(): { url: string; key: string; model: string; disabled: boolean; allowSubagents: boolean } {
+function _loadSidecarConfig(): { url: string; key: string; model: string; priority: string; disabled: boolean; allowSubagents: boolean } {
   try {
     // v0.4.0: Respect XDG_CONFIG_HOME on Linux
     const configDir = process.env.XDG_CONFIG_HOME || join(
@@ -251,6 +297,7 @@ function _loadSidecarConfig(): { url: string; key: string; model: string; disabl
       url: env.ROAMPAL_SIDECAR_URL || process.env.ROAMPAL_SIDECAR_URL || "",
       key: env.ROAMPAL_SIDECAR_KEY || process.env.ROAMPAL_SIDECAR_KEY || "",
       model: env.ROAMPAL_SIDECAR_MODEL || process.env.ROAMPAL_SIDECAR_MODEL || "",
+      priority: env.ROAMPAL_SIDECAR_PRIORITY || process.env.ROAMPAL_SIDECAR_PRIORITY || "",
       disabled: (env.ROAMPAL_SIDECAR_DISABLED === "true") || (process.env.ROAMPAL_SIDECAR_DISABLED === "true"),
       allowSubagents: (env.ROAMPAL_ALLOW_SUBAGENTS === "1") || (process.env.ROAMPAL_ALLOW_SUBAGENTS === "1"),
     }
@@ -260,9 +307,40 @@ function _loadSidecarConfig(): { url: string; key: string; model: string; disabl
       url: process.env.ROAMPAL_SIDECAR_URL || "",
       key: process.env.ROAMPAL_SIDECAR_KEY || "",
       model: process.env.ROAMPAL_SIDECAR_MODEL || "",
+      priority: process.env.ROAMPAL_SIDECAR_PRIORITY || "",
       disabled: process.env.ROAMPAL_SIDECAR_DISABLED === "true",
       allowSubagents: process.env.ROAMPAL_ALLOW_SUBAGENTS === "1",
     }
+  }
+}
+
+// Task 41: the interpreter + flags `roampal init` recorded for the MCP server,
+// e.g. ["C:\\...\\python.exe", "-E", "-P", "-m", "roampal.mcp.server"].
+// restartServer reuses it to respawn the shared server with Roampal's own
+// Python — the first Python on PATH is often a DIFFERENT install (dev box
+// 2026-09-25: three Pythons; the repo .venv was first → a plugin restart
+// would start 0.5.9 under 0.6.0 clients) and has no Roampal at all for
+// pipx/venv installs. Same user-global opencode.json _loadSidecarConfig
+// reads; project-level configs are deliberately not consulted for the
+// launch command in v0.6.0 (project merges already decide MCP, and the
+// user-global file is what init writes by default).
+function _loadMcpCommand(): string[] | null {
+  try {
+    const configDir = process.env.XDG_CONFIG_HOME || join(
+      process.env.USERPROFILE || process.env.HOME || ".",
+      ".config"
+    )
+    const configPath = join(configDir, "opencode", "opencode.json")
+    const config = JSON.parse(readFileSync(configPath, "utf-8"))
+    const cmd = config?.mcp?.["roampal-core"]?.command
+    if (Array.isArray(cmd) && cmd.length > 0 && typeof cmd[0] === "string") {
+      const parts = cmd.filter((p): p is string => typeof p === "string")
+      return parts.length > 0 ? parts : null
+    }
+    return null
+  } catch {
+    // No config / corrupt config / no roampal-core MCP entry
+    return null
   }
 }
 const _sidecarCfg = _loadSidecarConfig()
@@ -271,9 +349,19 @@ const CUSTOM_SIDECAR_KEY = _sidecarCfg.key
 const CUSTOM_SIDECAR_MODEL = _sidecarCfg.model
 const SIDECAR_DISABLED = _sidecarCfg.disabled
 const ALLOW_SUBAGENTS = _sidecarCfg.allowSubagents
-debugLog(`Sidecar config loaded: custom=${CUSTOM_SIDECAR_URL ? `${CUSTOM_SIDECAR_MODEL} via ${CUSTOM_SIDECAR_URL}` : "none (zen)"}, disabled=${SIDECAR_DISABLED}, allowSubagents=${ALLOW_SUBAGENTS}`)
+// v0.6.0 Task 38: exchange text leaves the machine ONLY for a backend the user
+// explicitly chose (the v0.5.3 privacy rule; the plugin never honored it and
+// defaulted to Zen since v0.3.7). Chosen = a custom sidecar (URL + model) or
+// the recorded Zen opt-in, ROAMPAL_SIDECAR_PRIORITY containing "zen" (what
+// `roampal sidecar setup` writes when Zen is picked). Nothing chosen = no
+// scoring, summaries or fact extraction; retrieval still works.
+const CUSTOM_SIDECAR_CONFIGURED = !!(CUSTOM_SIDECAR_URL && CUSTOM_SIDECAR_MODEL)
+const ZEN_OPTED_IN = !CUSTOM_SIDECAR_CONFIGURED &&
+  _sidecarCfg.priority.split(",").map(p => p.trim().toLowerCase()).includes("zen")
+const SIDECAR_OFF = SIDECAR_DISABLED || !(CUSTOM_SIDECAR_CONFIGURED || ZEN_OPTED_IN)
+debugLog(`Sidecar config loaded: ${CUSTOM_SIDECAR_CONFIGURED ? `custom=${CUSTOM_SIDECAR_MODEL} via ${CUSTOM_SIDECAR_URL}` : ZEN_OPTED_IN ? "zen (explicit opt-in)" : "none chosen (scoring off)"}, disabled=${SIDECAR_DISABLED}, allowSubagents=${ALLOW_SUBAGENTS}`)
 
-// Zen proxy — default for scoring to save API credits (even for paid users).
+// Zen proxy — used ONLY after an explicit opt-in (ZEN_OPTED_IN, Task 38).
 // Defaults hardcoded; dynamically updated if "opencode" provider seen in chat.params.
 const ZEN_FALLBACK_URL = "https://opencode.ai/zen/v1"
 const ZEN_FALLBACK_KEY = "public"
@@ -336,7 +424,7 @@ let backgroundDrainRunning = false
 
 async function drainPendingScoringQueue(source: string): Promise<void> {
   if (backgroundDrainRunning) return
-  if (SIDECAR_DISABLED || pendingScoringQueue.size === 0) return
+  if (SIDECAR_OFF || pendingScoringQueue.size === 0) return
   backgroundDrainRunning = true
   try {
     const entries = Array.from(pendingScoringQueue.entries())
@@ -383,16 +471,19 @@ function _summaryFingerprint(exchange: { user: string; assistant: string }): str
   return Math.abs(fpHash).toString(16).padStart(8, '0').slice(0, 12)
 }
 
-// v0.5.6 Fix G: Single-shot summary write. Returns true on success or dedup-skip,
-// false on any failure (timeout, non-2xx, network error). Caller decides whether
-// to enqueue for retry.
+// v0.5.6 Fix G: Single-shot summary write. Returns { ok: true } on success or
+// dedup-skip; { ok: false, rejected: true } when the SERVER rejected the write
+// with our too-long message (HTTP 400, Task 37) — a deterministic rejection;
+// { ok: false, rejected: false } on any retriable failure (timeout, non-2xx,
+// network error). Callers re-ask the sidecar on rejection (retries of the same
+// payload can never succeed) and queue only retriable failures.
 async function tryStoreSummary(
   sessionId: string,
   exchange: { user: string; assistant: string },
   summary: string,
   outcome: string,
   fingerprint: string
-): Promise<boolean> {
+): Promise<{ ok: boolean; rejected: boolean; detail: string }> {
   // Dedup check — skip if an entry with this fingerprint already exists.
   // Best-effort: if the dedup query itself fails, proceed with the store
   // (better duplicate than lost), and fall through to the same dedup-by-fingerprint
@@ -414,7 +505,7 @@ async function tryStoreSummary(
       const dedupData = await dedupResp.json() as { count?: number }
       if ((dedupData.count || 0) > 0) {
         debugLog(`tryStoreSummary: SKIP — already exists (fingerprint=${fingerprint})`)
-        return true
+        return { ok: true, rejected: false, detail: "dedup-skip" }
       }
     }
   } catch {
@@ -428,7 +519,7 @@ async function tryStoreSummary(
       headers: roampalHeaders(),
       body: JSON.stringify({
         conversation_id: sessionId,
-        user_message: exchange.user.slice(0, 200),
+        user_message: exchange.user,
         assistant_response: summary,
         metadata: {
           memory_type: "exchange_summary",
@@ -442,12 +533,20 @@ async function tryStoreSummary(
     })
   } catch (err) {
     debugLog(`tryStoreSummary: network/timeout error: ${err}`)
-    return false
+    return { ok: false, rejected: false, detail: `network error: ${err}` }
   }
 
   if (!summaryResp.ok) {
-    debugLog(`tryStoreSummary: failed status=${summaryResp.status}`)
-    return false
+    // v0.6.0 Task 37: the server rejects summaries over 600 chars with HTTP 400
+    // (and NOTHING is stored). HTTP 400 is the deterministic length rejection —
+    // callers re-ask the sidecar with this text; any other non-2xx is retriable.
+    let detail = `summary rejected (HTTP ${summaryResp.status})`
+    try {
+      const body = await summaryResp.json() as { detail?: string }
+      if (body.detail) detail = body.detail
+    } catch { /* best effort */ }
+    debugLog(`tryStoreSummary: ${detail}`)
+    return { ok: false, rejected: summaryResp.status === 400, detail }
   }
 
   let docId = ""
@@ -476,29 +575,94 @@ async function tryStoreSummary(
       // Best effort — summary is stored regardless
     }
   }
-  return true
+  return { ok: true, rejected: false, detail: `stored (${summary.length} chars, doc_id=${docId})` }
+}
+
+// Task 37 chunk B: re-ask the sidecar ONCE to shorten a rejected summary,
+// using the sidecar-reprompt message the server sent (sidecar_reprompt
+// style: "Too long: N/600 chars. Rewrite in ~300 chars, 1-2 sentences.").
+// Returns the shortened summary or "" on any failure. One shot only — no
+// loop: the queue/drainer can never help a deterministic rejection.
+async function reaskShorterSummary(
+  target: { url: string; key: string; model: string },
+  exchange: { user: string; assistant: string },
+  rejectedSummary: string,
+  detail: string
+): Promise<string> {
+  if (!target?.url || !target?.model) return ""
+  const rewritePrompt = `The following exchange summary was rejected by the memory server: ${detail}\nExchange:\nUSER: "${exchange.user.slice(0, 8000)}"\nASSISTANT: "${exchange.assistant.slice(0, 8000)}"\n\nRewrite the summary from scratch: ~300 chars, 1-2 sentences. Respond with ONLY JSON: {"exchange_summary": "..."}`
+  try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "User-Agent": "roampal-sidecar/1.0",
+    }
+    if (target.key) headers["Authorization"] = `Bearer ${target.key}`
+    const resp = await fetch(`${target.url}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: target.model,
+        messages: [
+          { role: "system", content: "/no_think\nYou are part of a memory system. Return ONLY a valid JSON object with a single exchange_summary string field. Be concise." },
+          { role: "user", content: "/no_think\n" + rewritePrompt }
+        ],
+        max_tokens: 2000,
+        temperature: 0,
+      }),
+      signal: AbortSignal.timeout(20000)
+    })
+    if (!resp.ok) {
+      debugLog(`reaskShorterSummary: ${target.model} returned ${resp.status}`)
+      return ""
+    }
+    const data = await resp.json() as { choices?: Array<{ message?: { content?: string; reasoning_content?: string } }> }
+    const msg = data.choices?.[0]?.message || {}
+    const raw = msg.content || msg.reasoning_content || ""
+    const match = raw.match(/\{[\s\S]*\}/)
+    if (!match) {
+      debugLog(`reaskShorterSummary: no JSON in reply from ${target.model}`)
+      return ""
+    }
+    const parsed = JSON.parse(match[0]) as { exchange_summary?: unknown }
+    const shortened = typeof parsed.exchange_summary === "string" ? parsed.exchange_summary.trim() : ""
+    if (!shortened || shortened.length > SUMMARY_TAKEAWAY_MAX) {
+      // still over the cap — discard rather than re-post a doomed payload
+      debugLog(`reaskShorterSummary: reply still too long (${shortened.length} chars)`)
+      return ""
+    }
+    debugLog(`reaskShorterSummary: sidecar rewrote summary ${rejectedSummary.length} -> ${shortened.length} chars`)
+    return shortened
+  } catch (err) {
+    debugLog(`reaskShorterSummary: error from ${target.model}: ${err}`)
+    return ""
+  }
 }
 
 // v0.5.6 Fix G: Drain pendingSummaryQueue. Same backoff/retry semantics as Fix F's
 // scoring drain. Shares the backgroundDrainRunning guard so the two drainers don't
 // race each other (and don't double-pump on consecutive 30s ticks).
 async function drainPendingSummaryQueue(source: string): Promise<void> {
-  if (SIDECAR_DISABLED || pendingSummaryQueue.size === 0) return
+  if (SIDECAR_OFF || pendingSummaryQueue.size === 0) return
   const entries = Array.from(pendingSummaryQueue.entries())
   for (const [pendingSid, payload] of entries) {
     payload.retryAttempts++
     await refreshProfile(pendingSid)
     debugLog(`${source}: Retrying deferred summary for ${pendingSid} (attempt ${payload.retryAttempts}/${PENDING_SUMMARY_MAX_RETRIES})`)
     try {
-      const ok = await tryStoreSummary(pendingSid, payload.exchange, payload.summary, payload.outcome, payload.fingerprint)
-      if (ok) {
+      const result = await tryStoreSummary(pendingSid, payload.exchange, payload.summary, payload.outcome, payload.fingerprint)
+      if (result.ok) {
         pendingSummaryQueue.delete(pendingSid)
         debugLog(`${source}: Deferred summary stored for ${pendingSid}`)
+      } else if (result.rejected) {
+        // Deterministic length rejection — the SAME payload can never pass,
+        // so drop immediately instead of burning the retry budget.
+        pendingSummaryQueue.delete(pendingSid)
+        debugLog(`${source}: Deferred summary rejected for ${pendingSid}: ${result.detail} (dropped — no further retries)`)
       } else if (payload.retryAttempts >= PENDING_SUMMARY_MAX_RETRIES) {
         pendingSummaryQueue.delete(pendingSid)
         debugLog(`${source}: Deferred summary dropped after ${PENDING_SUMMARY_MAX_RETRIES} attempts for ${pendingSid}`)
       } else {
-        debugLog(`${source}: Deferred summary failed for ${pendingSid}, will retry next drain`)
+        debugLog(`${source}: Deferred summary failed for ${pendingSid}, will retry next drain: ${result.detail}`)
       }
     } catch (err) {
       if (payload.retryAttempts >= PENDING_SUMMARY_MAX_RETRIES) {
@@ -590,110 +754,336 @@ interface ScoringTarget {
 
 let _restartInProgress = false
 
+// Task 41: pure launch decision for the plugin's server respawn — no I/O;
+// `fileExists` is injected so the Windows pythonw-sibling probe is testable.
+// `mcpCommand` is what `roampal init` recorded in opencode.json:
+// [<python>, <flags...>, "-m", "roampal.mcp.server"]. The server respawns
+// with the SAME interpreter and flags (module swapped to roampal.server.main
+// and --port added); only when there is no usable config does it fall back
+// to the old PATH behavior ("pythonw" on Windows / "python3" elsewhere,
+// flags -E). Flags come from the config so a 3.11+ install gets -P without
+// the plugin version-checking anything; a config without flags gets -E
+// (pre-0.6.0 shape). useVbs: on Windows a console-subsystem python.exe
+// flashes a console window when spawned detached, so it must go through the
+// hidden VBS launcher — pythonw.exe (GUI subsystem, sibling of the
+// configured python.exe for normal installs and venvs) can spawn directly.
+function resolveServerLaunch(
+  mcpCommand: string[] | null,
+  platform: string,
+  fileExists: (p: string) => boolean,
+  port: number
+): { exe: string; args: string[]; usedFallback: boolean; useVbs: boolean } {
+  const SERVER_MODULE_ARGS = ["-m", "roampal.server.main", "--port", String(port)]
+  const configured = Array.isArray(mcpCommand) ? mcpCommand : null
+  const exe = configured?.[0]
+  if (
+    !configured || configured.length === 0 ||
+    typeof exe !== "string" || exe.trim() === "" ||
+    typeof fileExists !== "function" || !fileExists(exe)
+  ) {
+    return {
+      exe: platform === "win32" ? "pythonw" : "python3",
+      args: ["-E", ...SERVER_MODULE_ARGS],
+      usedFallback: true,
+      // The fallback's own VBS decision needs the PATH probe (I/O) and
+      // stays in restartServer, exactly as before Task 41.
+      useVbs: false,
+    }
+  }
+  // Flags = everything between the interpreter and the "-m" module marker.
+  const mIdx = configured.indexOf("-m")
+  const flags = mIdx > 0 ? configured.slice(1, mIdx) : configured.slice(1)
+  const effectiveFlags = flags.length > 0 ? flags : ["-E"]
+  const args = [...effectiveFlags, ...SERVER_MODULE_ARGS]
+
+  if (platform === "win32") {
+    const sep = exe.includes("\\") ? "\\" : "/"
+    const lastSep = exe.lastIndexOf(sep)
+    const pythonwExe = (lastSep >= 0 ? exe.slice(0, lastSep + 1) : "") + "pythonw.exe"
+    if (fileExists(pythonwExe)) {
+      return { exe: pythonwExe, args, usedFallback: false, useVbs: false }
+    }
+    return { exe, args, usedFallback: false, useVbs: true }
+  }
+  // macOS/Linux: no console-window concern — spawn the configured
+  // interpreter directly (pipx/venv absolute paths).
+  return { exe, args, usedFallback: false, useVbs: false }
+}
+
 async function restartServer(): Promise<boolean> {
   if (_restartInProgress) return false
   _restartInProgress = true
 
   try {
     const { execSync, spawn } = await import("child_process")
+    const { writeFileSync, unlinkSync, statSync, mkdirSync, readFileSync } = await import("fs")
+    const { tmpdir } = await import("os")
     const port = ROAMPAL_PORT
+    const join = (await import("path")).join
 
-    // 1. Kill whatever is on the port
-    try {
-      if (process.platform === "win32") {
-        const result = execSync("netstat -ano", { timeout: 5000, windowsHide: true }).toString()
-        for (const line of result.split("\n")) {
-          if (line.includes(`127.0.0.1:${port}`) && line.includes("LISTENING")) {
-            const pid = line.trim().split(/\s+/).pop()
-            if (pid && /^\d+$/.test(pid)) {
-              execSync(`taskkill /pid ${pid} /f`, { timeout: 5000, windowsHide: true })
-              debugLog(`Killed stale server process ${pid}`)
-            }
-            break
-          }
-        }
-      } else {
-        const result = execSync(`lsof -ti :${port}`, { timeout: 5000 }).toString().trim()
-        if (result) {
-          const pid = result.split("\n")[0]
-          if (/^\d+$/.test(pid)) {
-            execSync(`kill -9 ${pid}`, { timeout: 5000 })
-            debugLog(`Killed stale server process ${pid}`)
-          }
-        }
-      }
-    } catch {
-      // Best effort
-    }
-
-    await new Promise(resolve => setTimeout(resolve, 1000))
-
-    // 2. Start fresh server
-    const devMode = ROAMPAL_DEV
-    const args = ["-m", "roampal.server.main", "--port", String(port)]
-    if (devMode) args.push("--dev")
-
-    if (process.platform === "win32") {
-      // v0.3.7: python.exe is a Windows console app. Node's detached+windowsHide are
-      // mutually exclusive at the Windows API level (CREATE_NO_WINDOW silently ignored
-      // when DETACHED_PROCESS is set). Two approaches:
-      //
-      // 1. pythonw.exe (preferred): GUI subsystem app → no console window at all.
-      //    Server handles None stdout/stderr (redirects to devnull).
-      //    detached: true works cleanly since it's already a GUI app.
-      //
-      // 2. WScript.Shell fallback: Creates a temp VBS script with window style 0 (hidden).
-      //    May produce a brief console flash on some systems.
-      const { execSync: execSyncLocal } = await import("child_process")
-      let usePythonw = false
-      try {
-        execSyncLocal("where pythonw", { timeout: 2000, windowsHide: true, stdio: "pipe" })
-        usePythonw = true
-      } catch {
-        // pythonw not available
-      }
-
-      if (usePythonw) {
-        spawn("pythonw", args, { detached: true, stdio: "ignore" }).unref()
-        debugLog("Server started via pythonw (no console window)")
-      } else {
-        const { writeFileSync, unlinkSync } = await import("fs")
-        const { tmpdir } = await import("os")
-        const { join } = await import("path")
-        const vbsPath = join(tmpdir(), `roampal_start_${Date.now()}.vbs`)
-        const pyCmd = `python ${args.join(" ")}`
-        writeFileSync(vbsPath, `CreateObject("WScript.Shell").Run "${pyCmd}", 0, False`)
-        spawn("wscript", [vbsPath], { detached: true, stdio: "ignore" }).unref()
-        setTimeout(() => { try { unlinkSync(vbsPath) } catch {} }, 5000)
-        debugLog("Server started via WScript.Shell (VBS fallback)")
-      }
-    } else {
-      // Unix: detached so server survives parent exit
-      spawn("python3", args, { detached: true, stdio: "ignore" }).unref()
-    }
-
-    debugLog(`Starting fresh server on port ${port}`)
-
-    // 3. Poll for health
+    // Task 23 (restart only when down), amended by v0.6.0 review fix 2:
+    // a server answering /api/health 200 is never restarted. 503 = the
+    // server reports itself BROKEN (dead embed service / failed profile
+    // init — the server has no 'busy' 503) -> proceed to the single-flight
+    // restart below. Any other HTTP answer (404/500, e.g. a foreign
+    // process squatting the port) = don't kill: we cannot positively
+    // identify a broken roampal (F2). Only connection failure reaches the
+    // restart path via the catch branch.
     const healthUrl = `http://127.0.0.1:${port}/api/health`
-    const start = Date.now()
-    const timeout = 15000
+    try {
+      const probe = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) })
+      if (probe.ok) return true
+      if (probe.status !== 503) return true
+      // 503 -> degraded, fall through to restart
+    } catch { /* down -> proceed to restart */ }
 
-    while (Date.now() - start < timeout) {
+    // Single-flight: cross-process lock file (same contract as the Python
+    // restarter — roampal/utils/proc_lock.py): exclusive create with a
+    // 45s mtime staleness bound (v0.6.0 review fix 6 — must exceed the
+    // restarter's worst-case hold; a crashed holder is recovered by the
+    // next acquirer). THE PATH MUST MATCH profile_manager's _config_dir()
+    // byte-for-byte (APPDATA\Roampal on Windows, ~/Library/Application
+    // Support/Roampal on macOS, <xdg-config>/roampal on Linux) or the
+    // single-flight silently splits across seams.
+    const configBase = process.platform === "win32"
+      ? join(process.env.APPDATA || process.env.USERPROFILE || tmpdir() || process.cwd(), "Roampal")
+      : process.platform === "darwin"
+        ? join(process.env.HOME || process.cwd(), "Library", "Application Support", "Roampal")
+        : join(process.env.XDG_CONFIG_HOME || join(process.env.HOME || process.cwd(), ".config"), "roampal")
+    const lockPath = join(configBase, `server_restart_${port}.lock`)
+    // v0.6.0 review fix 7: create the config dir BEFORE locking. The Python
+    // restarter does this inside proc_lock.acquire; without it here, a
+    // fresh machine (config dir not yet created — on Linux it is a
+    // DIFFERENT root than the data dir the server creates later) fails
+    // every exclusive-create with ENOENT and the plugin can never restart.
+    try { mkdirSync(configBase, { recursive: true }) } catch { /* exists */ }
+    // v0.6.0 review fix 6: the staleness bound must exceed the restarter's
+    // WORST-CASE hold (~26s: 5s netstat + 5s taskkill + 1s pause + up-to
+    // -15s health wait) — 15s let a waiter steal a LIVE lock mid-restart
+    // and spawn a second server. 45s matches the Python token TTL.
+    const lockStaleMs = 45000
+    const lockDeadline = Date.now() + 10000
+    let gotLock = false
+    while (Date.now() < lockDeadline && !gotLock) {
       try {
-        const resp = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) })
-        if (resp.ok) {
-          debugLog("Server restarted successfully")
+        writeFileSync(lockPath, `${process.pid}`, { flag: "wx" })
+        gotLock = true
+      } catch {
+        try {
+          const age = Date.now() - statSync(lockPath).mtimeMs
+          if (age > lockStaleMs) {
+            // Crashed holder — break the stale lock and retry.
+            unlinkSync(lockPath)
+          }
+        } catch { /* vanished on its own */ }
+        if (Date.now() >= lockDeadline) break
+        await new Promise(r => setTimeout(r, 100))
+      }
+    }
+    if (!gotLock) {
+      // Another restarter is mid-restart — wait for ITS health result,
+      // never spawn a second server behind the winner's back.
+      const deadline = Date.now() + 15000
+      while (Date.now() < deadline) {
+        try {
+          const probe = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) })
+          if (probe.ok) {
+            debugLog("Server restarted (by another client)")
+            return true
+          }
+        } catch { /* still coming up */ }
+        await new Promise(r => setTimeout(r, 1000))
+      }
+      return false
+    }
+
+    try {
+      // Re-check under the lock: the winner may have just finished.
+      try {
+        const probe = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) })
+        if (probe.ok) {
+          debugLog("Server restarted (by another client before us)")
           return true
         }
-      } catch {
-        // Not ready yet
-      }
-      await new Promise(resolve => setTimeout(resolve, 1000))
-    }
+      } catch { /* still down */ }
 
-    console.error("[roampal] Server restart timed out")
-    return false
+      // 1. Kill a stale port holder (best effort — nothing answers health)
+      try {
+        if (process.platform === "win32") {
+          const result = execSync("netstat -ano", { timeout: 5000, windowsHide: true }).toString()
+          for (const line of result.split("\n")) {
+            if (line.includes(`127.0.0.1:${port}`) && line.includes("LISTENING")) {
+              const pid = line.trim().split(/\s+/).pop()
+              if (pid && /^\d+$/.test(pid)) {
+                execSync(`taskkill /pid ${pid} /f`, { timeout: 5000, windowsHide: true })
+                debugLog(`Killed stale server process ${pid}`)
+              }
+              break
+            }
+          }
+        } else {
+          const result = execSync(`lsof -ti :${port}`, { timeout: 5000 }).toString().trim()
+          if (result) {
+            const pid = result.split("\n")[0]
+            if (/^\d+$/.test(pid)) {
+              execSync(`kill -9 ${pid}`, { timeout: 5000 })
+              debugLog(`Killed stale server process ${pid}`)
+            }
+          }
+        }
+      } catch {
+        // Best effort
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 1000))
+
+      // 2. Start fresh server
+      const devMode = ROAMPAL_DEV
+      // Task 41: respawn with the interpreter `roampal init` recorded in
+      // opencode.json (mcp["roampal-core"].command) instead of the first
+      // Python on PATH. Flags are carried from the config (a 3.11+ install
+      // gets -P without the plugin version-checking); no config/command/
+      // interpreter → the pre-Task-41 PATH behavior, debugLogged with why.
+      const mcpCommand = _loadMcpCommand()
+      const { existsSync } = await import("fs")
+      const launch = resolveServerLaunch(
+        mcpCommand,
+        process.platform,
+        (p) => { try { return existsSync(p) } catch { return false } },
+        port,
+      )
+      if (launch.usedFallback) {
+        debugLog(
+          mcpCommand
+            ? `Server restart FALLBACK to PATH ${launch.exe}: the configured interpreter file does not exist`
+            : `Server restart FALLBACK to PATH ${launch.exe}: no usable roampal-core command in opencode.json`
+        )
+      } else {
+        debugLog(`Server restart via configured interpreter: ${launch.exe}`)
+      }
+      const args = launch.args
+      // v0.6.0 review fix 5: a respawn of a pinned server re-passes the
+      // launch pin (per-port pin file, same path profile_manager writes).
+      try {
+        const pin = readFileSync(join(configBase, `server_pin_${port}.txt`), "utf8").trim()
+        if (pin) args.push("--profile", pin)
+      } catch { /* unpinned */ }
+      if (devMode) args.push("--dev")
+
+      // Neutral cwd mirrors profile_manager.neutral_spawn_dir() byte-for-byte:
+      // the Roampal DATA base dir (APPDATA\Roampal\data on Windows,
+      // ~/Library/Application Support/Roampal/data on macOS,
+      // <xdg-data>/roampal/data on Linux) — never a Python package root.
+      const dataBase = process.platform === "win32"
+        ? join(process.env.APPDATA || process.env.USERPROFILE || tmpdir() || process.cwd(), "Roampal", "data")
+        : process.platform === "darwin"
+          ? join(process.env.HOME || process.cwd(), "Library", "Application Support", "Roampal", "data")
+          : join(process.env.XDG_DATA_HOME || join(process.env.HOME || process.cwd(), ".local", "share"), "roampal", "data")
+      try { mkdirSync(dataBase, { recursive: true }) } catch { /* exists */ }
+      // Task 17 (profile routing contract): the shared server never reads
+      // ROAMPAL_PROFILE (headerless requests route via persisted `use` ->
+      // default). Strip this plugin's env so one project cannot reach the
+      // server process with ROAMPAL_PROFILE set.
+      const childEnv: Record<string, string> = {}
+      for (const [k, v] of Object.entries(process.env)) {
+        if (k === "ROAMPAL_PROFILE" || v === undefined) continue
+        childEnv[k] = v
+      }
+
+      if (process.platform === "win32") {
+        // v0.3.7: python.exe is a Windows console app. Node's detached+windowsHide are
+        // mutually exclusive at the Windows API level (CREATE_NO_WINDOW silently ignored
+        // when DETACHED_PROCESS is set). Two approaches:
+        //
+        // 1. pythonw.exe (preferred): GUI subsystem app → no console window at all.
+        //    Server handles None stdout/stderr (redirects to devnull).
+        //    detached: true works cleanly since it's already a GUI app.
+        //
+        // 2. WScript.Shell fallback: Creates a temp VBS script with window style 0 (hidden).
+        //    May produce a brief console flash on some systems.
+        //
+        // Task 41: the configured interpreter (from opencode.json) gets the
+        // sibling-pythonw or VBS treatment per resolveServerLaunch; only the
+        // FALLBACK branch still probes PATH (`where pythonw`) and VBS-launches
+        // bare `python` — today's pre-Task-41 behavior, unchanged.
+        const { execSync: execSyncLocal } = await import("child_process")
+        let useVbs: boolean
+        let spawnExe = launch.exe
+        if (launch.usedFallback) {
+          let pythonwOnPath = false
+          try {
+            execSyncLocal("where pythonw", { timeout: 2000, windowsHide: true, stdio: "pipe" })
+            pythonwOnPath = true
+          } catch {
+            // pythonw not available
+          }
+          useVbs = !pythonwOnPath
+          if (!useVbs) spawnExe = "pythonw"
+        } else {
+          useVbs = launch.useVbs
+        }
+
+        if (useVbs) {
+          const vbsPath = join(tmpdir(), `roampal_start_${Date.now()}.vbs`)
+          // Task 41: quote the interpreter (full paths contain spaces);
+          // embedded quotes are doubled for the VBS string literal.
+          const pyCmd = launch.usedFallback
+            ? `python ${args.join(" ")}`
+            : `"${launch.exe}" ${args.join(" ")}`
+          writeFileSync(
+            vbsPath,
+            `CreateObject("WScript.Shell").Run "${pyCmd.replace(/"/g, '""')}", 0, False`
+          )
+          // wscript runs the VBS in ITS cwd; Shell.Run inherits that dir for
+          // the python child, so the wscript spawn itself gets the neutral cwd.
+          spawn("wscript", [vbsPath], { detached: true, stdio: "ignore", env: childEnv, cwd: dataBase }).unref()
+          setTimeout(() => { try { unlinkSync(vbsPath) } catch {} }, 5000)
+          debugLog("Server started via WScript.Shell (VBS fallback)")
+        } else {
+          spawn(spawnExe, args, { detached: true, stdio: "ignore", env: childEnv, cwd: dataBase }).unref()
+          debugLog(
+            launch.usedFallback
+              ? "Server started via pythonw (no console window)"
+              : `Server started via configured pythonw (no console window): ${spawnExe}`
+          )
+        }
+      } else {
+        // Unix: detached so server survives parent exit. Task 41: exe is the
+        // configured interpreter (fallback: bare "python3" as before).
+        spawn(launch.exe, args, { detached: true, stdio: "ignore", env: childEnv, cwd: dataBase }).unref()
+      }
+
+      debugLog(`Starting fresh server on port ${port}`)
+
+      // 3. Poll for health
+      const start = Date.now()
+      const timeout = 15000
+
+      while (Date.now() - start < timeout) {
+        try {
+          const resp = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) })
+          if (resp.ok) {
+            debugLog("Server restarted successfully")
+            return true
+          }
+        } catch {
+          // Not ready yet
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000))
+      }
+
+      console.error("[roampal] Server restart timed out")
+      return false
+    } finally {
+      // v0.6.0 review fix 6: ownership-checked release — only remove the
+      // lock when it still holds OUR pid. If another restarter broke our
+      // lock and re-acquired, ITS lock must be left alone.
+      try {
+        if (readFileSync(lockPath, "utf8").trim() === String(process.pid)) {
+          unlinkSync(lockPath)
+        }
+      } catch { /* already gone */ }
+    }
   } catch (error) {
     console.error("[roampal] Failed to restart server:", error)
     return false
@@ -738,9 +1128,13 @@ async function getContextFromRoampal(
     })
 
     if (!response.ok) {
-      // v0.3.2: Self-healing on 503 (embedding corruption)
+      // v0.6.0 review fix 2: the server's only 503s are BROKEN states
+      // (dead embed service / failed profile init) — never busy. Route
+      // through the health-gated single-flight restart: restartServer()
+      // probes health first, so a healthy server is left untouched
+      // (Task 23 F2) while a degraded one is replaced; then retry once.
       if (response.status === 503) {
-        console.error("[roampal] Server unhealthy (503), attempting restart...")
+        await new Promise(resolve => setTimeout(resolve, 1500))
         if (await restartServer()) {
           const retry = await fetch(`${ROAMPAL_HOOK_URL}/get-context`, {
             method: "POST",
@@ -759,6 +1153,19 @@ async function getContextFromRoampal(
             }
           }
         }
+      }
+      // v0.6.0 review fix 8: surface the server's actionable detail for
+      // profile-404s (the routing contract rejects unknown profiles —
+      // e.g. after `roampal profile delete`) instead of a bare status
+      // code. The detail includes the exact fix command.
+      if (response.status === 404) {
+        try {
+          const err = await response.json()
+          if (err?.detail) {
+            console.error(`[roampal] ${err.detail}`)
+            return { contextOnly: "", injection: "", scoringRequired: false, scoringPromptSimple: "", scoringExchange: null, scoringMemories: null }
+          }
+        } catch { /* not JSON — fall through to the generic message */ }
       }
       console.error(`[roampal] Hook server returned ${response.status}`)
       return { contextOnly: "", injection: "", scoringRequired: false, scoringPromptSimple: "", scoringExchange: null, scoringMemories: null }
@@ -850,6 +1257,9 @@ async function scoreExchangeViaLLM(
   exchange: { user: string; assistant: string },
   memories: Array<{ id: string; content: string }> | null
 ): Promise<boolean> {
+  // Task 38: no chosen backend -> no sidecar call of any kind. "true" = nothing
+  // left to do (never queued for retry, never counted as a failure).
+  if (SIDECAR_OFF) return true
   if (scoringQueueRunning) {
     debugLog(`scoreExchange QUEUED — ${scoringQueue.length + 1} waiting`)
     return new Promise<boolean>((resolve) => {
@@ -949,9 +1359,10 @@ OUTCOME: Based on the user's follow-up:
 - unknown: no clear signal
 ${memoryInstructions}`
 
-    // Build model queue. Simple and explicit — only models the user chose:
+    // Build model queue. Simple and explicit — only backends the user chose:
     //   - User ran `roampal sidecar setup` → chose a model → written as SIDECAR_URL/MODEL
-    //   - Default (no setup): Zen free models only
+    //   - User explicitly opted into Zen → ROAMPAL_SIDECAR_PRIORITY=zen
+    //   - Nothing chosen → SIDECAR_OFF, this function is never reached (Task 38)
     // NEVER scan the full provider config — that would silently use paid API keys.
     const targets: ScoringTarget[] = []
     const mainModel = capturedProvider?.modelID || ""
@@ -969,10 +1380,9 @@ ${memoryInstructions}`
       })
     }
 
-      // 2. Zen free models (best-effort free tier)
-      //    Skipped when user configured a scoring model — they chose for a reason.
-      //    Zen routes through OpenCode's proxy which may log data.
-      if (!CUSTOM_SIDECAR_URL) {
+      // 2. Zen free models (best-effort free tier) — ONLY after the explicit
+      //    opt-in (Task 38). Zen routes through OpenCode's proxy which may log data.
+      if (ZEN_OPTED_IN) {
         const zenModels = ZEN_SCORING_MODELS.filter(m => m !== mainModel)
         if (zenModels.length === 0) zenModels.push(...ZEN_SCORING_MODELS)
         for (const m of zenModels) {
@@ -1176,8 +1586,11 @@ ${memoryInstructions}`
               body: JSON.stringify({
                 conversation_id: sessionId,
                 outcome,
-                memory_scores: memoryScores,
-                exchange_summary: summary || undefined
+                memory_scores: memoryScores
+                // Task 45: no exchange_summary here — tryStoreSummary() below is
+                // the one place the summary is stored (fingerprint, outcome, 600
+                // cap + re-ask). Sending it here too made record-outcome store a
+                // second identical copy of every OpenCode summary.
                 // v0.4.8: noun_tags removed — server extracts tags at store time.
                 // Facts sent separately via Call 2 below.
               })
@@ -1201,18 +1614,37 @@ ${memoryInstructions}`
           // (timeout, non-2xx, network blip) the payload is queued for the
           // background drainer to retry — same self-heal pattern as Fix F's
           // pendingScoringQueue, just for the summary-store side of the pipeline.
+          // v0.6.0 Task 37: the server REJECTS over-length summaries with HTTP 400
+          // and nothing stored. On that deterministic rejection the plugin
+          // RE-ASKS the sidecar (this target, one shot) with the rejection text
+          // per the Task 35/37 spec, then retries the store once. A rejected
+          // summary is never queued for verbatim retries — they can't succeed.
           if (summary) {
             const fingerprint = _summaryFingerprint(exchange)
-            const ok = await tryStoreSummary(sessionId, exchange, summary, outcome, fingerprint)
-            if (!ok) {
-              pendingSummaryQueue.set(sessionId, {
-                exchange,
-                summary,
-                outcome,
-                fingerprint,
-                retryAttempts: 0
-              })
-              debugLog(`scoreExchange: summary store failed — queued for deferred retry (session ${sessionId})`)
+            let storeResult = await tryStoreSummary(sessionId, exchange, summary, outcome, fingerprint)
+            if (!storeResult.ok && storeResult.rejected) {
+              // Task 37: deterministic length rejection — re-ask the sidecar
+              // ONCE with the rejection text, then retry the store.
+              const shorter = await reaskShorterSummary(target, exchange, summary, storeResult.detail)
+              if (shorter) {
+                storeResult = await tryStoreSummary(sessionId, exchange, shorter, outcome, fingerprint)
+              }
+            }
+            if (!storeResult.ok) {
+              if (storeResult.rejected) {
+                // Still rejected (no re-ask rewrite or rewrite also over cap).
+                // Nothing stored, verbatim retries can only fail — drop with a log.
+                debugLog(`scoreExchange: summary rejected and rewrite unavailable — dropped (session ${sessionId}): ${storeResult.detail}`)
+              } else {
+                pendingSummaryQueue.set(sessionId, {
+                  exchange,
+                  summary,
+                  outcome,
+                  fingerprint,
+                  retryAttempts: 0
+                })
+                debugLog(`scoreExchange: summary store failed — queued for deferred retry (session ${sessionId})`)
+              }
             }
           }
 
@@ -1384,7 +1816,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
 
   // v0.5.6 Fix F + G: Start background drainer for pendingScoringQueue and pendingSummaryQueue.
   // Without this, deferred retries only fire on user activity (session.idle).
-  if (!SIDECAR_DISABLED && backgroundDrainTimer === null) {
+  if (!SIDECAR_OFF && backgroundDrainTimer === null) {
     backgroundDrainTimer = setInterval(() => {
       drainPendingScoringQueue("background.drain").catch(err => {
         debugLog(`background.drain: unexpected scoring error: ${err}`)
@@ -1628,7 +2060,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
                     if (lastOutcome) tagParts.push(`last:${lastOutcome}`)
                   }
                   const idStr = docId ? ` [id:${docId}]` : ""
-                  return `• ${body.slice(0, 200)}${idStr} (${tagParts.join(", ")})`
+                  return `• ${clipDisplay(body)}${idStr} (${tagParts.join(", ")})`
                 })
                 .join("\n")
               recentExchanges = `RECENT EXCHANGES (last ${data.results.length}):\n${lines}`
@@ -1686,7 +2118,9 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
       // 0 = healthy, 1 = transient (silent), 2+ = persistent failure (tell user).
       let scoringStatusTag = ""
 
-      if (consecutiveFailures >= 2) {
+      if (SIDECAR_OFF) {
+        scoringStatusTag = `[roampal scoring: off — no scoring model chosen. Memory retrieval works. To enable, the user runs "roampal sidecar setup" (or "roampal sidecar setup --list" to see options).]`
+      } else if (consecutiveFailures >= 2) {
         scoringStatusTag = `[roampal scoring: failed (${consecutiveFailures} consecutive failures). Check sidecar config or run "roampal sidecar setup".]`
       } else if (lastScorerLabel) {
         scoringStatusTag = `[roampal scoring: ok via ${lastScorerLabel}]`
@@ -1701,9 +2135,11 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
       // First-run onboarding — inject once per session to inform model about scoring setup.
       if (!sessionOnboarded.has(sessionId)) {
         sessionOnboarded.add(sessionId)
-        const onboardingMsg = CUSTOM_SIDECAR_URL
-          ? `[roampal memory active | scoring: ${CUSTOM_SIDECAR_MODEL} via ${CUSTOM_SIDECAR_URL}]`
-          : `[roampal memory active | scoring: zen (free, best-effort) | For reliable scoring run: roampal sidecar setup]`
+        const onboardingMsg = SIDECAR_OFF
+          ? `[roampal memory active | scoring: off (no scoring model chosen) | To enable: roampal sidecar setup]`
+          : CUSTOM_SIDECAR_CONFIGURED
+            ? `[roampal memory active | scoring: ${CUSTOM_SIDECAR_MODEL} via ${CUSTOM_SIDECAR_URL}]`
+            : `[roampal memory active | scoring: zen (opted in; free, best-effort — data sent to opencode.ai)]`
         output.system.push(onboardingMsg)
         debugLog(`system.transform: Injected onboarding message for session ${sessionId}`)
       }
@@ -1820,7 +2256,7 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
                   if (lastOutcome) tagParts.push(`last:${lastOutcome}`)
                 }
                 const idStr = docId ? ` [id:${docId}]` : ""
-                return `• ${body.slice(0, 200)}${idStr} (${tagParts.join(", ")})`
+                return `• ${clipDisplay(body)}${idStr} (${tagParts.join(", ")})`
               })
               .join("\n")
             if (output.context && Array.isArray(output.context)) {
@@ -2027,8 +2463,8 @@ export const RoampalPlugin: Plugin = async ({ client }) => {
             if (scoringData) {
               pendingScoringData.delete(sid)
 
-              if (SIDECAR_DISABLED) {
-                debugLog(`session.idle: Sidecar DISABLED (testing) — skipping scoring entirely`)
+              if (SIDECAR_OFF) {
+                debugLog(`session.idle: Sidecar OFF (${SIDECAR_DISABLED ? "disabled" : "no backend chosen"}) — skipping scoring entirely`)
               } else {
                 // v0.5.0: No auto-reset. Counter only resets on success (inside scoreExchangeViaLLM).
                 // Sidecar retries every exchange regardless of consecutiveFailures — never gives up.

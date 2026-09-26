@@ -368,16 +368,29 @@ class TestV052StartServerBanner:
             if args:
                 printed.append(" ".join(str(a) for a in args))
 
-        # v0.5.x fix: mock active_profile_name to avoid reading the system's actual
-        # profile file (which may contain a non-default name like "main" on some machines).
-        default_active = "default" if not profile_name else profile_name
+        # v0.5.x fix: mock the persisted-profile read so the banner doesn't
+        # reflect the system's actual profile file. Round 2 Item 6: the
+        # banner resolves from the explicit pin / persisted fallback —
+        # NEVER env or binding — so mocked binding data isn't consulted.
+        # Round 2 Item 7 / Task 22: start_server now runs through a real
+        # uvicorn.Server so the idle monitor can retire it — stub both
+        # uvicorn.Server/Config and give create_app an object that accepts
+        # the roster-able app.state handle.
+        from unittest.mock import MagicMock
+        from types import SimpleNamespace as _NS
+
+        fake_server = MagicMock()
+        fake_server.run = lambda: None
+        fake_app = MagicMock()
+        fake_app.state = _NS()
         with patch("roampal.profile_manager.Path.home", return_value=tmp_path), \
-             patch("roampal.profile_manager.active_profile_name", return_value=default_active), \
-             patch.object(srv.uvicorn, "run", lambda *a, **kw: None), \
-             patch.object(srv, "create_app", lambda: None), \
+             patch("roampal.profile_manager.read_active_profile_file", return_value=None), \
+             patch.object(srv.uvicorn, "Config", MagicMock()), \
+             patch.object(srv.uvicorn, "Server", MagicMock(return_value=fake_server)), \
+             patch.object(srv, "create_app", lambda: fake_app), \
              patch("builtins.print", side_effect=capture), \
              patch.dict(os.environ, env_patch, clear=False):
-            srv.start_server(host="127.0.0.1", port=27182, dev=False)
+            srv.start_server(host="127.0.0.1", port=27182, dev=False, profile=profile_name)
 
         return "\n".join(printed)
 
@@ -395,21 +408,171 @@ class TestV052StartServerBanner:
         # Resolved path is absolute (starts with drive letter on win, / on unix)
         assert "Data:" in output
 
-    def test_start_banner_shows_profile_line_when_active(self, tmp_path, monkeypatch):
-        """Active non-default profile: banner shows Profile: name (source)."""
-        for k in ("ROAMPAL_DEV", "ROAMPAL_DATA_PATH"):
+    def test_start_banner_shows_pinned_profile_line(self, tmp_path, monkeypatch):
+        """Pinned profile at launch: banner shows Profile: name (startup --profile flag).
+
+        Round 2 Item 6: the pin is passed explicitly (profile=), not read
+        from ROAMPAL_PROFILE — a leaked env must NEVER resolve requests
+        on the shared server, only an explicit `--profile` may pin one.
+        """
+        for k in ("ROAMPAL_PROFILE", "ROAMPAL_DEV", "ROAMPAL_DATA_PATH"):
             monkeypatch.delenv(k, raising=False)
 
         output = self._capture_banner(
             tmp_path,
-            env_patch={"ROAMPAL_PROFILE": "research"},
+            env_patch={},
             profile_name="research",
         )
 
         assert "ROAMPAL SERVER - PROD MODE" in output
-        assert "Profile: research (env)" in output
+        assert "Profile: research (startup --profile flag)" in output
         # Data path should include the profile slug, not raw %APPDATA%.
         assert "%APPDATA%" not in output
+
+    def test_start_banner_ignores_leaked_profile_env(self, tmp_path, monkeypatch):
+        """Round 2 Item 6 / Task 17: ROAMPAL_PROFILE in the server env is
+        ignored — headerless requests would resolve persisted `use` ->
+        default, so the banner must not claim the leaked profile either.
+        """
+        monkeypatch.delenv("ROAMPAL_DEV", raising=False)
+        monkeypatch.delenv("ROAMPAL_DATA_PATH", raising=False)
+        monkeypatch.setenv("ROAMPAL_PROFILE", "research")
+
+        output = self._capture_banner(tmp_path, env_patch={}, profile_name=None)
+
+        assert "Profile:" not in output  # research was never pinned -> default
+        assert "%APPDATA%" not in output
+
+
+class TestIdleSelfRetirement:
+    """Round 2 Item 7 / Task 22: the shared server retires itself after an
+    idle period instead of being killed by whoever launched it."""
+
+    async def _run_monitor(self, monkeypatch, srv, stale_time, expect_exit_after):
+        """Shared monitor-runner: restores the module timestamp after use."""
+        import asyncio
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr(srv, "_IDLE_CHECK_INTERVAL_SECONDS", 0.01)
+        monkeypatch.delenv("ROAMPAL_SERVER_IDLE_TIMEOUT_MINUTES", raising=False)
+        original_time = srv._last_request_time
+        srv._last_request_time = stale_time
+        fake = MagicMock()
+        fake.should_exit = False
+        try:
+            monitor = asyncio.create_task(srv._idle_retire_monitor(fake))
+            try:
+                done, _ = await asyncio.wait({monitor}, timeout=expect_exit_after)
+                return done, fake.should_exit
+            finally:
+                monitor.cancel()
+                try:
+                    await monitor
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            srv._last_request_time = original_time
+
+    async def test_monitor_flips_should_exit_when_idle(self, monkeypatch):
+        import roampal.server.main as srv
+
+        done, should_exit = await self._run_monitor(
+            monkeypatch, srv, stale_time=0.0, expect_exit_after=5.0,
+        )
+        assert done, "monitor never returned"
+        assert should_exit is True
+
+    async def test_monitor_keeps_server_alive_with_recent_requests(self, monkeypatch):
+        import roampal.server.main as srv
+
+        done, should_exit = await self._run_monitor(
+            monkeypatch, srv, stale_time=srv.time.time(), expect_exit_after=0.05,
+        )
+        # The monitor is still running (timed out waiting) -> server alive.
+        assert not done
+        assert should_exit is False
+
+    def test_idle_timeout_env_parsing(self, monkeypatch):
+        import roampal.server.main as srv
+
+        monkeypatch.delenv("ROAMPAL_SERVER_IDLE_TIMEOUT_MINUTES", raising=False)
+        assert srv._idle_timeout_minutes() == 30
+        monkeypatch.setenv("ROAMPAL_SERVER_IDLE_TIMEOUT_MINUTES", "10")
+        assert srv._idle_timeout_minutes() == 10
+        for bad in ("abc", "0", "-5", "3.5"):
+            monkeypatch.setenv("ROAMPAL_SERVER_IDLE_TIMEOUT_MINUTES", bad)
+            assert srv._idle_timeout_minutes() == 30, bad
+
+    def test_default_is_thirty_minutes(self):
+        import roampal.server.main as srv
+
+        assert srv.IDLE_TIMEOUT_DEFAULT_MINUTES == 30
+
+    def test_start_server_idle_retirement_flag(self, tmp_path):
+        """v0.6.0 review fix 9: start_server wires the retirement switch —
+        idle_retire=False (roampal start) disables it; the default (spawned
+        shared servers) keeps it enabled."""
+        from unittest.mock import MagicMock, patch
+        import roampal.server.main as srv
+
+        fake_server = MagicMock()
+        fake_server.run = lambda: None
+        fake_app = MagicMock()
+        fake_app.state = type("S", (), {})()
+        with patch.object(srv.uvicorn, "Config", MagicMock()), \
+             patch.object(srv.uvicorn, "Server", MagicMock(return_value=fake_server)), \
+             patch.object(srv, "create_app", lambda: fake_app), \
+             patch("builtins.print"), \
+             patch.dict(os.environ, {"ROAMPAL_DEV": "0"}, clear=False):
+            srv.start_server(host="127.0.0.1", port=27182, dev=False, idle_retire=False)
+            assert srv._idle_retirement_enabled is False
+            srv.start_server(host="127.0.0.1", port=27182, dev=False)
+            assert srv._idle_retirement_enabled is True
+
+
+class TestHealthProbeSkipsCache:
+    """v0.6.0 review fix 2, part 2 (round 2): with the embedding cache, the
+    first successful health probe stored 'health check' and every later
+    probe returned that stored vector — a dead embedder read as healthy
+    forever (a dead embedder never writes cache entries, so the stored
+    result was never evicted). Health must actually run the model."""
+
+    def test_skip_cache_bypasses_read_and_write(self):
+        from unittest.mock import MagicMock
+        from roampal.backend.modules.memory.embedding_service import EmbeddingService
+        import asyncio
+
+        es = EmbeddingService.__new__(EmbeddingService)
+        es._embed_cache = {}
+        es._embed_cache_max = 32
+        es._encode = MagicMock(side_effect=AssertionError("cached result must not be served"))
+
+        # Cache holds a (stale) vector for the health text.
+        stale = [1.0] * 768
+        es._embed_cache[("passage", "health check")] = stale
+
+        async def run():
+            # skip_cache=True must ignore the cached entry and re-encode —
+            # which here raises via the poisoned _encode (proves the model
+            # path ran instead of the cache read).
+            with pytest.raises(AssertionError):
+                await es.embed_text("health check", role="passage", skip_cache=True)
+
+            # A normal call still serves the cache.
+            inner = MagicMock()
+            inner.tolist.return_value = [0.5] * 768
+            es._encode = MagicMock(return_value=[inner])
+            served = await es.embed_text("health check", role="passage")
+            assert served == stale
+
+            # skip_cache result is NOT written into the cache.
+            inner2 = MagicMock()
+            inner2.tolist.return_value = [0.9] * 768
+            es._encode = MagicMock(return_value=[inner2])
+            await es.embed_text("brand new text", skip_cache=True)
+            assert ("passage", "brand new text") not in es._embed_cache
+
+        asyncio.run(run())
 
 
 if __name__ == "__main__":
